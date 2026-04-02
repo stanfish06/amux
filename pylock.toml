@@ -1,0 +1,12 @@
+lock-version = "1.0"
+environments = []
+default-groups = ["default"]
+created-by = "pipenv"
+
+[[packages]]
+name = "mcp"
+
+[tool.pipenv]
+generated_from = "pyproject.toml"
+project_name = ""
+generation_date = "2026-04-02T18:03:45.446501+00:00"
