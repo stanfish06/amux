@@ -1,4 +1,4 @@
-.PHONY: shell start_fresh clean_full
+.PHONY: shell sync_pylock start_fresh clean_full
 
 shell: sync_pylock
 	pipenv shell

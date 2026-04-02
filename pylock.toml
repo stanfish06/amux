@@ -5,6 +5,112 @@ created-by = "pipenv"
 
 [[packages]]
 name = "mcp"
+version = "1.27.0"
+
+[[packages]]
+name = "pydantic"
+version = "2.12.0"
+
+[[packages]]
+name = "pydantic-core"
+version = "2.41.1"
+
+[[packages]]
+name = "pydantic-settings"
+
+[[packages]]
+name = "anyio"
+version = "4.9"
+
+[[packages]]
+name = "sniffio"
+
+[[packages]]
+name = "annotated_types"
+
+[[packages]]
+name = "httpx"
+
+[[packages]]
+name = "httpx_sse"
+
+[[packages]]
+name = "idna"
+
+[[packages]]
+name = "python-dotenv"
+
+[[packages]]
+name = "starlette"
+
+[[packages]]
+name = "sse_starlette"
+
+[[packages]]
+name = "jsonschema"
+
+[[packages]]
+name = "jsonschema-specifications"
+
+[[packages]]
+name = "attrs"
+
+[[packages]]
+name = "referencing"
+
+[[packages]]
+name = "rpds-py"
+
+[[packages]]
+name = "typer"
+
+[[packages]]
+name = "typing_extensions"
+
+[[packages]]
+name = "typing_inspection"
+
+[[packages]]
+name = "shellingham"
+
+[[packages]]
+name = "python-multipart"
+
+[[packages]]
+name = "pyjwt"
+
+[[packages]]
+name = "pygments"
+
+[[packages]]
+name = "h11"
+
+[[packages]]
+name = "annotated-doc"
+
+[[packages]]
+name = "click"
+
+[[packages]]
+name = "mdurl"
+
+[[packages]]
+name = "uvicorn"
+
+[[packages]]
+name = "markdown-it-py"
+
+[[packages]]
+name = "httpcore"
+
+[[packages]]
+name = "cffi"
+
+[[packages]]
+name = "rich"
+
+[[packages]]
+name = "cryptography"
 
 [tool.pipenv]
 generated_from = "pyproject.toml"
