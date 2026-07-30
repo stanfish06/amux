@@ -4,6 +4,9 @@ default-groups = ["default"]
 created-by = "pipenv"
 
 [[packages]]
+name = "libtmux"
+
+[[packages]]
 name = "mcp"
 version = "1.27.0"
 
