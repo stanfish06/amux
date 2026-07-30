@@ -10,7 +10,12 @@ dependencies = [
 
 [project.scripts]
 amux = "amux.cli:main"
-amux-mcp = "amux.communication:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pyinstaller"
+]
 
 [build-system]
 requires = ["setuptools>=68"]

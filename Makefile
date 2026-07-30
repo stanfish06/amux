@@ -1,4 +1,23 @@
-.PHONY: shell sync_pylock start_fresh clean_full
+.PHONY: shell sync_pylock start_fresh clean_full dev build install uninstall
+
+BIN_DIR := $(HOME)/.local/bin
+
+dev:
+	pipenv run pip install -e ".[dev]"
+
+build: dev
+	pipenv run pyinstaller --onefile --name amux \
+		--paths src \
+		--specpath build --workpath build --distpath dist \
+		-y src/amux/cli.py
+
+install: build
+	mkdir -p $(BIN_DIR)
+	ln -sf $(CURDIR)/dist/amux $(BIN_DIR)/amux
+	@echo "linked $(BIN_DIR)/amux -> $(CURDIR)/dist/amux"
+
+uninstall:
+	rm -f $(BIN_DIR)/amux
 
 shell: sync_pylock
 	pipenv shell
@@ -22,3 +41,4 @@ sync_pylock:
 	rm -f Pipfile.lock
 	pipenv uninstall --all
 	pipenv sync
+	pipenv run pip install -e ".[dev]"
