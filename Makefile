@@ -6,7 +6,7 @@ dev:
 	pipenv run pip install -e ".[dev]"
 
 build: dev
-	pipenv run pyinstaller --onefile --name amux \
+	pipenv run env -u PYTHONPATH pyinstaller --onefile --name amux \
 		--paths src \
 		--specpath build --workpath build --distpath dist \
 		-y src/amux/cli.py
