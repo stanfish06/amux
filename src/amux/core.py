@@ -5,8 +5,9 @@ from dataclasses import dataclass
 
 from libtmux import Pane, Server, Session, Window
 from libtmux.constants import PaneDirection
+from typing import Literal
 
-from amux.shared import ALIAS
+from amux.shared import ALIAS, DEFAULT_SOCKET
 
 AGENT_COMMANDS = {
     "claude": "claude --dangerously-skip-permissions",
@@ -18,18 +19,88 @@ LABEL_OPTION = "@amux_label"
 NAME_OPTION = "@amux_name"
 
 ADJECTIVES = [
-    "amber", "azure", "bold", "brave", "calm", "clever", "coral", "crimson",
-    "dusty", "fuzzy", "gentle", "golden", "happy", "ivory", "jade", "jolly",
-    "lucky", "mellow", "misty", "noble", "olive", "pearl", "proud", "purple",
-    "quick", "quiet", "rapid", "ruby", "rusty", "scarlet", "shiny", "silent",
-    "silver", "sunny", "swift", "teal", "velvet", "violet", "witty", "zesty",
+    "amber",
+    "azure",
+    "bold",
+    "brave",
+    "calm",
+    "clever",
+    "coral",
+    "crimson",
+    "dusty",
+    "fuzzy",
+    "gentle",
+    "golden",
+    "happy",
+    "ivory",
+    "jade",
+    "jolly",
+    "lucky",
+    "mellow",
+    "misty",
+    "noble",
+    "olive",
+    "pearl",
+    "proud",
+    "purple",
+    "quick",
+    "quiet",
+    "rapid",
+    "ruby",
+    "rusty",
+    "scarlet",
+    "shiny",
+    "silent",
+    "silver",
+    "sunny",
+    "swift",
+    "teal",
+    "velvet",
+    "violet",
+    "witty",
+    "zesty",
 ]
 NOUNS = [
-    "badger", "bear", "comet", "crane", "deer", "eagle", "ember", "falcon",
-    "fox", "gecko", "hawk", "heron", "ibis", "koala", "lemur", "lynx",
-    "mango", "maple", "meadow", "mole", "newt", "otter", "owl", "panda",
-    "pebble", "pepper", "potato", "puma", "quail", "raven", "river", "seal",
-    "storm", "tiger", "toad", "walnut", "whale", "wolf", "yak", "zebra",
+    "badger",
+    "bear",
+    "comet",
+    "crane",
+    "deer",
+    "eagle",
+    "ember",
+    "falcon",
+    "fox",
+    "gecko",
+    "hawk",
+    "heron",
+    "ibis",
+    "koala",
+    "lemur",
+    "lynx",
+    "mango",
+    "maple",
+    "meadow",
+    "mole",
+    "newt",
+    "otter",
+    "owl",
+    "panda",
+    "pebble",
+    "pepper",
+    "potato",
+    "puma",
+    "quail",
+    "raven",
+    "river",
+    "seal",
+    "storm",
+    "tiger",
+    "toad",
+    "walnut",
+    "whale",
+    "wolf",
+    "yak",
+    "zebra",
 ]
 
 
@@ -44,10 +115,6 @@ def random_name(taken: set[str]) -> str:
     while f"{base}-{i}" in taken:
         i += 1
     return f"{base}-{i}"
-
-
-# Dedicated tmux server: keeps agent workspaces out of regular tmux sessions.
-DEFAULT_SOCKET = "amux-root"
 
 
 def get_server(socket_name: str | None = None) -> Server:
@@ -65,7 +132,9 @@ class AgentSpace:
         self.session.cmd("kill-session")
 
     def _print_identity(self):
-        print(f"{ALIAS['session']} {self.project_name} ({self.session.id}) @ {self.cwd}")
+        print(
+            f"{ALIAS['session']} {self.project_name} ({self.session.id}) @ {self.cwd}"
+        )
 
 
 @dataclass
@@ -89,6 +158,13 @@ class AgentPane:
     agent_name: str
     label: str
     name: str = ""
+    state: Literal["idle", "busy", "need-input", "dead"] = "idle"
+
+    def __post_init__(self):
+        assert self.pane is not None
+        self.pane.set_hook(
+            "pane-exited", "run-shell 'amux event emit exit --pane #{hook_pane}'"
+        )
 
     @property
     def is_agent(self) -> bool:
@@ -124,7 +200,9 @@ def _taken_names(session: Session) -> set[str]:
     return names
 
 
-def _split_evenly(pane: Pane, n: int, direction: PaneDirection, cwd: str | None) -> list[Pane]:
+def _split_evenly(
+    pane: Pane, n: int, direction: PaneDirection, cwd: str | None
+) -> list[Pane]:
     panes = [pane]
     for i in range(1, n):
         remaining = n - i
@@ -192,17 +270,24 @@ def spawn_agent_space(
     width = max(200, 80 * init_grid_ncols)
     height = max(50, 24 * init_grid_nrows)
     server.cmd(
-        "new-session", "-d",
-        "-s", session_name,
-        "-c", session_path,
-        "-x", str(width),
-        "-y", str(height),
+        "new-session",
+        "-d",
+        "-s",
+        session_name,
+        "-c",
+        session_path,
+        "-x",
+        str(width),
+        "-y",
+        str(height),
     )
     session = server.sessions.get(session_name=session_name)
     assert session is not None
     window = session.windows[0]
     window.rename_window(init_task_name)
-    grid = _build_grid(window, init_grid_nrows, init_grid_ncols, init_grid_agent, session_path)
+    grid = _build_grid(
+        window, init_grid_nrows, init_grid_ncols, init_grid_agent, session_path
+    )
     return AgentSpace(
         session=session,
         agent_grids=[grid],
@@ -219,7 +304,9 @@ def spawn_agent_grid(
     agent: str = "claude",
     cwd: str | None = None,
 ) -> AgentGrid:
-    window = session.new_window(window_name=window_name, start_directory=cwd, attach=False)
+    window = session.new_window(
+        window_name=window_name, start_directory=cwd, attach=False
+    )
     return _build_grid(window, nrows, ncols, agent, cwd)
 
 

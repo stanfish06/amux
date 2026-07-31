@@ -1,5 +1,11 @@
-from libtmux import Window, Session
+from libtmux import Pane, Window, Session
+from amux.core import _pane_option
 from amux.shared import ALIAS
+from amux.events import STATE_OPTION
+
+
+def _pane_state(pane: Pane) -> str:
+    return _pane_option(pane, STATE_OPTION) or "-"
 
 
 def window_to_string(window: Window):
@@ -10,6 +16,7 @@ def window_to_string(window: Window):
                 "id": p.id,
                 "index": p.index if p.index else -1,
                 "title": p.title if p.title else "",
+                "state": _pane_state(p),
             }
     if len(panes_info) > 0:
         panes_info = dict(

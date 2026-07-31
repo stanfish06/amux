@@ -4,8 +4,8 @@ import argparse
 import os
 import sys
 
-from amux import core, utils
-from amux.shared import ALIAS
+from amux import core, events, utils
+from amux.shared import ALIAS, scrub_pyinstaller_env
 
 
 def _get_session(server, workspace: str):
@@ -105,6 +105,7 @@ def _add_grid_args(parser: argparse.ArgumentParser):
 
 
 def main(argv: list[str] | None = None) -> int:
+    scrub_pyinstaller_env()
     parser = argparse.ArgumentParser(prog="amux", description=__doc__)
     parser.add_argument(
         "-L", "--socket-name", default=None,
@@ -141,6 +142,31 @@ def main(argv: list[str] | None = None) -> int:
     p_kg.add_argument("workspace")
     p_kg.add_argument("task")
     p_kg.set_defaults(func=_cmd_kg)
+
+    p_ev = sub.add_parser("event", help="agent state events")
+    ev_sub = p_ev.add_subparsers(dest="event_command", required=True)
+
+    p_emit = ev_sub.add_parser(
+        "emit", help="append an event (called by agent/tmux hooks)"
+    )
+    p_emit.add_argument("kind", choices=sorted(events.STATE_BY_KIND))
+    p_emit.add_argument("--pane", default=None, help="pane id (default: $TMUX_PANE)")
+    p_emit.add_argument("--agent", default="", help="agent kind, e.g. claude")
+    p_emit.add_argument(
+        "--detail", default=None,
+        help="free-form note (default: extracted from hook JSON on stdin)",
+    )
+    p_emit.set_defaults(func=events.cmd_emit)
+
+    p_tail = ev_sub.add_parser("tail", help="print recent events as JSONL")
+    p_tail.add_argument("-n", type=int, default=20, help="number of events")
+    p_tail.add_argument("--pane", default=None, help="only this pane id")
+    p_tail.set_defaults(func=events.cmd_tail)
+
+    p_wait = ev_sub.add_parser("wait", help="block until a pane reaches a state")
+    p_wait.add_argument("pane", help="pane id, e.g. %%42")
+    p_wait.add_argument("--timeout", type=float, default=300.0)
+    p_wait.set_defaults(func=events.cmd_wait)
 
     args = parser.parse_args(argv)
     server = core.get_server(args.socket_name)
