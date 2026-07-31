@@ -1,3 +1,5 @@
+import time
+
 from libtmux import Pane, Window, Session
 from amux.core import _pane_option
 from amux.shared import ALIAS
@@ -6,6 +8,57 @@ from amux.events import STATE_OPTION
 
 def _pane_state(pane: Pane) -> str:
     return _pane_option(pane, STATE_OPTION) or "-"
+
+
+def _age(ts: float) -> str:
+    d = max(0, int(time.time() - ts))
+    if d < 60:
+        return f"{d}s"
+    if d < 3600:
+        return f"{d // 60}m"
+    if d < 86400:
+        return f"{d // 3600}h"
+    return f"{d // 86400}d"
+
+
+def _addr(agent: dict) -> str:
+    return f"@{agent['label']} {agent['pane']}" if agent["name"] else agent["pane"]
+
+
+def context_to_string(ctx: dict) -> list[str]:
+    """Concise agent-facing view of `core.build_context` output."""
+    me = ctx["self"]
+    lines = [
+        f"you: {me['name']}  {me['agent']} @{me['label']} {me['pane']}  "
+        f"{ALIAS['window']}:{me['task']}  {ALIAS['session']}:{me['workspace']}  "
+        f"{me['state']}  {me['cwd']}",
+        f"team @ {me['workspace']}",
+    ]
+    rows = [a for group in ctx["team"] for a in group["agents"]]
+    wn = max(len(a["name"] or "-") for a in rows)
+    wa = max(len(a["agent"]) for a in rows)
+    wd = max(len(_addr(a)) for a in rows)
+    ws = max(len(a["state"]) for a in rows)
+    for i, group in enumerate(ctx["team"]):
+        own = f" (your {ALIAS['window']})" if i == 0 else ""
+        lines.append(f"  {group['task']}{own}")
+        for a in group["agents"]:
+            row = (
+                f"    {(a['name'] or '-'):<{wn}}  {a['agent']:<{wa}}  "
+                f"{_addr(a):<{wd}}  {a['state']:<{ws}}"
+            )
+            if a["pane"] == me["pane"]:
+                row += " (you)"
+            else:
+                last = a["last_event"]
+                if last:
+                    row += f"  {_age(last['ts'])}"
+                    if last["detail"]:
+                        row += f"  \"{last['detail']}\""
+                if a["cwd"] and a["cwd"] != me["cwd"]:
+                    row += f"  {a['cwd']}"
+            lines.append(row.rstrip())
+    return lines
 
 
 def window_to_string(window: Window):

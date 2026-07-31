@@ -5,8 +5,8 @@ from dataclasses import dataclass
 
 from libtmux import Pane, Server, Session, Window
 from libtmux.constants import PaneDirection
-from typing import Literal
 
+from amux import events
 from amux.shared import ALIAS, DEFAULT_SOCKET
 
 AGENT_COMMANDS = {
@@ -121,6 +121,70 @@ def get_server(socket_name: str | None = None) -> Server:
     return Server(socket_name=socket_name or DEFAULT_SOCKET)
 
 
+def _parse_agent_spec(spec: str) -> tuple[str, int | None]:
+    """Split `<agent>[:count]` on the last `:` only when the suffix is all
+    digits; raw commands containing colons pass through whole."""
+    agent, sep, suffix = spec.rpartition(":")
+    if not sep or not suffix.isdigit():
+        if not spec:
+            raise ValueError("empty agent spec")
+        return spec, None
+    if not agent:
+        raise ValueError(f"malformed agent spec '{spec}'")
+    count = int(suffix)
+    if count < 1:
+        raise ValueError(f"agent count must be >= 1, got '{spec}'")
+    return agent, count
+
+
+def parse_agent_specs(
+    specs: list[str], nrows: int | None, ncols: int | None
+) -> list[str]:
+    """Expand `<agent>[:count]` specs into a per-pane agent list, row-major.
+
+    With a known shape (both dims given), a single countless spec absorbs the
+    remainder; with an unknown or partial shape, countless means 1.
+    """
+    parsed = [_parse_agent_spec(s) for s in specs or ["claude"]]
+    countless = [i for i, (_, count) in enumerate(parsed) if count is None]
+    if nrows is not None and ncols is not None:
+        if len(countless) > 1:
+            raise ValueError(
+                "at most one agent spec may omit its count when the grid shape is given"
+            )
+        if countless:
+            i = countless[0]
+            remainder = nrows * ncols - sum(c for _, c in parsed if c is not None)
+            if remainder < 1:
+                raise ValueError(
+                    f"no panes left for '{parsed[i][0]}' in a {nrows}x{ncols} grid"
+                )
+            parsed[i] = (parsed[i][0], remainder)
+    # Any spec still countless here (unknown/partial shape) means 1.
+    return [agent for agent, count in parsed for _ in range(count or 1)]
+
+
+def resolve_grid_shape(n: int, nrows: int | None, ncols: int | None) -> tuple[int, int]:
+    """Fit `n` agents into a grid, deriving whatever `-r`/`-c` left out.
+
+    With neither given, pick the factor pair closest to square, rows <= cols.
+    """
+    if nrows is not None and ncols is not None:
+        if nrows * ncols != n:
+            raise ValueError(f"{n} agents do not fit a {nrows}x{ncols} grid")
+        return nrows, ncols
+    if nrows is not None:
+        if n % nrows:
+            raise ValueError(f"{n} agents do not divide into {nrows} rows")
+        return nrows, n // nrows
+    if ncols is not None:
+        if n % ncols:
+            raise ValueError(f"{n} agents do not divide into {ncols} columns")
+        return n // ncols, ncols
+    rows = max(d for d in range(1, int(n**0.5) + 1) if n % d == 0)
+    return rows, n // rows
+
+
 @dataclass
 class AgentSpace:
     session: Session
@@ -158,13 +222,7 @@ class AgentPane:
     agent_name: str
     label: str
     name: str = ""
-    state: Literal["idle", "busy", "need-input", "dead"] = "idle"
-
-    def __post_init__(self):
-        assert self.pane is not None
-        self.pane.set_hook(
-            "pane-exited", "run-shell 'amux event emit exit --pane #{hook_pane}'"
-        )
+    state: str = "starting"
 
     @property
     def is_agent(self) -> bool:
@@ -217,16 +275,19 @@ def _build_grid(
     window: Window,
     nrows: int,
     ncols: int,
-    agent: str,
+    agents: list[str],
     cwd: str | None,
 ) -> AgentGrid:
-    command = AGENT_COMMANDS.get(agent, agent)
+    if len(agents) != nrows * ncols:
+        raise ValueError(f"{len(agents)} agents do not fit a {nrows}x{ncols} grid")
     taken = _taken_names(window.session)
     rows = _split_evenly(window.panes[0], nrows, PaneDirection.Below, cwd)
     agent_panes = []
     for i, row_pane in enumerate(rows):
         cols = _split_evenly(row_pane, ncols, PaneDirection.Right, cwd)
         for j, pane in enumerate(cols):
+            agent = agents[i * ncols + j]
+            command = AGENT_COMMANDS.get(agent, agent)
             label = f"r{i}c{j}"
             name = random_name(taken)
             taken.add(name)
@@ -236,6 +297,9 @@ def _build_grid(
             pane.cmd("set-option", "-p", AGENT_OPTION, agent)
             pane.cmd("set-option", "-p", LABEL_OPTION, label)
             pane.cmd("set-option", "-p", NAME_OPTION, name)
+            pane.set_hook(
+                "pane-exited", "run-shell 'amux event emit exit --pane #{hook_pane}'"
+            )
             if command:
                 pane.send_keys(command)
             agent_panes.append(
@@ -261,7 +325,7 @@ def spawn_agent_space(
     session_name: str,
     init_grid_nrows: int = 1,
     init_grid_ncols: int = 1,
-    init_grid_agent: str = "claude",
+    init_grid_agents: list[str] | None = None,
     init_task_name: str = "task0",
 ) -> AgentSpace:
     if server.has_session(session_name):
@@ -285,9 +349,8 @@ def spawn_agent_space(
     assert session is not None
     window = session.windows[0]
     window.rename_window(init_task_name)
-    grid = _build_grid(
-        window, init_grid_nrows, init_grid_ncols, init_grid_agent, session_path
-    )
+    agents = init_grid_agents or ["claude"] * (init_grid_nrows * init_grid_ncols)
+    grid = _build_grid(window, init_grid_nrows, init_grid_ncols, agents, session_path)
     return AgentSpace(
         session=session,
         agent_grids=[grid],
@@ -301,22 +364,26 @@ def spawn_agent_grid(
     window_name: str,
     nrows: int,
     ncols: int,
-    agent: str = "claude",
+    agents: list[str] | None = None,
     cwd: str | None = None,
 ) -> AgentGrid:
     window = session.new_window(
         window_name=window_name, start_directory=cwd, attach=False
     )
-    return _build_grid(window, nrows, ncols, agent, cwd)
+    return _build_grid(
+        window, nrows, ncols, agents or ["claude"] * (nrows * ncols), cwd
+    )
 
 
 def load_agent_pane(pane: Pane) -> AgentPane:
+    name = _pane_option(pane, NAME_OPTION) or ""
     return AgentPane(
         pane=pane,
         cwd=pane.pane_current_path or "",
         agent_name=_pane_option(pane, AGENT_OPTION) or pane.pane_current_command or "",
         label=_pane_option(pane, LABEL_OPTION) or pane.id or "",
-        name=_pane_option(pane, NAME_OPTION) or "",
+        name=name,
+        state=_pane_option(pane, events.STATE_OPTION) or ("starting" if name else "-"),
     )
 
 
@@ -344,5 +411,53 @@ def load_agent_spaces(server: Server) -> list[AgentSpace]:
     return [load_agent_space(s) for s in server.sessions]
 
 
+def _roster_entry(pane: Pane) -> dict:
+    ap = load_agent_pane(pane)
+    last = events.tail(n=1, pane=pane.id or "")
+    return {
+        "name": ap.name,
+        "agent": ap.agent_name,
+        "label": ap.label,
+        "pane": pane.id or "",
+        "state": ap.state,
+        "cwd": ap.cwd,
+        "last_event": (
+            {"kind": last[0].kind, "ts": last[0].ts, "detail": last[0].detail}
+            if last
+            else None
+        ),
+    }
+
+
+def build_context(server: Server, pane_id: str) -> dict:
+    home = None
+    for session in server.sessions:
+        for window in session.windows:
+            if any(p.id == pane_id for p in window.panes):
+                home = (session, window)
+    if home is None:
+        raise ValueError(
+            f"no {ALIAS['pane']} {pane_id} on this server; "
+            f"run inside an amux {ALIAS['pane']} or pass --pane"
+        )
+    session, window = home
+    self_entry = None
+    team = []
+    for w in [window, *[x for x in session.windows if x.id != window.id]]:
+        agents = []
+        for p in w.panes:
+            entry = _roster_entry(p)
+            agents.append(entry)
+            if p.id == pane_id:
+                self_entry = {
+                    **entry,
+                    "task": w.name or "",
+                    "workspace": session.name or "",
+                }
+        team.append({"task": w.name or "", "agents": agents})
+    return {"self": self_entry, "team": team}
+
+
+# future feat, spawn and space where humans work and colab
 def spawn_human_space():
     pass

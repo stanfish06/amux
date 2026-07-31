@@ -66,6 +66,13 @@ def _tmux(socket_path: str, *args: str) -> None:
     )
 
 
+def self_pane_id() -> str | None:
+    """Pane id of the calling process when inside an amux pane, else None."""
+    if _amux_socket() is None:
+        return None
+    return os.environ.get("TMUX_PANE") or None
+
+
 def _wait_channel(pane: str) -> str:
     return f"amux-state-{pane.lstrip('%')}"
 
