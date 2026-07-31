@@ -1,6 +1,8 @@
-.PHONY: shell sync_pylock start_fresh clean_full dev build install uninstall
+.PHONY: shell sync_pylock start_fresh clean_full dev build install install_skills uninstall
 
 BIN_DIR := $(HOME)/.local/bin
+SKILL_DIRS := $(HOME)/.claude/skills $(HOME)/.codex/skills
+SKILLS := $(notdir $(wildcard skills/*))
 
 dev:
 	pipenv run pip install -e ".[dev]"
@@ -11,13 +13,29 @@ build: dev
 		--specpath build --workpath build --distpath dist \
 		-y src/amux/cli.py
 
-install: build
+install: build install_skills
 	mkdir -p $(BIN_DIR)
 	ln -sf $(CURDIR)/dist/amux $(BIN_DIR)/amux
 	@echo "linked $(BIN_DIR)/amux -> $(CURDIR)/dist/amux"
 
+# -n so an existing symlink is replaced, not followed into as a directory
+install_skills:
+	@for dir in $(SKILL_DIRS); do \
+		mkdir -p $$dir; \
+		for skill in $(SKILLS); do \
+			ln -sfn $(CURDIR)/skills/$$skill $$dir/$$skill; \
+			echo "linked $$dir/$$skill -> $(CURDIR)/skills/$$skill"; \
+		done; \
+	done
+
 uninstall:
 	rm -f $(BIN_DIR)/amux
+	@for dir in $(SKILL_DIRS); do \
+		for skill in $(SKILLS); do \
+			rm -f $$dir/$$skill; \
+			echo "removed $$dir/$$skill"; \
+		done; \
+	done
 
 shell: sync_pylock
 	pipenv shell
