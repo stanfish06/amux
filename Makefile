@@ -3,20 +3,28 @@
 BIN_DIR := $(HOME)/.local/bin
 SKILL_DIRS := $(HOME)/.claude/skills $(HOME)/.codex/skills
 SKILLS := $(notdir $(wildcard skills/*))
+UNAME_S := $(shell uname -s)
+PYINSTALLER_MODE := --onefile
+AMUX_BIN := $(CURDIR)/dist/amux
+
+ifeq ($(UNAME_S),Darwin)
+PYINSTALLER_MODE := --onedir
+AMUX_BIN := $(CURDIR)/dist/amux/amux
+endif
 
 dev:
 	pipenv run pip install -e ".[dev]"
 
 build: dev
-	pipenv run env -u PYTHONPATH pyinstaller --onefile --name amux \
+	pipenv run env -u PYTHONPATH pyinstaller $(PYINSTALLER_MODE) --name amux \
 		--paths src \
 		--specpath build --workpath build --distpath dist \
 		-y src/amux/cli.py
 
 install: build install_skills
 	mkdir -p $(BIN_DIR)
-	ln -sf $(CURDIR)/dist/amux $(BIN_DIR)/amux
-	@echo "linked $(BIN_DIR)/amux -> $(CURDIR)/dist/amux"
+	ln -sfn $(AMUX_BIN) $(BIN_DIR)/amux
+	@echo "linked $(BIN_DIR)/amux -> $(AMUX_BIN)"
 
 # -n so an existing symlink is replaced, not followed into as a directory
 install_skills:
