@@ -36,7 +36,6 @@ export const App: React.FC<AppProps> = ({ socketName, pollIntervalMs }) => {
     refresh,
   } = useAmuxState(tmuxService, pollIntervalMs);
 
-  // Read-only View Input handling
   useInput((input, key) => {
     if (isSearching) {
       if (key.escape || key.return) {
@@ -115,6 +114,9 @@ export const App: React.FC<AppProps> = ({ socketName, pollIntervalMs }) => {
             selectedNodeId={selectedNodeId}
             expandedNodeIds={expandedNodeIds}
             width={44}
+            isLoading={isLoading}
+            lastRefreshedAt={lastRefreshedAt}
+            socketName={socketName}
           />
 
           {/* Right Column: Detail Inspector & Terminal Capture */}
@@ -128,7 +130,7 @@ export const App: React.FC<AppProps> = ({ socketName, pollIntervalMs }) => {
         </Box>
       )}
 
-      {/* View-Only Action Footer Bar */}
+      {/* Action Footer Bar */}
       <ActionHelp />
     </Box>
   );

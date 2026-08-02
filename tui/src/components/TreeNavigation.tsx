@@ -1,5 +1,6 @@
 import React from 'react';
 import { Box, Text } from 'ink';
+import Spinner from 'ink-spinner';
 import { AgentPaneInfo, AgentState, TaskWindowInfo, TreeNode, WorkspaceSessionInfo } from '../types.js';
 
 interface TreeNavigationProps {
@@ -7,6 +8,9 @@ interface TreeNavigationProps {
   selectedNodeId: string | null;
   expandedNodeIds: Set<string>;
   width?: number;
+  isLoading?: boolean;
+  lastRefreshedAt?: Date | null;
+  socketName?: string;
 }
 
 export const TreeNavigation: React.FC<TreeNavigationProps> = ({
@@ -14,7 +18,26 @@ export const TreeNavigation: React.FC<TreeNavigationProps> = ({
   selectedNodeId,
   expandedNodeIds,
   width = 44,
+  isLoading,
+  lastRefreshedAt,
+  socketName = 'amux-root',
 }) => {
+  if (isLoading && !lastRefreshedAt) {
+    return (
+      <Box
+        flexDirection="column"
+        borderStyle="single"
+        borderColor="cyan"
+        width={width}
+        padding={1}
+      >
+        <Text color="cyan">
+          <Spinner type="dots" /> Loading amux workspaces ({socketName})...
+        </Text>
+      </Box>
+    );
+  }
+
   if (nodes.length === 0) {
     return (
       <Box
@@ -25,7 +48,7 @@ export const TreeNavigation: React.FC<TreeNavigationProps> = ({
         padding={1}
       >
         <Text color="gray" italic>
-          No workspaces or agents found on tmux server.
+          No active workspaces found on socket: {socketName}.
         </Text>
       </Box>
     );

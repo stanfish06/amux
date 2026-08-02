@@ -65,9 +65,29 @@ export class TmuxService {
     }
   }
 
+  /**
+   * Fast single-pass batch query fetching all sessions, windows, panes, and amux options
+   * in a single tmux invocation.
+   */
   public async fetchWorkspaces(): Promise<WorkspaceSessionInfo[]> {
-    const rawSessions = await this.runTmux(['list-sessions', '-F', '#{session_id}:#{session_name}:#{session_path}']);
-    if (!rawSessions) {
+    const format = [
+      '#{session_id}',
+      '#{session_name}',
+      '#{session_path}',
+      '#{window_id}',
+      '#{window_index}',
+      '#{window_name}',
+      '#{pane_id}',
+      '#{pane_current_path}',
+      '#{pane_current_command}',
+      '#{@amux_agent}',
+      '#{@amux_label}',
+      '#{@amux_name}',
+      '#{@amux_state}',
+    ].join('|');
+
+    const rawOutput = await this.runTmux(['list-panes', '-a', '-F', format]);
+    if (!rawOutput) {
       return [];
     }
 
@@ -77,107 +97,86 @@ export class TmuxService {
       latestEventByPane.set(ev.pane, ev);
     }
 
-    const sessionLines = rawSessions.split('\n').filter(Boolean);
-    const workspaces: WorkspaceSessionInfo[] = [];
+    const workspaceMap = new Map<string, WorkspaceSessionInfo>();
+    const taskMap = new Map<string, TaskWindowInfo>();
 
-    for (const line of sessionLines) {
-      const [sessionId, sessionName, sessionPath] = line.split(':');
-      if (!sessionId || !sessionName) continue;
+    const lines = rawOutput.split('\n').filter(Boolean);
 
-      const rawWindows = await this.runTmux([
-        'list-windows',
-        '-t',
+    for (const line of lines) {
+      const [
+        sessionId,
         sessionName,
-        '-F',
-        '#{window_id}:#{window_index}:#{window_name}',
-      ]);
+        sessionPath,
+        windowId,
+        windowIndexStr,
+        windowName,
+        paneId,
+        paneCwd,
+        paneCmd,
+        agentOpt,
+        labelOpt,
+        nameOpt,
+        stateOpt,
+      ] = line.split('|');
 
-      const windowLines = rawWindows.split('\n').filter(Boolean);
-      const tasks: TaskWindowInfo[] = [];
+      if (!sessionId || !sessionName || !windowId || !paneId) continue;
 
-      for (const wLine of windowLines) {
-        const [windowId, windowIndexStr, windowName] = wLine.split(':');
-        if (!windowId) continue;
-        const windowIndex = parseInt(windowIndexStr, 10) || 0;
+      const windowIndex = parseInt(windowIndexStr, 10) || 0;
+      const agentName = agentOpt || paneCmd || 'unknown';
+      const name = nameOpt || '';
+      const label = labelOpt || paneId;
 
-        const rawPanes = await this.runTmux([
-          'list-panes',
-          '-t',
-          `${sessionName}:${windowIndex}`,
-          '-F',
-          '#{pane_id}:#{pane_current_path}:#{pane_current_command}',
-        ]);
+      let state: AgentState = (stateOpt as AgentState) || 'unknown';
+      const lastEv = latestEventByPane.get(paneId);
+      if (state === 'unknown' && lastEv) {
+        state = this.stateFromKind(lastEv.kind);
+      }
+      if (state === 'unknown') {
+        state = name ? 'starting' : 'idle';
+      }
 
-        const paneLines = rawPanes.split('\n').filter(Boolean);
-        const panes: AgentPaneInfo[] = [];
+      // Ensure Workspace object exists
+      let ws = workspaceMap.get(sessionId);
+      if (!ws) {
+        ws = {
+          id: sessionId,
+          name: sessionName,
+          cwd: sessionPath || '.',
+          tasks: [],
+        };
+        workspaceMap.set(sessionId, ws);
+      }
 
-        for (const pLine of paneLines) {
-          const parts = pLine.split(':');
-          const paneId = parts[0];
-          const paneCwd = parts[1] || '';
-          const paneCmd = parts[2] || '';
-
-          if (!paneId) continue;
-
-          const agentOpt = await this.getPaneOption(paneId, '@amux_agent');
-          const labelOpt = await this.getPaneOption(paneId, '@amux_label');
-          const nameOpt = await this.getPaneOption(paneId, '@amux_name');
-          const stateOpt = await this.getPaneOption(paneId, '@amux_state');
-
-          const agentName = agentOpt || paneCmd || 'unknown';
-          const name = nameOpt || '';
-          const label = labelOpt || paneId;
-          
-          let state: AgentState = (stateOpt as AgentState) || 'unknown';
-          const lastEv = latestEventByPane.get(paneId);
-          if (state === 'unknown' && lastEv) {
-            state = this.stateFromKind(lastEv.kind);
-          }
-          if (state === 'unknown') {
-            state = name ? 'starting' : 'idle';
-          }
-
-          panes.push({
-            id: paneId,
-            name,
-            agentName,
-            label,
-            state,
-            cwd: paneCwd,
-            isAgent: ['claude', 'codex'].includes(agentName),
-            lastEvent: lastEv,
-            taskName: windowName || `task${windowIndex}`,
-            workspaceName: sessionName,
-          });
-        }
-
-        tasks.push({
+      // Ensure Task object exists
+      const taskKey = `${sessionId}:${windowId}`;
+      let task = taskMap.get(taskKey);
+      if (!task) {
+        task = {
           id: windowId,
           name: windowName || `task${windowIndex}`,
           index: windowIndex,
           workspaceName: sessionName,
-          panes,
-        });
+          panes: [],
+        };
+        taskMap.set(taskKey, task);
+        ws.tasks.push(task);
       }
 
-      workspaces.push({
-        id: sessionId,
-        name: sessionName,
-        cwd: sessionPath || '',
-        tasks,
+      task.panes.push({
+        id: paneId,
+        name,
+        agentName,
+        label,
+        state,
+        cwd: paneCwd || '',
+        isAgent: ['claude', 'codex'].includes(agentName),
+        lastEvent: lastEv,
+        taskName: task.name,
+        workspaceName: sessionName,
       });
     }
 
-    return workspaces;
-  }
-
-  private async getPaneOption(paneId: string, optionName: string): Promise<string> {
-    try {
-      const out = await this.runTmux(['show-options', '-pqv', '-t', paneId, optionName]);
-      return out.trim();
-    } catch {
-      return '';
-    }
+    return Array.from(workspaceMap.values());
   }
 
   private stateFromKind(kind: string): AgentState {
