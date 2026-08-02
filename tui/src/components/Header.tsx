@@ -31,75 +31,59 @@ export const Header: React.FC<HeaderProps> = ({
     : '--:--:--';
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
-      {/* Top row: Brand Title & Socket Info */}
-      <Box justifyContent="space-between">
+    <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1} width="100%">
+      {/* Line 1: Title & Socket Info */}
+      <Box justifyContent="space-between" width="100%">
         <Box gap={1}>
-          <Text color="cyan" bold>
-            ❖ AMUX
-          </Text>
-          <Text color="white" bold>
-            REACTIVITY FRONTEND
-          </Text>
+          <Text color="cyan" bold>❖ AMUX FRONTEND</Text>
           <Text color="gray">|</Text>
           <Text color="yellow">socket:</Text>
-          <Text color="brightYellow" bold>
-            {socketName}
-          </Text>
+          <Text color="brightYellow" bold>{socketName}</Text>
         </Box>
 
         <Box gap={1}>
-          {isLoading && (
+          {isLoading ? (
             <Text color="cyan">
               <Spinner type="dots" /> Updating...
             </Text>
+          ) : (
+            <Text color="gray">Refreshed: {timeStr}</Text>
           )}
-          <Text color="gray">Refreshed: {timeStr}</Text>
         </Box>
       </Box>
 
-      {/* Middle row: Status Breakdown Metrics */}
-      <Box justifyContent="space-between" marginTop={0}>
-        <Box gap={2}>
+      {/* Line 2: Status Breakdown Metrics */}
+      <Box justifyContent="space-between" width="100%" marginTop={0}>
+        <Text wrap="truncate">
           <Text color="gray">Agents: </Text>
-          <Text color="white" bold>
-            {metrics.totalPanes} total
+          <Text color="white" bold>{metrics.totalPanes} total</Text>
+          <Text color="gray">  |  </Text>
+          <Text color="green">● {metrics.idle} idle</Text>
+          <Text color="gray">  </Text>
+          <Text color="yellow">⚡ {metrics.busy} busy</Text>
+          <Text color="gray">  </Text>
+          <Text color={metrics.needsInput > 0 ? 'magenta' : 'gray'} bold={metrics.needsInput > 0}>
+            ❓ {metrics.needsInput} input
           </Text>
-          <Text color="green">
-            ● {metrics.idle} idle
-          </Text>
-          <Text color="yellow">
-            ⚡ {metrics.busy} busy
-          </Text>
-
-          {metrics.needsInput > 0 ? (
-            <Text color="magenta" bold>
-              ❓ {metrics.needsInput} needs-input
-            </Text>
-          ) : (
-            <Text color="gray">
-              ❓ {metrics.needsInput} needs-input
-            </Text>
-          )}
-
           {metrics.starting > 0 && (
-            <Text color="cyan">
-              🟦 {metrics.starting} starting
-            </Text>
+            <>
+              <Text color="gray">  </Text>
+              <Text color="cyan">🟦 {metrics.starting} start</Text>
+            </>
           )}
-
           {metrics.dead > 0 && (
-            <Text color="red">
-              💀 {metrics.dead} dead
-            </Text>
+            <>
+              <Text color="gray">  </Text>
+              <Text color="red">💀 {metrics.dead} dead</Text>
+            </>
           )}
-        </Box>
+        </Text>
 
         {isSearching || searchQuery ? (
           <Box gap={1}>
             <Text color="yellow">Filter:</Text>
             <Text color="white" backgroundColor="blue">
-              {' '}{searchQuery || '(type to search)'}{' '}
+              {' '}{searchQuery || '(search)'}{' '}
             </Text>
           </Box>
         ) : null}

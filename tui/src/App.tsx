@@ -45,12 +45,10 @@ export const App: React.FC<AppProps> = ({ socketName, pollIntervalMs }) => {
 
   // Keybindings handling
   useInput((input, key) => {
-    // If modal is active, modal handles its own input (except global exit)
     if (activeModal !== 'none') {
       return;
     }
 
-    // Filter mode handling
     if (isSearching) {
       if (key.escape || key.return) {
         setIsSearching(false);
@@ -67,7 +65,6 @@ export const App: React.FC<AppProps> = ({ socketName, pollIntervalMs }) => {
       return;
     }
 
-    // Navigation & Actions
     if (key.upArrow || input === 'k') {
       moveSelection('up');
       return;
@@ -135,7 +132,7 @@ export const App: React.FC<AppProps> = ({ socketName, pollIntervalMs }) => {
   };
 
   return (
-    <Box flexDirection="column" width="100%">
+    <Box flexDirection="column" width={120}>
       {/* Header Bar */}
       <Header
         socketName={socketName}
@@ -148,23 +145,23 @@ export const App: React.FC<AppProps> = ({ socketName, pollIntervalMs }) => {
 
       {/* Main Workspace Split View */}
       {error ? (
-        <Box borderStyle="single" borderColor="red" padding={1}>
+        <Box borderStyle="single" borderColor="red" padding={1} width="100%">
           <Text color="red" bold>
             ⚠️ {error}
           </Text>
         </Box>
       ) : (
-        <Box flexDirection="row" flexGrow={1} gap={0}>
+        <Box flexDirection="row" width="100%" gap={0}>
           {/* Left Column: Tree Navigation */}
           <TreeNavigation
             nodes={visibleNodes}
             selectedNodeId={selectedNodeId}
             expandedNodeIds={expandedNodeIds}
-            width={48}
+            width={44}
           />
 
           {/* Right Column: Detail Inspector & Terminal Capture */}
-          <Box flexDirection="column" flexGrow={1}>
+          <Box flexDirection="column" width={76}>
             <AgentDetailPanel selectedNode={selectedNode} />
             <PaneTerminalPreview
               paneId={selectedNode?.type === 'agent' ? selectedNode.paneId : undefined}
