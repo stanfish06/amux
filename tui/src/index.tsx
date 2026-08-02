@@ -1,20 +1,43 @@
 #!/usr/bin/env node
-import React from 'react';
 import { render } from 'ink';
-import { Command } from 'commander';
+import { Command, InvalidArgumentError } from 'commander';
 import { App } from './App.js';
 
-const program = new Command();
+const DEFAULTS = { interval: 1500, width: 120, treeWidth: 44 };
 
-program
-  .name('amux-tui')
-  .description('Reactive TUI frontend for amux agent multiplexer')
-  .option('-L, --socket-name <socket>', 'tmux socket name', 'amux-root')
-  .option('-i, --interval <ms>', 'poll interval in milliseconds', '1500')
-  .parse(process.argv);
+function positiveInt(value: string): number {
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+        throw new InvalidArgumentError('expected a positive integer');
+    }
+    return parsed;
+}
 
-const options = program.opts();
-const socketName = options.socketName;
-const pollIntervalMs = parseInt(options.interval, 10) || 1500;
+const program = new Command()
+    .name('amux-tui')
+    .description('Read-only monitoring dashboard for amux agents')
+    .option('-L, --socket-name <socket>', 'tmux socket name', 'amux-root')
+    .option('-i, --interval <ms>', 'poll interval in milliseconds', positiveInt, DEFAULTS.interval)
+    .option('-W, --width <cols>', 'total dashboard width in columns', positiveInt, DEFAULTS.width)
+    .option('-T, --tree-width <cols>', 'workspace tree width in columns', positiveInt, DEFAULTS.treeWidth)
+    .parse(process.argv);
 
-render(<App socketName={socketName} pollIntervalMs={pollIntervalMs} />);
+const { socketName, interval, width, treeWidth } = program.opts<{
+    socketName: string;
+    interval: number;
+    width: number;
+    treeWidth: number;
+}>();
+
+if (treeWidth >= width) {
+    program.error(`--tree-width (${treeWidth}) must be less than --width (${width})`);
+}
+
+render(
+    <App
+        socketName={socketName}
+        pollIntervalMs={interval}
+        width={width}
+        treeWidth={treeWidth}
+    />
+);

@@ -1,28 +1,25 @@
 import React from 'react';
 import { Box, Text } from 'ink';
+import { BORDER_COLOR } from '../theme.js';
 
-export const ActionHelp: React.FC = () => {
-  return (
-    <Box
-      flexDirection="row"
-      borderStyle="single"
-      borderColor="gray"
-      paddingX={1}
-      gap={2}
-      width="100%"
-      flexWrap="nowrap"
-    >
-      <Text wrap="truncate">
-        <Text color="cyan" bold>[j/k / ↑↓]</Text> <Text color="gray">Navigate</Text>
-        <Text color="gray">  │  </Text>
-        <Text color="cyan" bold>[Space/Enter]</Text> <Text color="gray">Expand/Collapse</Text>
-        <Text color="gray">  │  </Text>
-        <Text color="cyan" bold>[/]</Text> <Text color="gray">Filter</Text>
-        <Text color="gray">  │  </Text>
-        <Text color="cyan" bold>[r]</Text> <Text color="gray">Refresh</Text>
-        <Text color="gray">  │  </Text>
-        <Text color="cyan" bold>[q]</Text> <Text color="gray">Quit</Text>
-      </Text>
+const KEYS: Array<[string, string]> = [
+    ['j/k', 'Navigate'],
+    ['Space/Enter', 'Expand/Collapse'],
+    ['/', 'Filter'],
+    ['r', 'Refresh'],
+    ['q', 'Quit'],
+];
+
+export const ActionHelp: React.FC = () => (
+    <Box borderStyle="single" borderColor={BORDER_COLOR} paddingX={1}>
+        <Text wrap="truncate">
+            {KEYS.map(([key, action], idx) => (
+                <Text key={key}>
+                    {idx > 0 ? <Text dimColor>{'   '}</Text> : null}
+                    <Text bold>[{key}]</Text>
+                    <Text dimColor> {action}</Text>
+                </Text>
+            ))}
+        </Text>
     </Box>
-  );
-};
+);

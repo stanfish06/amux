@@ -27,6 +27,7 @@ commands use the left.
 | `amux spg <ws> <task> [-p DIR] [-a SPEC] [-r N] [-c N]` | add a task grid to an existing workspace |
 | `amux lsw` | list all workspaces, tasks, panes |
 | `amux lsg <ws>` | list task grids in one workspace |
+| `amux monitor [-W COLS] [-T COLS] [-i MS]` | live read-only dashboard of every workspace and agent |
 | `amux kg <ws> <task>` | kill one task |
 | `amux kw <ws>` | kill a whole workspace |
 | `amux ctx [--json] [--pane ID]` | this agent's identity + workspace team roster |

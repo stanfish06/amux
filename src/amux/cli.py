@@ -6,7 +6,7 @@ import os
 import sys
 from collections import Counter
 
-from amux import core, events, utils
+from amux import core, events, monitor, utils
 from amux.shared import ALIAS, scrub_pyinstaller_env
 
 
@@ -20,7 +20,9 @@ def _get_session(server, workspace: str):
 def _get_window(session, task: str):
     window = session.windows.get(window_name=task, default=None)
     if window is None:
-        raise ValueError(f"{ALIAS['window']} '{task}' not found in {ALIAS['session']} '{session.name}'")
+        raise ValueError(
+            f"{ALIAS['window']} '{task}' not found in {ALIAS['session']} '{session.name}'"
+        )
     return window
 
 
@@ -130,7 +132,11 @@ def _add_grid_args(parser: argparse.ArgumentParser):
         "-c", "--cols", type=int, default=None, help="grid columns (default: derived)"
     )
     parser.add_argument(
-        "-a", "--agent", action="append", default=None, metavar="AGENT[:COUNT]",
+        "-a",
+        "--agent",
+        action="append",
+        default=None,
+        metavar="AGENT[:COUNT]",
         help=f"agent spec, repeatable: {'/'.join(core.AGENT_COMMANDS)} or a raw "
         "command, with an optional pane count (e.g. -a claude:3 -a codex)",
     )
@@ -140,7 +146,9 @@ def main(argv: list[str] | None = None) -> int:
     scrub_pyinstaller_env()
     parser = argparse.ArgumentParser(prog="amux", description=__doc__)
     parser.add_argument(
-        "-L", "--socket-name", default=None,
+        "-L",
+        "--socket-name",
+        default=None,
         help=f"tmux socket name (default: {core.DEFAULT_SOCKET}, a dedicated amux server)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -162,7 +170,9 @@ def main(argv: list[str] | None = None) -> int:
     p_spg = sub.add_parser("spg", help="spawn a new agent grid in a workspace")
     p_spg.add_argument("workspace")
     p_spg.add_argument("task")
-    p_spg.add_argument("-p", "--path", default=None, help="task directory (default: workspace dir)")
+    p_spg.add_argument(
+        "-p", "--path", default=None, help="task directory (default: workspace dir)"
+    )
     _add_grid_args(p_spg)
     p_spg.set_defaults(func=_cmd_spg)
 
@@ -176,11 +186,39 @@ def main(argv: list[str] | None = None) -> int:
     p_kg.set_defaults(func=_cmd_kg)
 
     p_ctx = sub.add_parser(
-        "ctx", help=f"show an {ALIAS['pane']}'s identity and its {ALIAS['session']} team"
+        "ctx",
+        help=f"show an {ALIAS['pane']}'s identity and its {ALIAS['session']} team",
     )
     p_ctx.add_argument("--json", action="store_true", help="machine-readable output")
     p_ctx.add_argument("--pane", default=None, help="pane id (default: $TMUX_PANE)")
     p_ctx.set_defaults(func=_cmd_ctx)
+
+    p_mon = sub.add_parser(
+        "monitor",
+        help=f"live read-only dashboard of every {ALIAS['session']} and {ALIAS['pane']}",
+    )
+    p_mon.add_argument(
+        "-W",
+        "--width",
+        type=int,
+        default=monitor.DEFAULT_WIDTH,
+        help=f"total dashboard width in columns (default: {monitor.DEFAULT_WIDTH})",
+    )
+    p_mon.add_argument(
+        "-T",
+        "--tree-width",
+        type=int,
+        default=monitor.DEFAULT_TREE_WIDTH,
+        help=f"{ALIAS['session']} tree width in columns (default: {monitor.DEFAULT_TREE_WIDTH})",
+    )
+    p_mon.add_argument(
+        "-i",
+        "--interval",
+        type=int,
+        default=monitor.DEFAULT_INTERVAL_MS,
+        help=f"poll interval in ms (default: {monitor.DEFAULT_INTERVAL_MS})",
+    )
+    p_mon.set_defaults(func=monitor.cmd_monitor)
 
     p_ev = sub.add_parser("event", help="agent state events")
     ev_sub = p_ev.add_subparsers(dest="event_command", required=True)
@@ -192,7 +230,8 @@ def main(argv: list[str] | None = None) -> int:
     p_emit.add_argument("--pane", default=None, help="pane id (default: $TMUX_PANE)")
     p_emit.add_argument("--agent", default="", help="agent kind, e.g. claude")
     p_emit.add_argument(
-        "--detail", default=None,
+        "--detail",
+        default=None,
         help="free-form note (default: extracted from hook JSON on stdin)",
     )
     p_emit.set_defaults(func=events.cmd_emit)

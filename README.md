@@ -16,5 +16,16 @@ amux lsw                                    # list workspaces
 amux lsg myproj                             # list tasks/agents in a workspace
 amux kg myproj review                       # kill a task
 amux kw myproj                              # kill a workspace
+amux monitor                                # live dashboard of every workspace/agent
+amux monitor -W 160 -T 60                   # ...at 160 cols, 60 of them for the tree
 ```
 - runs on a dedicated tmux server (socket `amux-root`); attach: `tmux -L amux-root attach -t myproj`
+
+## monitor
+
+`amux monitor` opens a read-only dashboard (workspace/task/agent tree, agent
+detail, live pane preview). It is a Node app under `tui/`, so build it once:
+
+```sh
+cd tui && npm install && npm run build
+```
