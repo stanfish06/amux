@@ -1,9 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { TmuxService } from './tmux.js';
 import {
-  AgentPaneInfo,
   AmuxEvent,
-  AppState,
   TaskWindowInfo,
   TreeNode,
   WorkspaceSessionInfo,
@@ -16,7 +14,6 @@ export function useAmuxState(tmuxService: TmuxService, pollIntervalMs: number = 
   const [expandedNodeIds, setExpandedNodeIds] = useState<Set<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isSearching, setIsSearching] = useState<boolean>(false);
-  const [activeModal, setActiveModal] = useState<AppState['activeModal']>('none');
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
@@ -32,7 +29,6 @@ export function useAmuxState(tmuxService: TmuxService, pollIntervalMs: number = 
       setLastRefreshedAt(new Date());
       setError(null);
 
-      // Auto-expand all workspaces by default on first load if empty
       setExpandedNodeIds((prev) => {
         if (prev.size === 0 && data.length > 0) {
           const next = new Set<string>();
@@ -176,7 +172,6 @@ export function useAmuxState(tmuxService: TmuxService, pollIntervalMs: number = 
     }
   }, [selectedNode, tmuxService, lastRefreshedAt]);
 
-  // Expand / Collapse helper
   const toggleExpand = useCallback((nodeId: string) => {
     setExpandedNodeIds((prev) => {
       const next = new Set(prev);
@@ -189,7 +184,6 @@ export function useAmuxState(tmuxService: TmuxService, pollIntervalMs: number = 
     });
   }, []);
 
-  // Selection navigation helpers
   const moveSelection = useCallback(
     (direction: 'up' | 'down') => {
       if (visibleNodes.length === 0) return;
@@ -207,7 +201,6 @@ export function useAmuxState(tmuxService: TmuxService, pollIntervalMs: number = 
     [visibleNodes, selectedNodeId]
   );
 
-  // Status Metrics Aggregation
   const statusMetrics = useMemo(() => {
     let totalPanes = 0;
     let starting = 0;
@@ -242,7 +235,6 @@ export function useAmuxState(tmuxService: TmuxService, pollIntervalMs: number = 
     expandedNodeIds,
     searchQuery,
     isSearching,
-    activeModal,
     lastRefreshedAt,
     isLoading,
     error,
@@ -252,7 +244,6 @@ export function useAmuxState(tmuxService: TmuxService, pollIntervalMs: number = 
     setSelectedNodeId,
     setSearchQuery,
     setIsSearching,
-    setActiveModal,
     toggleExpand,
     moveSelection,
     refresh,

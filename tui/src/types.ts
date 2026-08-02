@@ -59,7 +59,6 @@ export interface AppState {
   expandedNodeIds: Set<string>;
   searchQuery: string;
   isSearching: boolean;
-  activeModal: 'none' | 'spawn' | 'message' | 'help' | 'confirm-kill';
   lastRefreshedAt: Date | null;
   isLoading: boolean;
   error: string | null;

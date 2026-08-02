@@ -27,7 +27,6 @@ export const TreeNavigation: React.FC<TreeNavigationProps> = ({
         <Text color="gray" italic>
           No workspaces or agents found on tmux server.
         </Text>
-        <Text color="gray">Press [s] to spawn a workspace.</Text>
       </Box>
     );
   }
@@ -85,7 +84,7 @@ const TreeNodeRow: React.FC<TreeNodeRowProps> = ({ node, isSelected, isExpanded 
         <Text color={isSelected ? 'cyan' : 'gray'}>
           {isSelected ? '▶' : ' '}
         </Text>
-        <Text>
+        <Text wrap="truncate">
           {indent}
           <Text color="yellow" bold>
             {isExpanded ? '▼ 📁' : '▶ 📁'} {ws.name}
@@ -105,7 +104,7 @@ const TreeNodeRow: React.FC<TreeNodeRowProps> = ({ node, isSelected, isExpanded 
         <Text color={isSelected ? 'cyan' : 'gray'}>
           {isSelected ? '▶' : ' '}
         </Text>
-        <Text>
+        <Text wrap="truncate">
           {indent}
           <Text color="magenta" bold>
             {isExpanded ? '▼ 📋' : '▶ 📋'} {task.name}

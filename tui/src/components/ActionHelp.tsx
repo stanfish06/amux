@@ -13,17 +13,9 @@ export const ActionHelp: React.FC = () => {
       flexWrap="nowrap"
     >
       <Text wrap="truncate">
-        <Text color="cyan" bold>[j/k]</Text> <Text color="gray">Navigate</Text>
+        <Text color="cyan" bold>[j/k / ↑↓]</Text> <Text color="gray">Navigate</Text>
         <Text color="gray">  │  </Text>
-        <Text color="cyan" bold>[Space]</Text> <Text color="gray">Expand</Text>
-        <Text color="gray">  │  </Text>
-        <Text color="cyan" bold>[a]</Text> <Text color="gray">Attach</Text>
-        <Text color="gray">  │  </Text>
-        <Text color="cyan" bold>[s]</Text> <Text color="gray">Spawn</Text>
-        <Text color="gray">  │  </Text>
-        <Text color="cyan" bold>[m]</Text> <Text color="gray">Message</Text>
-        <Text color="gray">  │  </Text>
-        <Text color="red" bold>[k]</Text> <Text color="gray">Kill</Text>
+        <Text color="cyan" bold>[Space/Enter]</Text> <Text color="gray">Expand/Collapse</Text>
         <Text color="gray">  │  </Text>
         <Text color="cyan" bold>[/]</Text> <Text color="gray">Filter</Text>
         <Text color="gray">  │  </Text>
