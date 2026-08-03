@@ -28,10 +28,11 @@ def _addr(agent: dict) -> str:
 def context_to_string(ctx: dict) -> list[str]:
     """Concise agent-facing view of `core.build_context` output."""
     me = ctx["self"]
+    branch = f"  branch:{me.get('branch')}" if me.get("branch") else ""
     lines = [
         f"you: {me['name']}  {me['agent']} @{me['label']} {me['pane']}  "
         f"{ALIAS['window']}:{me['task']}  {ALIAS['session']}:{me['workspace']}  "
-        f"{me['state']}  {me['cwd']}",
+        f"{me['state']}{branch}  {me['cwd']}",
         f"team @ {me['workspace']}",
     ]
     rows = [a for group in ctx["team"] for a in group["agents"]]
@@ -55,9 +56,21 @@ def context_to_string(ctx: dict) -> list[str]:
                     row += f"  {_age(last['ts'])}"
                     if last["detail"]:
                         row += f"  \"{last['detail']}\""
+                if a.get("branch"):
+                    row += f"  {a['branch']}"
+                if a.get("last_commit"):
+                    row += f"  \"{a['last_commit']}\""
                 if a["cwd"] and a["cwd"] != me["cwd"]:
                     row += f"  {a['cwd']}"
             lines.append(row.rstrip())
+    notes = ctx.get("notes") or []
+    if notes:
+        lines.append(f"notes @ {me['workspace']}/{me['task']} (visible):")
+        for n in notes:
+            lines.append(
+                f"  [{n['kind']}:{n['scope']}] {_age(n['ts'])} "
+                f"({n['agent'] or n['pane']})  {n['text']}"
+            )
     return lines
 
 

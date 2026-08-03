@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from libtmux import Pane, Server, Session, Window
 from libtmux.constants import PaneDirection
 
-from amux import events
+from amux import events, store, worktree
 from amux.shared import ALIAS, DEFAULT_SOCKET
 
 AGENT_COMMANDS = {
@@ -277,17 +277,19 @@ def _build_grid(
     ncols: int,
     agents: list[str],
     cwd: str | None,
+    workspace: str | None = None,
+    task: str | None = None,
 ) -> AgentGrid:
     if len(agents) != nrows * ncols:
         raise ValueError(f"{len(agents)} agents do not fit a {nrows}x{ncols} grid")
     taken = _taken_names(window.session)
     rows = _split_evenly(window.panes[0], nrows, PaneDirection.Below, cwd)
     agent_panes = []
+    panes_info: list[tuple[Pane, str, str]] = []
     for i, row_pane in enumerate(rows):
         cols = _split_evenly(row_pane, ncols, PaneDirection.Right, cwd)
         for j, pane in enumerate(cols):
             agent = agents[i * ncols + j]
-            command = AGENT_COMMANDS.get(agent, agent)
             label = f"r{i}c{j}"
             name = random_name(taken)
             taken.add(name)
@@ -300,23 +302,51 @@ def _build_grid(
             pane.set_hook(
                 "pane-exited", "run-shell 'amux event emit exit --pane #{hook_pane}'"
             )
-            if command:
-                pane.send_keys(command)
-            agent_panes.append(
-                AgentPane(
-                    pane=pane,
-                    cwd=cwd or pane.pane_current_path or "",
-                    agent_name=agent,
-                    label=label,
-                    name=name,
+            panes_info.append((pane, agent, name))
+
+    # Per-agent git worktrees when the target dir is a repo. Fail soft: a
+    # non-repo target keeps today's shared-directory behavior.
+    worktree_paths: dict[str, str] = {}
+    if workspace and task and cwd:
+        repo = worktree.repo_root(cwd)
+        if repo:
+            try:
+                worktree_paths = worktree.setup_task(
+                    repo,
+                    workspace,
+                    task,
+                    [(p.id or "", agent, name) for p, agent, name in panes_info],
                 )
+            except worktree.WorktreeError as exc:
+                print(f"amux: worktree isolation unavailable: {exc}")
+
+    for pane, agent, name in panes_info:
+        command = AGENT_COMMANDS.get(agent, agent)
+        wt = worktree_paths.get(pane.id or "")
+        pane_cwd = wt or cwd or pane.pane_current_path or ""
+        if wt:
+            pane.send_keys(worktree.shell_cd(wt))
+        if command:
+            pane.send_keys(command)
+        agent_panes.append(
+            AgentPane(
+                pane=pane,
+                cwd=pane_cwd,
+                agent_name=agent,
+                label=label_for(pane),
+                name=name,
             )
+        )
     return AgentGrid(
         window=window,
         agent_panes=agent_panes,
         cwd=cwd or "",
         task_name=window.name or "",
     )
+
+
+def label_for(pane: Pane) -> str:
+    return _pane_option(pane, LABEL_OPTION) or pane.id or ""
 
 
 def spawn_agent_space(
@@ -350,7 +380,15 @@ def spawn_agent_space(
     window = session.windows[0]
     window.rename_window(init_task_name)
     agents = init_grid_agents or ["claude"] * (init_grid_nrows * init_grid_ncols)
-    grid = _build_grid(window, init_grid_nrows, init_grid_ncols, agents, session_path)
+    grid = _build_grid(
+        window,
+        init_grid_nrows,
+        init_grid_ncols,
+        agents,
+        session_path,
+        workspace=session_name,
+        task=init_task_name,
+    )
     return AgentSpace(
         session=session,
         agent_grids=[grid],
@@ -371,7 +409,13 @@ def spawn_agent_grid(
         window_name=window_name, start_directory=cwd, attach=False
     )
     return _build_grid(
-        window, nrows, ncols, agents or ["claude"] * (nrows * ncols), cwd
+        window,
+        nrows,
+        ncols,
+        agents or ["claude"] * (nrows * ncols),
+        cwd,
+        workspace=session.name or "",
+        task=window_name,
     )
 
 
@@ -414,7 +458,8 @@ def load_agent_spaces(server: Server) -> list[AgentSpace]:
 def _roster_entry(pane: Pane) -> dict:
     ap = load_agent_pane(pane)
     last = events.tail(n=1, pane=pane.id or "")
-    return {
+    wt = store.worktree_for_pane(pane.id or "")
+    entry = {
         "name": ap.name,
         "agent": ap.agent_name,
         "label": ap.label,
@@ -427,6 +472,12 @@ def _roster_entry(pane: Pane) -> dict:
             else None
         ),
     }
+    if wt:
+        entry["branch"] = wt["branch"]
+        entry["worktree"] = wt["path"]
+        entry["repo"] = wt["repo"]
+        entry["last_commit"] = worktree.latest_commit_subject(wt["path"])
+    return entry
 
 
 def build_context(server: Server, pane_id: str) -> dict:
@@ -455,7 +506,16 @@ def build_context(server: Server, pane_id: str) -> dict:
                     "workspace": session.name or "",
                 }
         team.append({"task": w.name or "", "agents": agents})
-    return {"self": self_entry, "team": team}
+    assert self_entry is not None
+    notes = store.visible_notes(
+        workspace=self_entry["workspace"],
+        task=self_entry["task"],
+        pane=pane_id,
+        # This is the path that briefs an agent, so it is the one that most
+        # needs the repo filter: workspace/task are reusable tmux labels.
+        repo=self_entry.get("repo"),
+    )
+    return {"self": self_entry, "team": team, "notes": notes}
 
 
 # future feat, spawn and space where humans work and colab

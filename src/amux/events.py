@@ -6,15 +6,10 @@ import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass
-from pathlib import Path
-from typing import Iterator, Literal
+from typing import Literal
 
-from amux.shared import DEFAULT_SOCKET
-
-STATE_DIR = (
-    Path(os.environ.get("XDG_STATE_HOME", "~/.local/state")).expanduser() / "amux"
-)
-EVENTS_FILE = STATE_DIR / "events.jsonl"
+from amux import store
+from amux.shared import DEFAULT_SOCKET, STATE_DIR  # noqa: F401  (re-export)
 
 STATE_OPTION = "@amux_state"
 
@@ -37,6 +32,8 @@ class Event:
     pane: str
     agent: str = ""
     detail: str = ""
+    workspace: str = ""
+    task: str = ""
 
     @property
     def state(self) -> AgentState:
@@ -49,13 +46,25 @@ class Event:
     def from_line(cls, line: str) -> Event:
         return cls(**json.loads(line))
 
+    @classmethod
+    def from_row(cls, row: dict) -> Event:
+        return cls(
+            ts=row["ts"],
+            kind=row["kind"],
+            pane=row["pane"],
+            agent=row["agent"],
+            detail=row["detail"],
+            workspace=row.get("workspace", ""),
+            task=row.get("task", ""),
+        )
+
 
 def _amux_socket() -> str | None:
     tmux = os.environ.get("TMUX", "")
     if not tmux:
         return None
     socket_path = tmux.split(",")[0]
-    return socket_path if Path(socket_path).name.startswith(DEFAULT_SOCKET) else None
+    return socket_path if socket_path and socket_path.split("/")[-1].startswith(DEFAULT_SOCKET) else None
 
 
 def _tmux(socket_path: str, *args: str) -> None:
@@ -77,6 +86,36 @@ def _wait_channel(pane: str) -> str:
     return f"amux-state-{pane.lstrip('%')}"
 
 
+def resolve_scope(pane: str, socket_path: str | None = None) -> tuple[str, str]:
+    """Map a pane to its (workspace, task). Live tmux first (works for panes
+    with no worktree row), then the worktree registry (works for dead panes),
+    else ("", "")."""
+    socket_path = socket_path or _amux_socket()
+    if socket_path:
+        out = subprocess.run(
+            [
+                "tmux",
+                "-S",
+                socket_path,
+                "display-message",
+                "-p",
+                "-t",
+                pane,
+                "#{session_name}|||#{window_name}",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if out.returncode == 0 and "|||" in out.stdout:
+            session, _, window = out.stdout.strip().partition("|||")
+            if session:
+                return session, window
+    row = store.worktree_for_pane(pane)
+    if row:
+        return row["workspace"], row["task"]
+    return "", ""
+
+
 def emit(
     kind: EventKind,
     pane: str | None = None,
@@ -90,28 +129,48 @@ def emit(
     if not pane:
         return None
 
-    event = Event(ts=time.time(), kind=kind, pane=pane, agent=agent, detail=detail)
-
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    with EVENTS_FILE.open("a") as f:
-        f.write(event.to_line() + "\n")
-
+    workspace, task = resolve_scope(pane, socket_path)
+    event = Event(
+        ts=time.time(),
+        kind=kind,
+        pane=pane,
+        agent=agent,
+        detail=detail,
+        workspace=workspace,
+        task=task,
+    )
+    store.add_event(
+        ts=event.ts,
+        pane=pane,
+        kind=kind,
+        workspace=workspace,
+        task=task,
+        agent=agent,
+        detail=detail,
+    )
     _tmux(socket_path, "set-option", "-p", "-t", pane, STATE_OPTION, event.state)
     _tmux(socket_path, "wait-for", "-S", _wait_channel(pane))
     return event
 
 
-def iter_events() -> Iterator[Event]:
-    if not EVENTS_FILE.exists():
-        return
-    with EVENTS_FILE.open() as f:
-        for line in f:
-            if line.strip():
-                yield Event.from_line(line)
+def iter_events(
+    pane: str | None = None,
+    workspace: str | None = None,
+    task: str | None = None,
+) -> list[Event]:
+    return [
+        Event.from_row(r)
+        for r in store.iter_events(pane=pane, workspace=workspace, task=task)
+    ]
 
 
-def tail(n: int = 20, pane: str | None = None) -> list[Event]:
-    events = [e for e in iter_events() if pane is None or e.pane == pane]
+def tail(
+    n: int = 20,
+    pane: str | None = None,
+    workspace: str | None = None,
+    task: str | None = None,
+) -> list[Event]:
+    events = iter_events(pane=pane, workspace=workspace, task=task)
     return events[-n:]
 
 
@@ -134,10 +193,8 @@ def current_state(pane: str, socket_path: str | None = None) -> AgentState | Non
         ).stdout.strip()
         if out:
             return out  # type: ignore[return-value]
-    for event in reversed(list(iter_events())):
-        if event.pane == pane:
-            return event.state
-    return None
+    row = store.latest_event(pane)
+    return Event.from_row(row).state if row else None
 
 
 def wait(
@@ -195,7 +252,7 @@ def cmd_emit(server, args) -> int:
 
 
 def cmd_tail(server, args) -> int:
-    for event in tail(n=args.n, pane=args.pane):
+    for event in tail(n=args.n, pane=args.pane, workspace=args.workspace, task=args.task):
         print(event.to_line())
     return 0
 

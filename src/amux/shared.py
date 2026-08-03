@@ -1,8 +1,13 @@
 import os
 import sys
+from pathlib import Path
 
 ALIAS = {"session": "workspace", "window": "task", "pane": "agent"}
 DEFAULT_SOCKET = "amux-root"
+
+STATE_DIR = (
+    Path(os.environ.get("XDG_STATE_HOME", "~/.local/state")).expanduser() / "amux"
+)
 
 
 def scrub_pyinstaller_env() -> None:
