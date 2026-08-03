@@ -29,3 +29,27 @@ detail, live pane preview). It is a Node app under `tui/`, so build it once:
 ```sh
 cd tui && npm install && npm run build
 ```
+
+# examples
+<table width="100%">
+  <tr>
+    <th>tui monior</th>
+    <th>context database</th>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src="./tui.png" width="300" />
+    </td>
+    <td width="50%">
+      <img src="./db.png" width="300" />
+    </td>
+  </tr>
+  <tr>
+    <th>spawn 2 claude and 2 codex</th>
+  </tr>
+  <tr>
+    <td width="100%">
+      <img src="./spawn.png" width="300" />
+    </td>
+  </tr>
+</table>
