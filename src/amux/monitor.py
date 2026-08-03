@@ -45,6 +45,13 @@ def cmd_monitor(server, args) -> int:
     if node is None:
         raise ValueError("node not found on PATH; the monitor UI needs Node.js")
 
+    # The TUI reads events by shelling back into amux (the store is sqlite, and
+    # only this side runs its migration). Hand it our own path so the frozen
+    # binary works even when amux is not on the child's PATH.
+    amux_bin = sys.executable if getattr(sys, "frozen", False) else shutil.which("amux")
+    if amux_bin:
+        os.environ["AMUX_BIN"] = amux_bin
+
     os.execv(
         node,
         [

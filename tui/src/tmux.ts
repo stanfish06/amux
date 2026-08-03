@@ -1,8 +1,5 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import os from 'node:os';
 import {
   AgentState,
   AmuxEvent,
@@ -146,13 +143,22 @@ export class TmuxService {
     }
   }
 
+  // Events live in the sqlite context store, not a flat file. Rather than open
+  // context.db here — which would duplicate the schema and skip the migration
+  // that only the Python side runs — shell out to amux and read the JSONL it
+  // already emits. $AMUX_BIN is set by `amux monitor` so the frozen binary
+  // finds itself; a bare `amux` on PATH covers `npm run dev`.
   private async latestEventByPane(): Promise<Map<string, AmuxEvent>> {
-    const stateHome = process.env.XDG_STATE_HOME || path.join(os.homedir(), '.local', 'state');
     const latest = new Map<string, AmuxEvent>();
 
     let content: string;
     try {
-      content = await fs.readFile(path.join(stateHome, 'amux', 'events.jsonl'), 'utf8');
+      const { stdout } = await execFileAsync(
+        process.env.AMUX_BIN || 'amux',
+        ['event', 'tail', '-n', String(MAX_EVENTS)],
+        { maxBuffer: 4 * 1024 * 1024 }
+      );
+      content = stdout;
     } catch {
       return latest;
     }
