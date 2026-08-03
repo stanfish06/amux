@@ -36,8 +36,8 @@ cd tui && npm install && npm run build
     <th>tui monior</th>
   </tr>
   <tr>
-    <td width="50%">
-      <img src="./tui.png" width="300" />
+    <td width="100%">
+      <img src="./tui.png" width="600" />
     </td>
   </tr>
   <tr>
@@ -45,7 +45,7 @@ cd tui && npm install && npm run build
   </tr>
   <tr>
     <td width="100%">
-      <img src="./db.png" width="300" />
+      <img src="./db.png" width="600" />
     </td>
   </tr>
   <tr>
@@ -53,7 +53,7 @@ cd tui && npm install && npm run build
   </tr>
   <tr>
     <td width="100%">
-      <img src="./spawn.png" width="300" />
+      <img src="./spawn.png" width="600" />
     </td>
   </tr>
 </table>
