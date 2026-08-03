@@ -34,13 +34,17 @@ cd tui && npm install && npm run build
 <table width="100%">
   <tr>
     <th>tui monior</th>
-    <th>context database</th>
   </tr>
   <tr>
     <td width="50%">
       <img src="./tui.png" width="300" />
     </td>
-    <td width="50%">
+  </tr>
+  <tr>
+    <th>context database</th>
+  </tr>
+  <tr>
+    <td width="100%">
       <img src="./db.png" width="300" />
     </td>
   </tr>
