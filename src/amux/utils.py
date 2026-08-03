@@ -1,9 +1,10 @@
 import time
 
-from libtmux import Pane, Window, Session
+from libtmux import Pane, Session, Window
+
 from amux.core import _pane_option
-from amux.shared import ALIAS
 from amux.events import STATE_OPTION
+from amux.shared import ALIAS
 
 
 def _pane_state(pane: Pane) -> str:

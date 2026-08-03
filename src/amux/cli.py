@@ -6,7 +6,7 @@ import os
 import sys
 from collections import Counter
 
-from amux import core, events, monitor, utils, worktree
+from amux import core, events, monitor, store, utils, worktree
 from amux.shared import ALIAS, scrub_pyinstaller_env
 
 
@@ -199,11 +199,7 @@ def _cmd_notes(server, args) -> int:
             )
     if args.json:
         for n in notes:
-            print(
-                json.dumps(
-                    n, separators=(",", ":"), default=str
-                )
-            )
+            print(json.dumps(n, separators=(",", ":"), default=str))
     else:
         for n in notes:
             scope = n["scope"]
@@ -221,7 +217,9 @@ def _cmd_integrate(server, args) -> int:
     rc = 0
     for r in results:
         if r.ok:
-            print(f"merged {r.name} ({r.branch}) — {r.commits} commit(s), {r.shortstat or 'no changes'}")
+            print(
+                f"merged {r.name} ({r.branch}) — {r.commits} commit(s), {r.shortstat or 'no changes'}"
+            )
         else:
             print(f"CONFLICT {r.name} ({r.branch}): {r.error}", file=sys.stderr)
             rc = 1
@@ -297,7 +295,8 @@ def main(argv: list[str] | None = None) -> int:
     p_kw = sub.add_parser("kw", help="kill a workspace")
     p_kw.add_argument("workspace")
     p_kw.add_argument(
-        "--clean", action="store_true",
+        "--clean",
+        action="store_true",
         help="also remove the workspace's git worktrees (branches are kept)",
     )
     p_kw.set_defaults(func=_cmd_kw)
@@ -306,7 +305,8 @@ def main(argv: list[str] | None = None) -> int:
     p_kg.add_argument("workspace")
     p_kg.add_argument("task")
     p_kg.add_argument(
-        "--clean", action="store_true",
+        "--clean",
+        action="store_true",
         help="also remove the task's git worktrees (branches are kept)",
     )
     p_kg.set_defaults(func=_cmd_kg)
@@ -316,11 +316,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_note.add_argument("text", nargs="+", help="note text")
     p_note.add_argument(
-        "--scope", default="task", choices=store.NOTE_SCOPES,
+        "--scope",
+        default="task",
+        choices=store.NOTE_SCOPES,
         help="visibility scope (default: task)",
     )
     p_note.add_argument(
-        "--kind", default="note", choices=store.NOTE_KINDS,
+        "--kind",
+        default="note",
+        choices=store.NOTE_KINDS,
         help="note kind (default: note)",
     )
     p_note.add_argument("--pane", default=None, help="pane id (default: $TMUX_PANE)")
@@ -344,11 +348,14 @@ def main(argv: list[str] | None = None) -> int:
     p_integrate.add_argument("workspace")
     p_integrate.add_argument("task")
     p_integrate.add_argument(
-        "--agent", action="append", default=None,
+        "--agent",
+        action="append",
+        default=None,
         help="agent name to merge (repeatable; default: every active worktree)",
     )
     p_integrate.add_argument(
-        "--all", action="store_true",
+        "--all",
+        action="store_true",
         help="merge every active worktree of the task (default)",
     )
     p_integrate.set_defaults(func=_cmd_integrate)
