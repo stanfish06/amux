@@ -158,11 +158,23 @@ def _cmd_note(server, args) -> int:
 
 def _cmd_notes(server, args) -> int:
     if args.workspace or args.repo:
+        # agent-scoped notes are private to their pane on every route, not just
+        # the pane one below; without a pane filter here --workspace would hand
+        # out every teammate's private notes.
+        pane = None
+        if args.scope == "agent":
+            pane = args.pane or events.self_pane_id()
+            if pane is None:
+                raise ValueError(
+                    f"--scope agent is private to one {ALIAS['pane']}; "
+                    f"run it inside a pane or pass --pane"
+                )
         notes = store.query_notes(
             workspace=args.workspace,
             task=args.task,
             scope=args.scope,
             kind=args.kind,
+            pane=pane,
             repo=args.repo,
             limit=args.n,
         )
@@ -177,14 +189,13 @@ def _cmd_notes(server, args) -> int:
             raise ValueError(f"could not resolve workspace for {ALIAS['pane']} {pane}")
         row = store.worktree_for_pane(pane)
         repo = row["repo"] if row else None
-        if args.scope and args.scope != "task":
+        if args.scope:
             notes = store.query_notes(
                 workspace=workspace,
                 task=args.task or task,
                 scope=args.scope,
                 kind=args.kind,
-                # agent-scoped notes are private to their pane; without this the
-                # filter would widen visibility instead of narrowing it.
+                # see above: narrow to this pane, never widen.
                 pane=pane if args.scope == "agent" else None,
                 repo=repo,
                 limit=args.n,
@@ -194,6 +205,7 @@ def _cmd_notes(server, args) -> int:
                 workspace=workspace,
                 task=args.task or task,
                 pane=pane,
+                kind=args.kind,
                 repo=repo,
                 limit=args.n,
             )

@@ -322,6 +322,7 @@ def visible_notes(
     task: str,
     pane: str,
     limit: int = 10,
+    kind: str | None = None,
     repo: str | None = None,
     db_path: Path | None = None,
 ) -> list[dict[str, Any]]:
@@ -334,6 +335,9 @@ def visible_notes(
         ")"
     )
     params: tuple = (workspace, task, task, pane)
+    if kind is not None:
+        sql += " AND kind = ?"
+        params += (kind,)
     if repo:
         sql += " AND (repo = ? OR repo = '')"
         params += (repo,)
