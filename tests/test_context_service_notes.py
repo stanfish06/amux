@@ -19,7 +19,7 @@ from amux import context_service as cs
 from amux import core, events, store
 
 
-# --- a tmux server without tmux ---
+# --- a notes_tmux server without notes_tmux ---
 
 
 @dataclass
@@ -45,14 +45,14 @@ class FakeSession:
 @dataclass
 class FakeServer:
     """Enough libtmux surface for `core.build_context`. Pane facts come from
-    the table below rather than from a tmux subprocess."""
+    the table below rather than from a notes_tmux subprocess."""
 
     socket_name: str = "amux-root"
     sessions: list[FakeSession] = field(default_factory=list)
 
 
 @pytest.fixture
-def tmux(monkeypatch):
+def notes_tmux(monkeypatch):
     """A one-workspace, one-task server holding two agent panes."""
     facts: dict[str, events.PaneFacts] = {}
 
@@ -76,8 +76,8 @@ def tmux(monkeypatch):
         id="@1",
         name="fix",
         panes=[
-            make_pane("%1", "swift-crane", "claude", 1000.0),
-            make_pane("%2", "happy-deer", "codex", 1000.0),
+            make_pane("%1", "swift-caller", "claude", 1000.0),
+            make_pane("%2", "happy-teammate", "codex", 1000.0),
         ],
     )
     server = FakeServer(sessions=[FakeSession(name="proj", windows=[window])])
@@ -157,25 +157,30 @@ class Probe:
 
 
 @pytest.fixture
-def probe(tmp_path, db_path, tmux):
-    config = cs.ServiceConfig(port=0, db_path=db_path, state_dir=tmp_path / "state")
-    handle = cs.start_service(config, server_factory=lambda socket: tmux)
+def notes_probe(tmp_path, db_path, notes_tmux):
+    config = cs.ServiceConfig(
+        port=0,
+        db_path=db_path,
+        state_dir=tmp_path / "state",
+        shutdown_poll_s=0.01,  # a server per test case; see the note in _config
+    )
+    handle = cs.start_service(config, server_factory=lambda socket: notes_tmux)
     try:
-        yield Probe(handle=handle, db=db_path, server=tmux)
+        yield Probe(handle=handle, db=db_path, server=notes_tmux)
     finally:
         handle.stop()
 
 
 @pytest.fixture
-def crane(probe):
-    """The caller: %1, `swift-crane`."""
-    return probe.agent("%1", "swift-crane")
+def caller(notes_probe):
+    """The caller: %1, `swift-caller`."""
+    return notes_probe.agent("%1", "swift-caller")
 
 
 @pytest.fixture
-def deer(probe):
-    """A teammate in the same task: %2, `happy-deer`."""
-    return probe.agent("%2", "happy-deer", agent="codex")
+def teammate(notes_probe):
+    """A teammate in the same task: %2, `happy-teammate`."""
+    return notes_probe.agent("%2", "happy-teammate", agent="codex")
 
 
 # --- GET /v1/context ---
@@ -185,12 +190,12 @@ def _without_last_commit(entry: dict) -> dict:
     return {k: v for k, v in entry.items() if k != "last_commit"}
 
 
-def test_context_matches_the_native_call(probe, crane, deer):
+def test_context_matches_the_native_call(notes_probe, caller, teammate):
     """Same function, so same answer — bar `last_commit`, which the service
     blanks for a pathless row (see the next test)."""
-    status, payload = probe.get("/v1/context", crane)
+    status, payload = notes_probe.get("/v1/context", caller)
     assert status == 200
-    native = core.build_context(probe.server, "%1")
+    native = core.build_context(notes_probe.server, "%1")
     assert [
         {"task": t["task"], "agents": [_without_last_commit(a) for a in t["agents"]]}
         for t in payload["team"]
@@ -208,26 +213,26 @@ def test_context_matches_the_native_call(probe, crane, deer):
     assert set(payload) == {"self", "team", "notes"}
 
 
-def test_context_self_carries_the_runtime_identity(probe, crane):
-    _, payload = probe.get("/v1/context", crane)
+def test_context_self_carries_the_runtime_identity(notes_probe, caller):
+    _, payload = notes_probe.get("/v1/context", caller)
     assert payload["self"]["runtime"] == "docker-sandbox"
     assert payload["self"]["runtime_status"] == "running"
-    assert payload["self"]["sandbox_name"] == "amux-proj-fix-swift-crane"
-    assert payload["self"]["sandbox_id"] == "sbx-swift-crane"
+    assert payload["self"]["sandbox_name"] == "amux-proj-fix-swift-caller"
+    assert payload["self"]["sandbox_id"] == "sbx-swift-caller"
     assert payload["self"]["workspace"] == "proj"
     assert payload["self"]["task"] == "fix"
-    assert payload["self"]["name"] == "swift-crane"
+    assert payload["self"]["name"] == "swift-caller"
 
 
-def test_context_includes_the_whole_task_roster(probe, crane, deer):
-    _, payload = probe.get("/v1/context", crane)
+def test_context_includes_the_whole_task_roster(notes_probe, caller, teammate):
+    _, payload = notes_probe.get("/v1/context", caller)
     tasks = {t["task"] for t in payload["team"]}
     assert tasks == {"fix"}
     names = {a["name"] for t in payload["team"] for a in t["agents"]}
-    assert names == {"swift-crane", "happy-deer"}
+    assert names == {"swift-caller", "happy-teammate"}
 
 
-def test_context_reports_no_last_commit_for_a_pathless_row(probe, crane):
+def test_context_reports_no_last_commit_for_a_pathless_row(notes_probe, caller):
     """A sandbox row has no host worktree, and `git -C ""` runs wherever the
     service happens to live — so the native call reports the *host* checkout's
     commit subject for a sandbox pane. The service must not pass that on.
@@ -236,11 +241,11 @@ def test_context_reports_no_last_commit_for_a_pathless_row(probe, crane):
     runtime-aware, `native` below stops leaking and the service's own guard
     becomes redundant rather than wrong.
     """
-    native = core.build_context(probe.server, "%1")
+    native = core.build_context(notes_probe.server, "%1")
     assert native["self"]["worktree"] == ""
     leaked = native["self"]["last_commit"]
 
-    _, payload = probe.get("/v1/context", crane)
+    _, payload = notes_probe.get("/v1/context", caller)
     entries = [payload["self"], *(a for t in payload["team"] for a in t["agents"])]
     registered = [e for e in entries if "worktree" in e]
     assert registered, "the caller at least must have a registry row"
@@ -252,28 +257,28 @@ def test_context_reports_no_last_commit_for_a_pathless_row(probe, crane):
         assert leaked not in json.dumps(payload)
 
 
-def test_context_says_so_when_the_host_pane_is_gone(probe):
-    token = probe.agent("%99", "ghost-agent")
-    status, payload = probe.get("/v1/context", token)
+def test_context_says_so_when_the_host_pane_is_gone(notes_probe):
+    token = notes_probe.agent("%99", "ghost-agent")
+    status, payload = notes_probe.get("/v1/context", token)
     assert status == 503
     assert payload["error"]["code"] == "service_unavailable"
     assert "ghost-agent" in payload["error"]["message"]
 
 
-def test_context_needs_the_read_capability(probe):
-    probe.agent("%1", "swift-crane", permissions=())
+def test_context_needs_the_read_capability(notes_probe):
+    notes_probe.agent("%1", "swift-caller", permissions=())
     worktree_id = store.register_worktree(
         pane="%1",
         workspace="proj",
         task="fix",
         path="",
         branch="b",
-        db_path=probe.db,
+        db_path=notes_probe.db,
     )
     token, _ = store.mint_context_token(
-        worktree_id, permissions=(cs.PERM_NOTES_WRITE,), db_path=probe.db
+        worktree_id, permissions=(cs.PERM_NOTES_WRITE,), db_path=notes_probe.db
     )
-    status, payload = probe.get("/v1/context", token)
+    status, payload = notes_probe.get("/v1/context", token)
     assert status == 403
     assert cs.PERM_CONTEXT_READ in payload["error"]["message"]
 
@@ -281,24 +286,24 @@ def test_context_needs_the_read_capability(probe):
 # --- GET /v1/notes ---
 
 
-def _post_note(probe, token, text, scope="task", kind="note"):
-    status, payload = probe.post(
+def _post_note(notes_probe, token, text, scope="task", kind="note"):
+    status, payload = notes_probe.post(
         "/v1/notes", {"text": text, "scope": scope, "kind": kind}, token
     )
     assert status == 200, payload
     return payload["note"]
 
 
-def test_notes_match_the_native_visible_notes(probe, crane, deer):
-    _post_note(probe, crane, "mine, task scoped")
-    _post_note(probe, deer, "theirs, task scoped")
-    _post_note(probe, crane, "mine, private", scope="agent")
-    _post_note(probe, deer, "theirs, private", scope="agent")
-    _post_note(probe, deer, "everyone", scope="workspace")
+def test_notes_match_the_native_visible_notes(notes_probe, caller, teammate):
+    _post_note(notes_probe, caller, "mine, task scoped")
+    _post_note(notes_probe, teammate, "theirs, task scoped")
+    _post_note(notes_probe, caller, "mine, private", scope="agent")
+    _post_note(notes_probe, teammate, "theirs, private", scope="agent")
+    _post_note(notes_probe, teammate, "everyone", scope="workspace")
 
-    _, payload = probe.get("/v1/notes", crane)
+    _, payload = notes_probe.get("/v1/notes", caller)
     native = store.visible_notes(
-        workspace="proj", task="fix", pane="%1", repo="/repos/proj", db_path=probe.db
+        workspace="proj", task="fix", pane="%1", repo="/repos/proj", db_path=notes_probe.db
     )
     assert payload["notes"] == native
     texts = [n["text"] for n in payload["notes"]]
@@ -307,99 +312,99 @@ def test_notes_match_the_native_visible_notes(probe, crane, deer):
     assert "everyone" in texts
 
 
-def test_an_agent_scoped_note_stays_private_on_the_scoped_route(probe, crane, deer):
-    _post_note(probe, deer, "theirs, private", scope="agent")
-    _post_note(probe, crane, "mine, private", scope="agent")
-    _, payload = probe.get("/v1/notes?scope=agent", crane)
+def test_an_agent_scoped_note_stays_private_on_the_scoped_route(notes_probe, caller, teammate):
+    _post_note(notes_probe, teammate, "theirs, private", scope="agent")
+    _post_note(notes_probe, caller, "mine, private", scope="agent")
+    _, payload = notes_probe.get("/v1/notes?scope=agent", caller)
     assert [n["text"] for n in payload["notes"]] == ["mine, private"]
 
 
-def test_notes_are_filtered_by_repository(probe, crane):
-    """Workspace and task are reusable tmux labels; the repo is what makes a
+def test_notes_are_filtered_by_repository(notes_probe, caller):
+    """Workspace and task are reusable notes_tmux labels; the repo is what makes a
     note belong to this checkout."""
-    other = probe.agent("%2", "other-repo-agent", repo="/repos/elsewhere")
-    _post_note(probe, other, "from another repository")
-    _post_note(probe, crane, "from this repository")
-    _, payload = probe.get("/v1/notes", crane)
+    other = notes_probe.agent("%2", "other-repo-agent", repo="/repos/elsewhere")
+    _post_note(notes_probe, other, "from another repository")
+    _post_note(notes_probe, caller, "from this repository")
+    _, payload = notes_probe.get("/v1/notes", caller)
     texts = [n["text"] for n in payload["notes"]]
     assert texts == ["from this repository"]
 
 
-def test_notes_honours_kind_and_limit(probe, crane):
-    _post_note(probe, crane, "a finding", kind="finding")
+def test_notes_honours_kind_and_limit(notes_probe, caller):
+    _post_note(notes_probe, caller, "a finding", kind="finding")
     for i in range(5):
-        _post_note(probe, crane, f"note {i}")
-    _, payload = probe.get("/v1/notes?kind=finding", crane)
+        _post_note(notes_probe, caller, f"note {i}")
+    _, payload = notes_probe.get("/v1/notes?kind=finding", caller)
     assert [n["text"] for n in payload["notes"]] == ["a finding"]
-    _, payload = probe.get("/v1/notes?limit=2", crane)
+    _, payload = notes_probe.get("/v1/notes?limit=2", caller)
     assert len(payload["notes"]) == 2
 
 
-def test_notes_defaults_to_the_configured_page_size(probe, crane):
+def test_notes_defaults_to_the_configured_page_size(notes_probe, caller):
     for i in range(15):
-        _post_note(probe, crane, f"note {i}")
-    _, payload = probe.get("/v1/notes", crane)
-    assert len(payload["notes"]) == probe.handle.service.config.default_results
+        _post_note(notes_probe, caller, f"note {i}")
+    _, payload = notes_probe.get("/v1/notes", caller)
+    assert len(payload["notes"]) == notes_probe.handle.service.config.default_results
 
 
-def test_a_sibling_task_is_readable_but_its_private_notes_are_not(probe, crane):
+def test_a_sibling_task_is_readable_but_its_private_notes_are_not(notes_probe, caller):
     """Native `amux notes --task other` is allowed; widening the task must not
     widen what is private."""
-    sibling = probe.agent("%2", "sibling", task="other")
-    _post_note(probe, sibling, "sibling task note")
-    _post_note(probe, sibling, "sibling private", scope="agent")
-    _, payload = probe.get("/v1/notes?task=other", crane)
+    sibling = notes_probe.agent("%2", "sibling", task="other")
+    _post_note(notes_probe, sibling, "sibling task note")
+    _post_note(notes_probe, sibling, "sibling private", scope="agent")
+    _, payload = notes_probe.get("/v1/notes?task=other", caller)
     texts = [n["text"] for n in payload["notes"]]
     assert "sibling task note" in texts
     assert "sibling private" not in texts
 
 
-def test_a_foreign_workspace_is_refused(probe, crane):
-    status, payload = probe.get("/v1/notes?workspace=elsewhere", crane)
+def test_a_foreign_workspace_is_refused(notes_probe, caller):
+    status, payload = notes_probe.get("/v1/notes?workspace=elsewhere", caller)
     assert status == 403
     assert payload["error"]["code"] == "forbidden"
     assert "elsewhere" in payload["error"]["message"]
     assert "proj/fix" in payload["error"]["message"]
     # The caller's own workspace is fine.
-    assert probe.get("/v1/notes?workspace=proj", crane)[0] == 200
+    assert notes_probe.get("/v1/notes?workspace=proj", caller)[0] == 200
 
 
-def test_a_foreign_repository_is_refused(probe, crane):
-    status, payload = probe.get("/v1/notes?repo=/repos/elsewhere", crane)
+def test_a_foreign_repository_is_refused(notes_probe, caller):
+    status, payload = notes_probe.get("/v1/notes?repo=/repos/elsewhere", caller)
     assert status == 403
-    assert probe.get("/v1/notes?repo=/repos/proj", crane)[0] == 200
+    assert notes_probe.get("/v1/notes?repo=/repos/proj", caller)[0] == 200
 
 
 # --- cursors ---
 
 
-def test_the_cursor_is_the_highest_note_seen(probe, crane):
-    first = _post_note(probe, crane, "one")
-    second = _post_note(probe, crane, "two")
-    _, payload = probe.get("/v1/notes", crane)
+def test_the_cursor_is_the_highest_note_seen(notes_probe, caller):
+    first = _post_note(notes_probe, caller, "one")
+    second = _post_note(notes_probe, caller, "two")
+    _, payload = notes_probe.get("/v1/notes", caller)
     assert payload["cursor"] == max(first["id"], second["id"])
 
 
-def test_a_cursor_returns_only_later_notes_in_order(probe, crane):
-    first = _post_note(probe, crane, "one")
-    _, payload = probe.get(f"/v1/notes?after={first['id']}", crane)
+def test_a_cursor_returns_only_later_notes_in_order(notes_probe, caller):
+    first = _post_note(notes_probe, caller, "one")
+    _, payload = notes_probe.get(f"/v1/notes?after={first['id']}", caller)
     assert payload["notes"] == []
     assert payload["cursor"] == first["id"]  # never rewinds
 
-    second = _post_note(probe, crane, "two")
-    third = _post_note(probe, crane, "three")
-    _, payload = probe.get(f"/v1/notes?after={first['id']}", crane)
+    second = _post_note(notes_probe, caller, "two")
+    third = _post_note(notes_probe, caller, "three")
+    _, payload = notes_probe.get(f"/v1/notes?after={first['id']}", caller)
     assert [n["id"] for n in payload["notes"]] == [second["id"], third["id"]]
     assert payload["cursor"] == third["id"]
 
 
-def test_a_cursor_walk_sees_every_note_exactly_once(probe, crane):
+def test_a_cursor_walk_sees_every_note_exactly_once(notes_probe, caller):
     """A burst larger than one page must be caught up, not skipped."""
-    posted = [_post_note(probe, crane, f"note {i}")["id"] for i in range(25)]
+    posted = [_post_note(notes_probe, caller, f"note {i}")["id"] for i in range(25)]
     seen: list[int] = []
     cursor = 0
     for _ in range(10):
-        _, payload = probe.get(f"/v1/notes?after={cursor}&limit=5", crane)
+        _, payload = notes_probe.get(f"/v1/notes?after={cursor}&limit=5", caller)
         ids = [n["id"] for n in payload["notes"]]
         if not ids:
             break
@@ -409,8 +414,8 @@ def test_a_cursor_walk_sees_every_note_exactly_once(probe, crane):
     assert len(set(seen)) == len(seen)
 
 
-def test_the_cursor_is_null_when_there_is_nothing_at_all(probe, crane):
-    _, payload = probe.get("/v1/notes", crane)
+def test_the_cursor_is_null_when_there_is_nothing_at_all(notes_probe, caller):
+    _, payload = notes_probe.get("/v1/notes", caller)
     assert payload["notes"] == []
     assert payload["cursor"] is None
 
@@ -418,27 +423,27 @@ def test_the_cursor_is_null_when_there_is_nothing_at_all(probe, crane):
 # --- POST /v1/notes ---
 
 
-def test_a_posted_note_is_attributed_to_the_caller(probe, crane):
-    note = _post_note(probe, crane, "hello from the sandbox")
+def test_a_posted_note_is_attributed_to_the_caller(notes_probe, caller):
+    note = _post_note(notes_probe, caller, "hello from the sandbox")
     assert note["workspace"] == "proj"
     assert note["task"] == "fix"
     assert note["pane"] == "%1"
     assert note["agent"] == "claude"
-    assert note["worktree_id"] == probe.worktrees["swift-crane"]
+    assert note["worktree_id"] == notes_probe.worktrees["swift-caller"]
     assert note["repo"] == "/repos/proj"
-    assert note["name"] == "swift-crane"
+    assert note["name"] == "swift-caller"
     assert note["scope"] == "task"
     assert note["kind"] == "note"
 
 
-def test_the_returned_row_is_the_row_the_store_holds(probe, crane):
+def test_the_returned_row_is_the_row_the_store_holds(notes_probe, caller):
     """The response is built from what was inserted, so this pins it against a
     read-back: a new notes column has to fail here rather than drift."""
-    note = _post_note(probe, crane, "read me back")
+    note = _post_note(notes_probe, caller, "read me back")
     stored = [
         n
         for n in store.query_notes(
-            workspace="proj", task="fix", limit=10, db_path=probe.db
+            workspace="proj", task="fix", limit=10, db_path=notes_probe.db
         )
         if n["id"] == note["id"]
     ][0]
@@ -446,8 +451,8 @@ def test_the_returned_row_is_the_row_the_store_holds(probe, crane):
     assert {k: v for k, v in note.items() if k != "name"} == stored
 
 
-def test_a_body_cannot_attribute_a_note_to_anyone_else(probe, crane, deer):
-    status, payload = probe.post(
+def test_a_body_cannot_attribute_a_note_to_anyone_else(notes_probe, caller, teammate):
+    status, payload = notes_probe.post(
         "/v1/notes",
         {
             "text": "not from me",
@@ -455,53 +460,53 @@ def test_a_body_cannot_attribute_a_note_to_anyone_else(probe, crane, deer):
             "agent": "codex",
             "workspace": "elsewhere",
             "task": "other",
-            "worktree_id": probe.worktrees["happy-deer"],
-            "name": "happy-deer",
+            "worktree_id": notes_probe.worktrees["happy-teammate"],
+            "name": "happy-teammate",
         },
-        crane,
+        caller,
     )
     assert status == 200
     note = payload["note"]
     assert note["pane"] == "%1"
     assert note["agent"] == "claude"
     assert note["workspace"] == "proj"
-    assert note["worktree_id"] == probe.worktrees["swift-crane"]
-    assert note["name"] == "swift-crane"
+    assert note["worktree_id"] == notes_probe.worktrees["swift-caller"]
+    assert note["name"] == "swift-caller"
 
 
-def test_every_scope_and_kind_round_trips(probe, crane):
+def test_every_scope_and_kind_round_trips(notes_probe, caller):
     for scope in store.NOTE_SCOPES:
         for kind in store.NOTE_KINDS:
-            note = _post_note(probe, crane, f"{scope}/{kind}", scope=scope, kind=kind)
+            note = _post_note(notes_probe, caller, f"{scope}/{kind}", scope=scope, kind=kind)
             assert (note["scope"], note["kind"]) == (scope, kind)
 
 
 def test_a_posted_note_is_visible_to_a_teammate_and_to_the_native_path(
-    probe, crane, deer
+    notes_probe, caller, teammate
 ):
-    note = _post_note(probe, crane, "shared with the task")
-    _, theirs = probe.get("/v1/notes", deer)
+    note = _post_note(notes_probe, caller, "shared with the task")
+    _, theirs = notes_probe.get("/v1/notes", teammate)
     assert note["id"] in [n["id"] for n in theirs["notes"]]
     native = store.visible_notes(
-        workspace="proj", task="fix", pane="%2", repo="/repos/proj", db_path=probe.db
+        workspace="proj", task="fix", pane="%2", repo="/repos/proj", db_path=notes_probe.db
     )
     assert note["id"] in [n["id"] for n in native]
 
 
-def test_an_agent_scoped_note_is_invisible_to_a_teammate(probe, crane, deer):
-    note = _post_note(probe, crane, "just for me", scope="agent")
-    _, theirs = probe.get("/v1/notes", deer)
+def test_an_agent_scoped_note_is_invisible_to_a_teammate(notes_probe, caller, teammate):
+    note = _post_note(notes_probe, caller, "just for me", scope="agent")
+    _, theirs = notes_probe.get("/v1/notes", teammate)
     assert note["id"] not in [n["id"] for n in theirs["notes"]]
 
 
-def test_posting_needs_the_write_capability(probe):
+def test_posting_needs_the_write_capability(notes_probe):
     worktree_id = store.register_worktree(
-        pane="%1", workspace="proj", task="fix", path="", branch="b", db_path=probe.db
+        pane="%1", workspace="proj", task="fix", path="", branch="b", db_path=notes_probe.db
     )
     token, _ = store.mint_context_token(
-        worktree_id, permissions=(cs.PERM_CONTEXT_READ,), db_path=probe.db
+        worktree_id, permissions=(cs.PERM_CONTEXT_READ,), db_path=notes_probe.db
     )
-    status, payload = probe.post("/v1/notes", {"text": "nope"}, token)
+    status, payload = notes_probe.post("/v1/notes", {"text": "nope"}, token)
     assert status == 403
     assert cs.PERM_NOTES_WRITE in payload["error"]["message"]
 
@@ -509,39 +514,39 @@ def test_posting_needs_the_write_capability(probe):
 # --- bounds on notes ---
 
 
-def test_an_oversized_note_is_refused_with_the_limit_and_the_length(probe, crane):
-    limit = probe.handle.service.config.max_text_chars
-    status, payload = probe.post("/v1/notes", {"text": "x" * (limit + 7)}, crane)
+def test_an_oversized_note_is_refused_with_the_limit_and_the_length(notes_probe, caller):
+    limit = notes_probe.handle.service.config.max_text_chars
+    status, payload = notes_probe.post("/v1/notes", {"text": "x" * (limit + 7)}, caller)
     assert status == 400
     assert payload["error"]["code"] == "invalid_request"
     assert str(limit) in payload["error"]["message"]
     assert str(limit + 7) in payload["error"]["message"]
     # Nothing was committed.
-    assert store.query_notes(workspace="proj", limit=10, db_path=probe.db) == []
+    assert store.query_notes(workspace="proj", limit=10, db_path=notes_probe.db) == []
 
 
-def test_a_note_at_the_limit_is_accepted(probe, crane):
-    limit = probe.handle.service.config.max_text_chars
-    note = _post_note(probe, crane, "x" * limit)
+def test_a_note_at_the_limit_is_accepted(notes_probe, caller):
+    limit = notes_probe.handle.service.config.max_text_chars
+    note = _post_note(notes_probe, caller, "x" * limit)
     assert len(note["text"]) == limit
 
 
 @pytest.mark.parametrize("text", ["", "   ", "\n\t"])
-def test_an_empty_note_is_refused(probe, crane, text):
-    status, payload = probe.post("/v1/notes", {"text": text}, crane)
+def test_an_empty_note_is_refused(notes_probe, caller, text):
+    status, payload = notes_probe.post("/v1/notes", {"text": text}, caller)
     assert status == 400
     assert "text" in payload["error"]["message"]
 
 
-def test_a_missing_text_field_is_refused(probe, crane):
-    status, payload = probe.post("/v1/notes", {"scope": "task"}, crane)
+def test_a_missing_text_field_is_refused(notes_probe, caller):
+    status, payload = notes_probe.post("/v1/notes", {"scope": "task"}, caller)
     assert status == 400
     assert "text" in payload["error"]["message"]
 
 
 @pytest.mark.parametrize("text", [42, None, ["a"], {"a": 1}])
-def test_a_non_string_note_is_refused(probe, crane, text):
-    status, payload = probe.post("/v1/notes", {"text": text}, crane)
+def test_a_non_string_note_is_refused(notes_probe, caller, text):
+    status, payload = notes_probe.post("/v1/notes", {"text": text}, caller)
     assert status == 400
     assert payload["error"]["code"] == "invalid_request"
 
@@ -550,13 +555,13 @@ def test_a_non_string_note_is_refused(probe, crane, text):
     ("field_name", "value"),
     [("scope", "everything"), ("kind", "rumour"), ("scope", "'; DROP TABLE notes--")],
 )
-def test_an_unknown_scope_or_kind_is_refused(probe, crane, field_name, value):
-    status, payload = probe.post(
-        "/v1/notes", {"text": "hello", field_name: value}, crane
+def test_an_unknown_scope_or_kind_is_refused(notes_probe, caller, field_name, value):
+    status, payload = notes_probe.post(
+        "/v1/notes", {"text": "hello", field_name: value}, caller
     )
     assert status == 400
     assert field_name in payload["error"]["message"]
-    assert store.query_notes(workspace="proj", limit=10, db_path=probe.db) == []
+    assert store.query_notes(workspace="proj", limit=10, db_path=notes_probe.db) == []
 
 
 @pytest.mark.parametrize(
@@ -573,28 +578,28 @@ def test_an_unknown_scope_or_kind_is_refused(probe, crane, field_name, value):
         "limit=5&limit=6",
     ],
 )
-def test_out_of_bounds_query_parameters_are_refused(probe, crane, query):
-    status, payload = probe.get(f"/v1/notes?{query}", crane)
+def test_out_of_bounds_query_parameters_are_refused(notes_probe, caller, query):
+    status, payload = notes_probe.get(f"/v1/notes?{query}", caller)
     assert status == 400
     assert payload["error"]["code"] == "invalid_request"
 
 
-def test_the_result_limit_cannot_be_raised_past_the_configured_maximum(probe, crane):
-    maximum = probe.handle.service.config.max_results
-    assert probe.get(f"/v1/notes?limit={maximum}", crane)[0] == 200
-    status, payload = probe.get(f"/v1/notes?limit={maximum + 1}", crane)
+def test_the_result_limit_cannot_be_raised_past_the_configured_maximum(notes_probe, caller):
+    maximum = notes_probe.handle.service.config.max_results
+    assert notes_probe.get(f"/v1/notes?limit={maximum}", caller)[0] == 200
+    status, payload = notes_probe.get(f"/v1/notes?limit={maximum + 1}", caller)
     assert status == 400
     assert str(maximum) in payload["error"]["message"]
 
 
-def test_sql_shaped_input_is_stored_as_text_not_executed(probe, crane):
+def test_sql_shaped_input_is_stored_as_text_not_executed(notes_probe, caller):
     hostile = "'); DROP TABLE notes; --"
-    note = _post_note(probe, crane, hostile)
+    note = _post_note(notes_probe, caller, hostile)
     assert note["text"] == hostile
-    _, payload = probe.get("/v1/notes", crane)
+    _, payload = notes_probe.get("/v1/notes", caller)
     assert [n["text"] for n in payload["notes"]] == [hostile]
     # The table is still there and still holds the row.
-    assert store.query_notes(workspace="proj", limit=10, db_path=probe.db)
+    assert store.query_notes(workspace="proj", limit=10, db_path=notes_probe.db)
 
 
 # --- the routes are the documented ones ---

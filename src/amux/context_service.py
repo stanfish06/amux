@@ -13,23 +13,40 @@ configuration choice. Every request that is not `GET /healthz` must present a
 capability token; routing happens *after* authentication so an unauthenticated
 caller cannot map the interface. Bodies are bounded before they are read,
 errors carry a stable code, and logs are redacted on the way out.
+
+Identity is the other half. A caller presents a token and nothing else: the
+workspace, task, repository, pane, agent and permissions all come from the
+execution row that token is bound to, so a request cannot name who it is. The
+handlers reuse the native `store`, `core` and `events` functions, which is what
+makes a sandboxed agent's answers the same as an equivalently scoped host
+agent's rather than merely similar.
+
+At the bottom: `serve_foreground` runs the service, and `start`/`status`/`stop`
+manage one per state directory through a run file recording its pid and bound
+port. Every one of them refuses rather than degrades — there is no
+unauthenticated listener and no mounted database to fall back to.
 """
 
 from __future__ import annotations
 
+import argparse
 import errno
+import http.client
 import json
 import logging
 import os
 import re
+import signal
 import sqlite3
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import parse_qs, urlsplit
 
 from amux import core, events, shared, store
@@ -56,10 +73,6 @@ MAX_TOKEN_CHARS = 512
 
 class ConfigError(ValueError):
     """Bad service configuration — actionable, printed, never a traceback."""
-
-
-class ServiceStartupError(RuntimeError):
-    """The listener could not be opened. Never a reason to open a weaker one."""
 
 
 # --- error envelope ---
@@ -198,6 +211,13 @@ class ServiceConfig:
     # How often a long poll re-queries SQLite. In-process writes wake it
     # immediately; this is what makes a *native* host write visible too.
     poll_interval_s: float = 0.25
+    # How often the accept loop checks whether it has been asked to stop, which
+    # is therefore also how long `shutdown()` can block. A daemon should not
+    # wake hundreds of times a second to poll a flag it will read once, so this
+    # stays coarse; a test that starts and stops a server per case sets it low.
+    # Not the same knob as `poll_interval_s` — conflating them would change how
+    # long a caller's wait can miss a native write.
+    shutdown_poll_s: float = 0.5
     request_timeout_s: float = 30.0
 
     def __post_init__(self) -> None:
@@ -221,6 +241,10 @@ class ServiceConfig:
             )
         if self.max_wait_s <= 0:
             raise ConfigError(f"max_wait_s must be positive, got {self.max_wait_s}")
+        if self.shutdown_poll_s <= 0:
+            raise ConfigError(
+                f"shutdown_poll_s must be positive, got {self.shutdown_poll_s}"
+            )
         if not 0 < self.poll_interval_s <= self.max_wait_s:
             raise ConfigError(
                 f"poll_interval_s must be positive and no larger than max_wait_s,"
@@ -922,19 +946,6 @@ AGENT_STATES: tuple[str, ...] = tuple(dict.fromkeys(events.STATE_BY_KIND.values(
 DEFAULT_WAIT_STATES: tuple[str, ...] = ("idle", "needs-input", "dead")
 
 
-def _publish_state(socket: str, pane: str, state: str) -> None:
-    """Set a pane's state option and wake anything waiting on it.
-
-    The last two lines of `events.emit`, reached through its own helpers so the
-    option name, the channel name and the socket-argument rules stay in one
-    place. A public `events.publish_state` would be tidier; the store write is
-    deliberately *not* shared with `emit`, which attributes by pane rather than
-    by capability.
-    """
-    events._tmux(socket, "set-option", "-p", "-t", pane, events.STATE_OPTION, state)
-    events._tmux(socket, "wait-for", "-S", events._wait_channel(pane))
-
-
 def _states_param(request: Request) -> tuple[str, ...]:
     raw = _one(request, "states")
     if raw is None or raw == "":
@@ -1011,7 +1022,7 @@ def _add_event(service: ContextService, request: Request) -> tuple[int, dict[str
     # store cannot corroborate is worse than a late one.
     alive = events.pane_facts(caller.pane, caller.socket).alive
     if alive:
-        _publish_state(caller.socket, caller.pane, state)
+        events.publish_state(caller.pane, state, caller.socket)  # type: ignore[arg-type]
     service.wake()
     return 200, {
         "event": {
@@ -1389,7 +1400,10 @@ def start_service(
     server = build_server(service)
     service.config = replace(service.config, port=int(server.server_address[1]))
     thread = threading.Thread(
-        target=server.serve_forever, name=SERVICE_NAME, daemon=True
+        target=server.serve_forever,
+        args=(service.config.shutdown_poll_s,),
+        name=SERVICE_NAME,
+        daemon=True,
     )
     thread.start()
     if config is not None and config.db_path not in (None, store.DB_PATH):
@@ -1410,3 +1424,415 @@ def start_service(
         service.schema_info().version,
     )
     return ServiceHandle(service=service, server=server, thread=thread)
+
+
+# --- lifecycle ---
+#
+# One run file per state directory records the pid and the *bound* port, so
+# preflight can find a service it did not start. Every failure here refuses:
+# there is no unauthenticated listener and no mounted database to fall back to,
+# and `start` will not quietly stand up a second service beside a confusing one.
+
+RUNFILE_NAME = "context-service.json"
+
+ServiceState = Literal["running", "stopped", "stale", "unresponsive"]
+
+
+class ServiceLifecycleError(RuntimeError):
+    """A start, stop, or status operation that could not be completed safely."""
+
+
+class ServiceStartupError(ServiceLifecycleError):
+    """The listener could not be opened. Never a reason to open a weaker one."""
+
+
+@dataclass(frozen=True)
+class RunFile:
+    pid: int
+    port: int
+    started_ts: float
+    schema_version: int | None = None
+
+    def to_json(self) -> str:
+        return json.dumps(vars(self), separators=(",", ":"))
+
+    @classmethod
+    def from_json(cls, raw: str) -> RunFile:
+        data = json.loads(raw)
+        return cls(
+            pid=int(data["pid"]),
+            port=int(data["port"]),
+            started_ts=float(data["started_ts"]),
+            schema_version=data.get("schema_version"),
+        )
+
+
+def runfile_path(config: ServiceConfig) -> Path:
+    return config.state_home / RUNFILE_NAME
+
+
+def read_runfile(config: ServiceConfig) -> RunFile | None:
+    """The recorded service, or None when there is none to believe.
+
+    A corrupt run file reads as no run file: it is a hint, and the process
+    check behind it is the actual evidence.
+    """
+    path = runfile_path(config)
+    try:
+        return RunFile.from_json(path.read_text())
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError, TypeError):
+        get_logger().warning("ignoring an unreadable run file at %s", path)
+        return None
+
+
+def write_runfile(config: ServiceConfig, run: RunFile) -> Path:
+    """Claim the run file atomically, so a reader never sees half of one."""
+    path = runfile_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{run.pid}.tmp")
+    tmp.write_text(run.to_json())
+    tmp.replace(path)
+    return path
+
+
+def remove_runfile(config: ServiceConfig, only_pid: int | None = None) -> None:
+    """Release the run file, optionally only if it is still ours — a service
+    that outlived its own file must not delete its successor's."""
+    run = read_runfile(config)
+    if run is None or (only_pid is not None and run.pid != only_pid):
+        return
+    runfile_path(config).unlink(missing_ok=True)
+
+
+def _is_zombie(pid: int) -> bool:
+    """Whether a pid is a process that has exited but not yet been reaped.
+
+    `kill(pid, 0)` cannot tell: the kernel keeps the slot until the parent reads
+    the exit status, and answers as if it were alive until then. We are often
+    not that parent — a service started by an amux process that is still running
+    is *its* child — so ask the process table. Only reached when the pid already
+    looks alive, so the cost is one `ps` on a path that is either rare (status)
+    or already waiting on a process (stop).
+    """
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "state=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False  # no evidence of death is not evidence of death
+    return out.stdout.strip().upper().startswith("Z")
+
+
+def _pid_alive(pid: int) -> bool:
+    """Whether a pid is a process that could still be serving."""
+    if pid <= 0:
+        return False
+    try:
+        if os.waitpid(pid, os.WNOHANG)[0] == pid:
+            return False  # our own child, and it has exited
+    except OSError:
+        pass  # not our child, or we have none
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # someone else's process, but it is there
+    return not _is_zombie(pid)
+
+
+def probe_health(port: int, timeout: float = 2.0) -> dict[str, Any] | None:
+    """`GET /healthz` against a loopback port, or None if nothing answered.
+
+    A degraded service still answers, so the payload — not the status — is what
+    says whether it is usable.
+    """
+    conn = http.client.HTTPConnection(LOOPBACK, port, timeout=timeout)
+    try:
+        conn.request("GET", "/healthz")
+        response = conn.getresponse()
+        payload = json.loads(response.read() or b"{}")
+        return payload if isinstance(payload, dict) else None
+    except (OSError, ValueError):
+        return None
+    finally:
+        conn.close()
+
+
+@dataclass(frozen=True)
+class ServiceStatus:
+    state: ServiceState
+    message: str
+    pid: int | None = None
+    port: int | None = None
+    health: dict[str, Any] | None = None
+
+    @property
+    def running(self) -> bool:
+        return self.state == "running"
+
+    @property
+    def healthy(self) -> bool:
+        return bool(self.health and self.health.get("ok"))
+
+
+def status(config: ServiceConfig | None = None) -> ServiceStatus:
+    """What the state directory says about the service, checked against reality."""
+    config = config or ServiceConfig()
+    run = read_runfile(config)
+    if run is None:
+        return ServiceStatus("stopped", f"{SERVICE_NAME} is not running")
+    if not _pid_alive(run.pid):
+        return ServiceStatus(
+            "stale",
+            f"a run file names pid {run.pid}, which is gone; starting the"
+            f" service will clear it",
+            pid=run.pid,
+            port=run.port,
+        )
+    health = probe_health(run.port)
+    if health is None:
+        return ServiceStatus(
+            "unresponsive",
+            f"pid {run.pid} is alive but nothing answers on {LOOPBACK}:{run.port};"
+            f" stop it before starting another",
+            pid=run.pid,
+            port=run.port,
+        )
+    detail = "" if health.get("ok") else f" (schema {health.get('status', 'degraded')})"
+    return ServiceStatus(
+        "running",
+        f"{SERVICE_NAME} is running on {LOOPBACK}:{run.port}, pid {run.pid}{detail}",
+        pid=run.pid,
+        port=run.port,
+        health=health,
+    )
+
+
+def _require_compatible_schema(config: ServiceConfig) -> SchemaInfo:
+    """Refuse before binding anything. A service that cannot read the store it
+    is the sole owner of has nothing safe to serve."""
+    info = schema_info(config.database)
+    if info.version is None:
+        raise ServiceStartupError(
+            f"cannot open the context store at {config.database}."
+            f" Check the path and permissions; the service will not serve"
+            f" without it"
+        )
+    if not info.compatible:
+        raise ServiceStartupError(
+            f"the context store is schema version {info.version} but this amux"
+            f" expects {info.expected}."
+            f" {'Upgrade amux' if info.version > info.expected else 'Run any native amux command to migrate it'}"
+            f" — the service will not serve a schema it does not know"
+        )
+    return info
+
+
+def _default_launcher(config: ServiceConfig) -> subprocess.Popen:
+    """Re-exec this module as a detached foreground service.
+
+    `python -m amux.context_service` keeps the launcher independent of the CLI.
+    A frozen build has no `-m`, so a packaged amux should pass its own launcher.
+    """
+    return subprocess.Popen(
+        [sys.executable, "-m", __spec__.name if __spec__ else "amux.context_service",
+         "serve", "--port", str(config.port)],
+        start_new_session=True,  # survives the shell that asked for it
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,  # the service logs to its own file
+    )
+
+
+def start(
+    config: ServiceConfig | None = None,
+    *,
+    launcher: Callable[[ServiceConfig], Any] | None = None,
+    timeout: float = 15.0,
+) -> ServiceStatus:
+    """Ensure a healthy service is running, and say what happened.
+
+    Idempotent, because sandbox preflight calls it on every spawn: an already
+    healthy service is left exactly as it is.
+    """
+    config = config or ServiceConfig()
+    current = status(config)
+    if current.running:
+        return current
+    if current.state == "unresponsive":
+        raise ServiceLifecycleError(current.message)
+    if current.state == "stale":
+        get_logger().info("clearing a stale run file for pid %s", current.pid)
+        remove_runfile(config)
+
+    _require_compatible_schema(config)
+    (launcher or _default_launcher)(config)
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        latest = status(config)
+        if latest.running:
+            return latest
+        time.sleep(0.05)
+    raise ServiceStartupError(
+        f"{SERVICE_NAME} did not become healthy within {timeout:g}s;"
+        f" see {config.log_file}"
+    )
+
+
+def stop(
+    config: ServiceConfig | None = None,
+    *,
+    timeout: float = 10.0,
+    force: bool = False,
+) -> ServiceStatus:
+    """Signal the recorded service and wait for it to go.
+
+    Idempotent. The run file is removed only once the process is actually gone,
+    so a refusal never leaves a record claiming nothing is running.
+    """
+    config = config or ServiceConfig()
+    current = status(config)
+    if current.state == "stopped":
+        return current
+    if current.state == "stale":
+        remove_runfile(config)
+        return ServiceStatus("stopped", f"cleared a stale run file for pid {current.pid}")
+
+    pid = current.pid or 0
+    try:
+        os.kill(pid, signal.SIGKILL if force else signal.SIGTERM)
+    except ProcessLookupError:
+        remove_runfile(config)
+        return ServiceStatus("stopped", f"pid {pid} was already gone")
+    except PermissionError as exc:
+        raise ServiceLifecycleError(
+            f"not allowed to signal pid {pid}; it belongs to another user"
+        ) from exc
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid):
+            remove_runfile(config)
+            return ServiceStatus("stopped", f"{SERVICE_NAME} (pid {pid}) stopped")
+        time.sleep(0.05)
+    raise ServiceLifecycleError(
+        f"pid {pid} did not stop within {timeout:g}s; retry with force to"
+        f" send SIGKILL"
+    )
+
+
+def serve_foreground(
+    config: ServiceConfig | None = None,
+    *,
+    stream: Any | None = None,
+    ready: Callable[[ServiceHandle], None] | None = None,
+) -> int:
+    """Run the service in this process until it is signalled.
+
+    The order matters: schema, then bind, then claim the run file. Each step
+    refuses outright, so a run file only ever names a process that really is
+    listening on the port it records.
+    """
+    config = config or ServiceConfig()
+    log = configure_logging(config, stream=stream or sys.stderr)
+    try:
+        info = _require_compatible_schema(config)
+        service = ContextService(config)
+        server = build_server(service)
+    except ServiceLifecycleError as exc:
+        log.error("%s", exc)
+        return 1
+
+    port = int(server.server_address[1])
+    service.config = replace(service.config, port=port)
+    handle = ServiceHandle(service=service, server=server)
+    write_runfile(
+        config,
+        RunFile(
+            pid=os.getpid(),
+            port=port,
+            started_ts=time.time(),
+            schema_version=info.version,
+        ),
+    )
+
+    def shut_down(signum: int, _frame: Any) -> None:
+        log.info("stopping on signal %d", signum)
+        # From a signal handler, so it must not block: shutdown() waits for the
+        # serve loop, which is this thread.
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(signum, shut_down)
+        except ValueError:
+            pass  # not the main thread; the caller owns shutdown
+
+    log.info(
+        "%s serving on %s:%d, pid %d, schema %s",
+        SERVICE_NAME,
+        LOOPBACK,
+        port,
+        os.getpid(),
+        info.version,
+    )
+    try:
+        if ready is not None:
+            ready(handle)
+        server.serve_forever(poll_interval=config.shutdown_poll_s)
+    finally:
+        server.server_close()
+        remove_runfile(config, only_pid=os.getpid())
+        log.info("%s stopped", SERVICE_NAME)
+    return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """`python -m amux.context_service <serve|start|status|stop>`.
+
+    A debugging and launcher entry point. The user-facing `amux` subcommand is
+    task 5.5's; it can call these same functions.
+    """
+    parser = argparse.ArgumentParser(prog="amux-context-service")
+    parser.add_argument(
+        "action", choices=("serve", "start", "status", "stop"), help="what to do"
+    )
+    parser.add_argument("--port", type=int, default=None, help="loopback port")
+    parser.add_argument("--db", default=None, help="context store path")
+    parser.add_argument(
+        "--force", action="store_true", help="stop: send SIGKILL instead of SIGTERM"
+    )
+    args = parser.parse_args(list(argv) if argv is not None else None)
+
+    overrides: dict[str, Any] = {}
+    if args.port is not None:
+        overrides["port"] = args.port
+    if args.db is not None:
+        overrides["db_path"] = Path(args.db).expanduser()
+    try:
+        config = ServiceConfig.from_env(**overrides)
+        if args.action == "serve":
+            return serve_foreground(config)
+        result = (
+            start(config)
+            if args.action == "start"
+            else status(config)
+            if args.action == "status"
+            else stop(config, force=args.force)
+        )
+    except (ConfigError, ServiceLifecycleError) as exc:
+        print(f"amux context-service: {exc}", file=sys.stderr)
+        return 1
+    print(result.message)
+    return 0 if result.state in ("running", "stopped") else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
