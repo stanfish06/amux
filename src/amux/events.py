@@ -269,11 +269,10 @@ class PaneFacts:
 
     @property
     def boundary(self) -> float | None:
-        """Cut-off for store rows about this pane: None once it is gone, and
-        `now` when its session cannot be dated (idle is the safe error)."""
-        if not self.alive:
-            return None
-        return self.created if self.created is not None else time.time()
+        """Cut-off for store rows about this pane, or None once it is gone.
+        Pure: `_parse_pane` dates every live row, failing closed to now when
+        tmux cannot date the session."""
+        return self.created if self.alive else None
 
 
 def _parse_pane(line: str) -> PaneFacts:
@@ -285,11 +284,12 @@ def _parse_pane(line: str) -> PaneFacts:
     if not fields[0].startswith("%"):
         return PaneFacts(alive=False)
     if len(fields) < len(_PANE_FIELDS) or fields[-1] != _SENTINEL:
-        return PaneFacts(alive=True)
+        return PaneFacts(alive=True, created=time.time())
+    created = _as_ts(fields[2])
     facts = PaneFacts(
         alive=True,
         kind="amux" if fields[1] else "other",
-        created=_as_ts(fields[2]) or time.time(),
+        created=created if created is not None else time.time(),
         state_option=fields[3],
         name=fields[4],
         label=fields[5],
