@@ -17,6 +17,7 @@ AGENT_COMMANDS = {
 AGENT_OPTION = "@amux_agent"
 LABEL_OPTION = "@amux_label"
 NAME_OPTION = "@amux_name"
+MARK_OPTION = "@amux_pane"
 
 ADJECTIVES = [
     "amber",
@@ -304,6 +305,7 @@ def _build_grid(
             pane.cmd("set-option", "-p", AGENT_OPTION, agent)
             pane.cmd("set-option", "-p", LABEL_OPTION, label)
             pane.cmd("set-option", "-p", NAME_OPTION, name)
+            pane.cmd("set-option", "-p", MARK_OPTION, "1")
             pane.set_hook(
                 "pane-exited", "run-shell 'amux event emit exit --pane #{hook_pane}'"
             )
@@ -436,7 +438,7 @@ def load_agent_pane(pane: Pane, facts: events.PaneFacts | None = None) -> AgentP
         agent_name=facts.agent or facts.command,
         label=facts.label or pane.id or "",
         name=facts.name,
-        state=(state or "idle") if facts.kind == "agent" else "-",
+        state=(state or "idle") if facts.kind == "amux" else "-",
     )
 
 

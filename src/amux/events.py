@@ -15,7 +15,7 @@ STATE_OPTION = "@amux_state"
 
 EventKind = Literal["spawn", "busy", "stop", "notify", "exit"]
 AgentState = Literal["starting", "busy", "idle", "needs-input", "dead"]
-PaneKind = Literal["agent", "other"]
+PaneKind = Literal["amux", "other"]
 
 STATE_BY_KIND: dict[EventKind, AgentState] = {
     "spawn": "starting",
@@ -232,6 +232,7 @@ def _as_ts(value: str) -> float | None:
 _SENTINEL = "amux"
 _PANE_FIELDS = (
     "#{pane_id}",
+    "#{@amux_pane}",
     "#{session_created}",
     f"#{{{STATE_OPTION}}}",
     "#{@amux_name}",
@@ -243,7 +244,7 @@ _PANE_FIELDS = (
     "#{window_name}",
     _SENTINEL,
 )
-_FREE_TEXT = slice(6, 10)
+_FREE_TEXT = slice(7, 11)
 _DELIM = "\x1f"
 _PANE_FORMAT = _DELIM.join(_PANE_FIELDS)
 
@@ -287,12 +288,12 @@ def _parse_pane(line: str) -> PaneFacts:
         return PaneFacts(alive=True)
     facts = PaneFacts(
         alive=True,
-        kind="agent" if fields[3] else "other",
-        created=_as_ts(fields[1]),
-        state_option=fields[2],
-        name=fields[3],
-        label=fields[4],
-        command=fields[5],
+        kind="amux" if fields[1] else "other",
+        created=_as_ts(fields[2]),
+        state_option=fields[3],
+        name=fields[4],
+        label=fields[5],
+        command=fields[6],
     )
     if len(fields) == len(_PANE_FIELDS):
         facts.agent, facts.cwd, facts.workspace, facts.task = fields[_FREE_TEXT]
@@ -388,7 +389,7 @@ def pane_states(socket: str | None = None) -> list[dict]:
                 "label": facts.label,
                 "state": (
                     resolve_state(alive=True, option=facts.state_option, latest=latest)
-                    if facts.kind == "agent"
+                    if facts.kind == "amux"
                     else None
                 ),
                 "last_event": (
