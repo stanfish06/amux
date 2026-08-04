@@ -1,0 +1,406 @@
+"""The execution-runtime seam.
+
+`core` owns pane identity: it splits the grid, names each pane, and stamps the
+tmux metadata that everything else keys on. What a pane then *runs*, and from
+which directory, is the runtime's decision.
+
+Today there is one runtime. `HostRuntime` reproduces the historical behavior:
+give each agent its own git worktree when the target is a repo, `cd` into it,
+and start the agent command. A Docker Sandbox runtime lands behind the same
+`prepare()` call and returns an attach command instead of a local `cd`, so
+`core` never grows a second launch path.
+
+The seam is deliberately one-way. A runtime is handed pane identities and
+returns `Launch` values; it never touches tmux, never emits events, and never
+sees libtmux objects. That keeps pane metadata, hook wiring and event
+attribution identical no matter which runtime prepared the launch.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Protocol
+
+from amux import sandbox, sandbox_bootstrap, store, worktree
+from amux.shared import DEFAULT_SOCKET
+
+HOST = "host"
+DOCKER_SANDBOX = "docker-sandbox"
+
+AGENT_COMMANDS = {
+    "claude": "claude --dangerously-skip-permissions",
+    "codex": "codex --dangerously-bypass-approvals-and-sandbox",
+}
+
+
+@dataclass(frozen=True)
+class PaneSpec:
+    """A pane's identity, fixed by `core` before anything runs in it."""
+
+    pane: str
+    agent: str
+    name: str
+
+
+@dataclass(frozen=True)
+class Launch:
+    """What one pane runs, and from where.
+
+    `cwd` is the directory the pane ends up working in; empty means the runtime
+    has no opinion and the pane keeps its own. `keys` are shell lines sent in
+    order — the host runtime sends a `cd` then the agent command, and a raw
+    command with no worktree sends just itself.
+    """
+
+    pane: str
+    cwd: str = ""
+    keys: tuple[str, ...] = ()
+
+
+class Runtime(Protocol):
+    """Prepares launches for one grid. One runtime per grid, chosen at spawn."""
+
+    kind: str
+
+    def preflight(
+        self,
+        agents: list[str],
+        *,
+        workspace: str | None,
+        task: str | None,
+        cwd: str | None,
+    ) -> None:
+        """Reject an impossible grid *before* anything is created.
+
+        Called before the session or window exists, because a runtime whose
+        prerequisites are missing must leave no tmux session, sandbox, git
+        reference or registry row behind. Raises to refuse.
+        """
+        ...
+
+    def prepare(
+        self,
+        panes: list[PaneSpec],
+        *,
+        workspace: str | None,
+        task: str | None,
+        cwd: str | None,
+        socket: str,
+    ) -> list[Launch]: ...
+
+    def rollback(self) -> list[str]:
+        """Unwind everything `prepare` created. Returns cleanup failures."""
+        ...
+
+
+class HostRuntime:
+    """Agents run as host processes in per-agent git worktrees."""
+
+    kind = HOST
+
+    def preflight(
+        self,
+        agents: list[str],
+        *,
+        workspace: str | None,
+        task: str | None,
+        cwd: str | None,
+    ) -> None:
+        """Nothing to check: the host runtime has no external prerequisites,
+        accepts any raw command as an agent, and already degrades to a shared
+        directory when the target is not a repository."""
+
+    def rollback(self) -> list[str]:
+        """Nothing to unwind here. `setup_task` already rolls itself back, and
+        it is the only durable resource the host runtime acquires."""
+        return []
+
+    def prepare(
+        self,
+        panes: list[PaneSpec],
+        *,
+        workspace: str | None,
+        task: str | None,
+        cwd: str | None,
+        socket: str = "",
+    ) -> list[Launch]:
+        paths = self._worktrees(panes, workspace=workspace, task=task, cwd=cwd)
+        launches = []
+        for spec in panes:
+            command = AGENT_COMMANDS.get(spec.agent, spec.agent)
+            path = paths.get(spec.pane)
+            keys = []
+            if path:
+                keys.append(worktree.shell_cd(path))
+            if command:
+                keys.append(command)
+            launches.append(
+                Launch(pane=spec.pane, cwd=path or cwd or "", keys=tuple(keys))
+            )
+        return launches
+
+    @staticmethod
+    def _worktrees(
+        panes: list[PaneSpec],
+        *,
+        workspace: str | None,
+        task: str | None,
+        cwd: str | None,
+    ) -> dict[str, str]:
+        """Per-agent git worktrees when the target dir is a repo. Fail soft: a
+        non-repo target keeps today's shared-directory behavior."""
+        if not (workspace and task and cwd):
+            return {}
+        repo = worktree.repo_root(cwd)
+        if not repo:
+            return {}
+        try:
+            return worktree.setup_task(
+                repo,
+                workspace,
+                task,
+                [(spec.pane, spec.agent, spec.name) for spec in panes],
+            )
+        except worktree.WorktreeError as exc:
+            print(f"amux: worktree isolation unavailable: {exc}")
+            return {}
+
+
+def _context_service():
+    """Imported late: `context_service` imports `core`, which imports this
+    module, so a top-level import would be a cycle."""
+    from amux import context_service
+
+    return context_service
+
+
+@dataclass(frozen=True)
+class SandboxConfig:
+    """Everything `--runtime docker-sandbox` needs beyond the grid itself."""
+
+    resources: sandbox.Resources = field(default_factory=sandbox.Resources)
+    # None -> the service's default, resolved at call time. A dataclass default
+    # is captured when the class is defined, which is precisely how a config
+    # ends up pinned to a value a test can never patch.
+    port: int | None = None
+
+    @property
+    def resolved_port(self) -> int:
+        return self.port if self.port is not None else _context_service().DEFAULT_PORT
+
+    @property
+    def policy_target(self) -> str:
+        """What the user must allow: the loopback address the service binds."""
+        return f"localhost:{self.resolved_port}"
+
+    @property
+    def client_endpoint(self) -> str:
+        """What a sandbox dials. Docker routes this name back to the host."""
+        return f"http://host.docker.internal:{self.resolved_port}"
+
+
+@dataclass
+class _Acquired:
+    """One sandbox's resources, in the order they were acquired.
+
+    Rollback walks this in reverse. Recorded as it goes rather than inferred
+    afterwards, because a failure halfway through leaves a state no amount of
+    inspection can reconstruct -- a sandbox may exist without a row, or a row
+    without a token.
+    """
+
+    spec: PaneSpec
+    sandbox_name: str
+    worktree_id: int | None = None
+    token_id: int | None = None
+    handle: sandbox.Sandbox | None = None
+
+
+class SandboxRuntime:
+    """Agents run inside per-agent Docker Sandbox microVMs.
+
+    Each agent gets its own clone-mode sandbox, its own branch off the task
+    integration line, its own capability token, and a pane that attaches with
+    `sbx run --name`. amux keeps coordination on the host: the sandbox never
+    sees the state directory, the database, or the tmux socket.
+    """
+
+    kind = DOCKER_SANDBOX
+
+    def __init__(
+        self,
+        config: SandboxConfig | None = None,
+        *,
+        service_healthy: Callable[[], tuple[bool, str]] | None = None,
+    ):
+        self.config = config or SandboxConfig()
+        self._service_healthy = service_healthy
+        self._acquired: list[_Acquired] = []
+        self._integration: worktree.TaskIntegration | None = None
+
+    # --- preflight ---
+
+    def preflight(
+        self,
+        agents: list[str],
+        *,
+        workspace: str | None,
+        task: str | None,
+        cwd: str | None,
+    ) -> None:
+        repo = worktree.repo_root(cwd) if cwd else None
+        sandbox.preflight(
+            agents=agents,
+            repo=repo or "",
+            resources=self.config.resources,
+            endpoint=self.config.policy_target,
+            service_healthy=self._service_healthy,
+        ).raise_if_failed()
+
+    # --- creation ---
+
+    def prepare(
+        self,
+        panes: list[PaneSpec],
+        *,
+        workspace: str | None,
+        task: str | None,
+        cwd: str | None,
+        socket: str = "",
+    ) -> list[Launch]:
+        if not (workspace and task and cwd):
+            raise sandbox.SandboxError(
+                "the docker-sandbox runtime needs a workspace, task and path"
+            )
+        repo = worktree.repo_root(cwd)
+        if not repo:
+            raise sandbox.SandboxError(f"{cwd} is not a git repository")
+
+        # Shared with the host runtime: sandboxed branches are merged back into
+        # this same integration line.
+        self._integration = worktree.setup_task_integration(repo, workspace, task)
+
+        launches = []
+        for spec in panes:
+            launches.append(
+                self._create_one(
+                    spec,
+                    workspace=workspace,
+                    task=task,
+                    repo=repo,
+                    socket=socket,
+                )
+            )
+        return launches
+
+    def _create_one(
+        self,
+        spec: PaneSpec,
+        *,
+        workspace: str,
+        task: str,
+        repo: str,
+        socket: str,
+    ) -> Launch:
+        assert self._integration is not None
+        branch = worktree.agent_branch(workspace, task, spec.name)
+        name = sandbox.sandbox_name(workspace, task, spec.name, repo)
+        acquired = _Acquired(spec=spec, sandbox_name=name)
+        self._acquired.append(acquired)
+
+        handle = sandbox.create(name, spec.agent, repo, self.config.resources)
+        acquired.handle = handle
+
+        # The row is the durable identity notes and events hang off, so it
+        # exists before anything is delivered into the sandbox. `path` is empty
+        # because a sandbox has no host worktree; `socket_name` is explicit
+        # because an empty one now means "pre-schema-3 row".
+        acquired.worktree_id = store.register_worktree(
+            pane=spec.pane,
+            workspace=workspace,
+            task=task,
+            agent=spec.agent,
+            name=spec.name,
+            path="",
+            branch=branch,
+            base_ref=self._integration.base_ref,
+            repo=repo,
+            runtime=DOCKER_SANDBOX,
+            runtime_status="created",
+            sandbox_name=name,
+            sandbox_id=handle.id,
+            socket_name=socket or DEFAULT_SOCKET,
+        )
+
+        # The agent works on its own named branch, cut from the task base so
+        # `integrate` has a common ancestor to merge from.
+        handle.exec(["git", "checkout", "-b", branch])
+
+        # The service's own vocabulary, never a hand-rolled list: a drift
+        # between what is minted and what the routes require surfaces as a 403
+        # that reads like an auth bug.
+        plaintext, token_id = store.mint_context_token(
+            acquired.worktree_id, permissions=_context_service().AGENT_PERMISSIONS
+        )
+        acquired.token_id = token_id
+        sandbox_bootstrap.install_client(
+            handle, endpoint=self.config.client_endpoint, token=plaintext
+        )
+
+        store.set_worktree_runtime(acquired.worktree_id, runtime_status="running")
+        return Launch(
+            pane=spec.pane,
+            cwd="",  # the pane's working directory is inside the VM
+            keys=(sandbox.attach_command(name),),
+        )
+
+    # --- rollback ---
+
+    def rollback(self) -> list[str]:
+        """Release everything `prepare` acquired, newest resource first.
+
+        Returns the failures rather than raising them: a rollback runs while an
+        original error is already propagating, and losing that error to a
+        secondary cleanup failure would hide the real cause.
+        """
+        problems: list[str] = []
+        for acquired in reversed(self._acquired):
+            problems.extend(self._release(acquired))
+        self._acquired.clear()
+        if self._integration is not None:
+            try:
+                worktree.remove_task_integration(self._integration)
+            except Exception as exc:  # noqa: BLE001 - reported, never raised
+                problems.append(f"integration worktree: {exc}")
+            self._integration = None
+        return problems
+
+    def _release(self, acquired: _Acquired) -> list[str]:
+        problems: list[str] = []
+        if acquired.token_id is not None:
+            try:
+                store.revoke_context_token(acquired.token_id)
+            except Exception as exc:  # noqa: BLE001
+                problems.append(f"{acquired.sandbox_name}: revoke token: {exc}")
+        if acquired.handle is not None:
+            try:
+                sandbox.remove(acquired.sandbox_name, force=True)
+            except Exception as exc:  # noqa: BLE001
+                problems.append(f"{acquired.sandbox_name}: remove sandbox: {exc}")
+        if acquired.worktree_id is not None:
+            # Marked rather than deleted: the registry is append-only, and a row
+            # left active would let a later integrate merge a branch whose
+            # sandbox is gone.
+            for update, kwargs in (
+                (store.set_worktree_runtime, {"runtime_status": "failed"}),
+                (store.set_worktree_status, {}),
+            ):
+                try:
+                    if kwargs:
+                        update(acquired.worktree_id, **kwargs)
+                    else:
+                        update(acquired.worktree_id, "removed")
+                except Exception as exc:  # noqa: BLE001
+                    problems.append(f"{acquired.sandbox_name}: mark row: {exc}")
+        return problems

@@ -1,0 +1,247 @@
+{
+  "events": [
+    {
+      "agent": "claude",
+      "detail": "",
+      "kind": "spawn",
+      "pane": "%1",
+      "repo": "",
+      "task": "",
+      "workspace": ""
+    },
+    {
+      "agent": "codex",
+      "detail": "",
+      "kind": "spawn",
+      "pane": "%2",
+      "repo": "",
+      "task": "",
+      "workspace": ""
+    }
+  ],
+  "events_tmux": [
+    [
+      "tmux-query",
+      "amux-test",
+      "display-message",
+      "-p",
+      "-t",
+      "%1",
+      "#{pane_id}\u001f#{@amux_pane}\u001f#{session_created}\u001f#{@amux_state}\u001f#{@amux_name}\u001f#{@amux_label}\u001f#{pane_current_command}\u001f#{@amux_agent}\u001f#{pane_current_path}\u001f#{session_name}\u001f#{window_name}\u001famux"
+    ],
+    [
+      "tmux",
+      "amux-test",
+      "set-option",
+      "-p",
+      "-t",
+      "%1",
+      "@amux_state",
+      "starting"
+    ],
+    [
+      "tmux",
+      "amux-test",
+      "wait-for",
+      "-S",
+      "amux-state-1"
+    ],
+    [
+      "tmux-query",
+      "amux-test",
+      "display-message",
+      "-p",
+      "-t",
+      "%2",
+      "#{pane_id}\u001f#{@amux_pane}\u001f#{session_created}\u001f#{@amux_state}\u001f#{@amux_name}\u001f#{@amux_label}\u001f#{pane_current_command}\u001f#{@amux_agent}\u001f#{pane_current_path}\u001f#{session_name}\u001f#{window_name}\u001famux"
+    ],
+    [
+      "tmux",
+      "amux-test",
+      "set-option",
+      "-p",
+      "-t",
+      "%2",
+      "@amux_state",
+      "starting"
+    ],
+    [
+      "tmux",
+      "amux-test",
+      "wait-for",
+      "-S",
+      "amux-state-2"
+    ]
+  ],
+  "grid": {
+    "cwd": "",
+    "panes": [
+      {
+        "agent_name": "claude",
+        "cwd": "/pane/current/path",
+        "is_agent": true,
+        "label": "r0c0",
+        "name": "zesty-tiger",
+        "pane": "%1",
+        "state": "starting"
+      },
+      {
+        "agent_name": "codex",
+        "cwd": "/pane/current/path",
+        "is_agent": true,
+        "label": "r0c1",
+        "name": "proud-owl",
+        "pane": "%2",
+        "state": "starting"
+      }
+    ],
+    "task_name": "t0"
+  },
+  "tmux": [
+    [
+      "cmd",
+      "%1",
+      "show-options",
+      "-pqv",
+      "@amux_name"
+    ],
+    [
+      "split",
+      "%1",
+      "PaneDirection.Right",
+      "50%",
+      null
+    ],
+    [
+      "cmd",
+      "%1",
+      "set-option",
+      "-p",
+      "allow-set-title",
+      "off"
+    ],
+    [
+      "cmd",
+      "%1",
+      "select-pane",
+      "-T",
+      "zesty-tiger[claude]"
+    ],
+    [
+      "cmd",
+      "%1",
+      "set-option",
+      "-p",
+      "@amux_agent",
+      "claude"
+    ],
+    [
+      "cmd",
+      "%1",
+      "set-option",
+      "-p",
+      "@amux_label",
+      "r0c0"
+    ],
+    [
+      "cmd",
+      "%1",
+      "set-option",
+      "-p",
+      "@amux_name",
+      "zesty-tiger"
+    ],
+    [
+      "cmd",
+      "%1",
+      "set-option",
+      "-p",
+      "@amux_pane",
+      "1"
+    ],
+    [
+      "set_hook",
+      "%1",
+      "pane-exited",
+      "run-shell 'amux event emit exit --pane #{hook_pane}'"
+    ],
+    [
+      "cmd",
+      "%2",
+      "set-option",
+      "-p",
+      "allow-set-title",
+      "off"
+    ],
+    [
+      "cmd",
+      "%2",
+      "select-pane",
+      "-T",
+      "proud-owl[codex]"
+    ],
+    [
+      "cmd",
+      "%2",
+      "set-option",
+      "-p",
+      "@amux_agent",
+      "codex"
+    ],
+    [
+      "cmd",
+      "%2",
+      "set-option",
+      "-p",
+      "@amux_label",
+      "r0c1"
+    ],
+    [
+      "cmd",
+      "%2",
+      "set-option",
+      "-p",
+      "@amux_name",
+      "proud-owl"
+    ],
+    [
+      "cmd",
+      "%2",
+      "set-option",
+      "-p",
+      "@amux_pane",
+      "1"
+    ],
+    [
+      "set_hook",
+      "%2",
+      "pane-exited",
+      "run-shell 'amux event emit exit --pane #{hook_pane}'"
+    ],
+    [
+      "send_keys",
+      "%1",
+      "claude --dangerously-skip-permissions"
+    ],
+    [
+      "cmd",
+      "%1",
+      "show-options",
+      "-pqv",
+      "@amux_label"
+    ],
+    [
+      "send_keys",
+      "%2",
+      "codex --dangerously-bypass-approvals-and-sandbox"
+    ],
+    [
+      "cmd",
+      "%2",
+      "show-options",
+      "-pqv",
+      "@amux_label"
+    ]
+  ],
+  "worktrees": []
+}
