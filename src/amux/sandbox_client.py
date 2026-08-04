@@ -286,6 +286,21 @@ def _addr(agent: dict) -> str:
     return f"@{agent['label']} {agent['pane']}" if agent["name"] else agent["pane"]
 
 
+def runtime_to_string(me: dict) -> str:
+    """`runtime: <runtime> <runtime_status> <sandbox_name>`, or "" for a host
+    agent. Empty components drop out with their preceding space.
+
+    Rendered only when the runtime is not `host`, which is what keeps host `ctx`
+    output byte-identical to today. This exact shape is shared with the host
+    renderer (`utils.context_to_string`, task 5.4) so the two cannot drift.
+    """
+    runtime = me.get("runtime") or ""
+    if not runtime or runtime == "host":
+        return ""
+    parts = [runtime, me.get("runtime_status") or "", me.get("sandbox_name") or ""]
+    return "runtime: " + " ".join(p for p in parts if p)
+
+
 def context_to_string(ctx: dict) -> list[str]:
     """Port of `amux.utils.context_to_string`, plus the runtime a sandbox agent
     needs to know it is in one."""
@@ -296,11 +311,9 @@ def context_to_string(ctx: dict) -> list[str]:
         f"{ALIAS['window']}:{me['task']}  {ALIAS['session']}:{me['workspace']}  "
         f"{me['state']}{branch}  {me['cwd']}",
     ]
-    runtime = me.get("runtime")
-    if runtime and runtime != "host":
-        sandbox = me.get("sandbox_name") or me.get("sandbox_id") or ""
-        status = me.get("runtime_status") or ""
-        lines.append(f"runtime: {runtime} {status} {sandbox}".rstrip())
+    runtime_line = runtime_to_string(me)
+    if runtime_line:
+        lines.append(runtime_line)
     lines.append(f"team @ {me['workspace']}")
     rows = [a for group in ctx["team"] for a in group["agents"]]
     wn = max(len(a["name"] or "-") for a in rows)

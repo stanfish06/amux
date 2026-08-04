@@ -166,6 +166,49 @@ def test_ctx_reports_the_sandbox_runtime_it_is_running_in(run, capsys):
     assert "docker-sandbox" in out(capsys)
 
 
+# The runtime line's exact shape is shared with the host renderer (task 5.4), so
+# it is pinned here component by component rather than only end to end.
+@pytest.mark.parametrize(
+    "fields,expected",
+    [
+        (
+            {"runtime": "docker-sandbox", "runtime_status": "running", "sandbox_name": "box-a1b2"},
+            "runtime: docker-sandbox running box-a1b2",
+        ),
+        (
+            {"runtime": "docker-sandbox", "runtime_status": "running", "sandbox_name": ""},
+            "runtime: docker-sandbox running",
+        ),
+        (
+            {"runtime": "docker-sandbox", "runtime_status": "", "sandbox_name": ""},
+            "runtime: docker-sandbox",
+        ),
+        (
+            # an empty component takes its preceding space with it
+            {"runtime": "docker-sandbox", "runtime_status": "", "sandbox_name": "box-a1b2"},
+            "runtime: docker-sandbox box-a1b2",
+        ),
+        ({"runtime": "host", "runtime_status": "running", "sandbox_name": ""}, ""),
+        ({}, ""),
+    ],
+)
+def test_the_runtime_line_shape_is_exactly_the_agreed_one(fields, expected):
+    assert sc.runtime_to_string(fields) == expected
+
+
+def test_a_host_agents_ctx_output_is_byte_identical_to_the_native_render(run, capsys):
+    """The runtime line is why host output must be checked, not assumed: it is
+    additive only while `runtime != host`."""
+    host_self = {k: v for k, v in SELF.items() if not k.startswith(("runtime", "sandbox"))}
+    document = {
+        "self": {**host_self, "runtime": "host"},
+        "team": [{"task": "fix", "agents": [{**host_self, "runtime": "host"}, TEAMMATE]}],
+        "notes": [NOTE],
+    }
+    run({("GET", "/v1/context"): document}, "ctx")
+    assert not any(ln.startswith("runtime:") for ln in out(capsys).splitlines())
+
+
 def test_ctx_refuses_to_inspect_another_pane(run, capsys):
     rc, service = run({("GET", "/v1/context"): CONTEXT}, "ctx", "--pane", "%9")
     assert rc == 2
