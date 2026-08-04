@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/template/audit.sh",
+            "timeout": 5,
+            "statusMessage": "Auditing tool use"
+          }
+        ]
+      }
+    ]
+  }
+}

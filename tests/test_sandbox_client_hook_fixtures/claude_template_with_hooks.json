@@ -1,0 +1,25 @@
+{
+  "model": "claude-opus-4-5",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/template/audit-bash.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          { "type": "command", "command": "/opt/template/on-stop.sh" }
+        ]
+      }
+    ]
+  }
+}
