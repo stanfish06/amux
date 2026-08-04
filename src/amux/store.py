@@ -360,6 +360,31 @@ def events_for_panes(
         return _rows(conn, sql + " ORDER BY ts, id", params)
 
 
+def _page(
+    sql: str, params: tuple, after: int | None, limit: int
+) -> tuple[str, tuple]:
+    """Append ordering and a limit, flipping direction for a cursor walk.
+
+    Without `after` these queries answer "the latest N", so they sort newest
+    first. A client resuming from a cursor wants the opposite — the *oldest*
+    rows it has not seen yet — and combining a cursor with a newest-first limit
+    silently drops the middle of a burst: the caller gets the newest N past the
+    cursor and advances past everything older it never saw.
+
+    Ordering by id rather than ts is deliberate. ts comes from the writer's
+    clock, so two writers can interleave timestamps, but id is assigned by
+    SQLite and is what makes the cursor monotonic.
+    """
+    if after is not None:
+        # query_notes with no filters has no WHERE to hang the cursor off.
+        joiner = "AND" if " WHERE " in sql else "WHERE"
+        return (
+            f"{sql} {joiner} id > ? ORDER BY id ASC LIMIT ?",
+            (*params, after, limit),
+        )
+    return f"{sql} ORDER BY ts DESC, id DESC LIMIT ?", (*params, limit)
+
+
 # --- notes ---
 
 
@@ -414,9 +439,14 @@ def visible_notes(
     limit: int = 10,
     kind: str | None = None,
     repo: str | None = None,
+    after: int | None = None,
     db_path: Path | None = None,
 ) -> list[dict[str, Any]]:
-    """Notes an agent may see: workspace notes, its task's notes, its own."""
+    """Notes an agent may see: workspace notes, its task's notes, its own.
+
+    `after` turns this into a cursor walk — see `_page` for why that flips the
+    ordering.
+    """
     sql = (
         "SELECT * FROM notes WHERE workspace = ? AND ("
         "  scope = 'workspace'"
@@ -431,8 +461,7 @@ def visible_notes(
     if repo:
         sql += " AND (repo = ? OR repo = '')"
         params += (repo,)
-    sql += " ORDER BY ts DESC, id DESC LIMIT ?"
-    params += (limit,)
+    sql, params = _page(sql, params, after, limit)
     with _connect(db_path) as conn:
         return _rows(conn, sql, params)
 
@@ -446,6 +475,7 @@ def query_notes(
     worktree_id: int | None = None,
     repo: str | None = None,
     limit: int = 20,
+    after: int | None = None,
     db_path: Path | None = None,
 ) -> list[dict[str, Any]]:
     sql, params = "SELECT * FROM notes", ()
@@ -475,8 +505,7 @@ def query_notes(
         params += (repo,)
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
-    sql += " ORDER BY ts DESC, id DESC LIMIT ?"
-    params += (limit,)
+    sql, params = _page(sql, params, after, limit)
     with _connect(db_path) as conn:
         return _rows(conn, sql, params)
 
