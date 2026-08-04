@@ -1,0 +1,548 @@
+{
+  "events": [
+    {
+      "agent": "claude",
+      "detail": "",
+      "kind": "spawn",
+      "pane": "%1",
+      "repo": "<REPO>",
+      "task": "t0",
+      "workspace": "ws"
+    },
+    {
+      "agent": "codex",
+      "detail": "",
+      "kind": "spawn",
+      "pane": "%3",
+      "repo": "<REPO>",
+      "task": "t0",
+      "workspace": "ws"
+    },
+    {
+      "agent": "echo hello",
+      "detail": "",
+      "kind": "spawn",
+      "pane": "%2",
+      "repo": "<REPO>",
+      "task": "t0",
+      "workspace": "ws"
+    },
+    {
+      "agent": "claude",
+      "detail": "",
+      "kind": "spawn",
+      "pane": "%4",
+      "repo": "<REPO>",
+      "task": "t0",
+      "workspace": "ws"
+    }
+  ],
+  "events_tmux": [
+    [
+      "tmux-query",
+      "amux-test",
+      "display-message",
+      "-p",
+      "-t",
+      "%1",
+      "#{pane_id}\u001f#{@amux_pane}\u001f#{session_created}\u001f#{@amux_state}\u001f#{@amux_name}\u001f#{@amux_label}\u001f#{pane_current_command}\u001f#{@amux_agent}\u001f#{pane_current_path}\u001f#{session_name}\u001f#{window_name}\u001famux"
+    ],
+    [
+      "tmux",
+      "amux-test",
+      "set-option",
+      "-p",
+      "-t",
+      "%1",
+      "@amux_state",
+      "starting"
+    ],
+    [
+      "tmux",
+      "amux-test",
+      "wait-for",
+      "-S",
+      "amux-state-1"
+    ],
+    [
+      "tmux-query",
+      "amux-test",
+      "display-message",
+      "-p",
+      "-t",
+      "%3",
+      "#{pane_id}\u001f#{@amux_pane}\u001f#{session_created}\u001f#{@amux_state}\u001f#{@amux_name}\u001f#{@amux_label}\u001f#{pane_current_command}\u001f#{@amux_agent}\u001f#{pane_current_path}\u001f#{session_name}\u001f#{window_name}\u001famux"
+    ],
+    [
+      "tmux",
+      "amux-test",
+      "set-option",
+      "-p",
+      "-t",
+      "%3",
+      "@amux_state",
+      "starting"
+    ],
+    [
+      "tmux",
+      "amux-test",
+      "wait-for",
+      "-S",
+      "amux-state-3"
+    ],
+    [
+      "tmux-query",
+      "amux-test",
+      "display-message",
+      "-p",
+      "-t",
+      "%2",
+      "#{pane_id}\u001f#{@amux_pane}\u001f#{session_created}\u001f#{@amux_state}\u001f#{@amux_name}\u001f#{@amux_label}\u001f#{pane_current_command}\u001f#{@amux_agent}\u001f#{pane_current_path}\u001f#{session_name}\u001f#{window_name}\u001famux"
+    ],
+    [
+      "tmux",
+      "amux-test",
+      "set-option",
+      "-p",
+      "-t",
+      "%2",
+      "@amux_state",
+      "starting"
+    ],
+    [
+      "tmux",
+      "amux-test",
+      "wait-for",
+      "-S",
+      "amux-state-2"
+    ],
+    [
+      "tmux-query",
+      "amux-test",
+      "display-message",
+      "-p",
+      "-t",
+      "%4",
+      "#{pane_id}\u001f#{@amux_pane}\u001f#{session_created}\u001f#{@amux_state}\u001f#{@amux_name}\u001f#{@amux_label}\u001f#{pane_current_command}\u001f#{@amux_agent}\u001f#{pane_current_path}\u001f#{session_name}\u001f#{window_name}\u001famux"
+    ],
+    [
+      "tmux",
+      "amux-test",
+      "set-option",
+      "-p",
+      "-t",
+      "%4",
+      "@amux_state",
+      "starting"
+    ],
+    [
+      "tmux",
+      "amux-test",
+      "wait-for",
+      "-S",
+      "amux-state-4"
+    ]
+  ],
+  "grid": {
+    "cwd": "<REPO>",
+    "panes": [
+      {
+        "agent_name": "claude",
+        "cwd": "<STATE>/worktrees/ws/t0/zesty-tiger",
+        "is_agent": true,
+        "label": "r0c0",
+        "name": "zesty-tiger",
+        "pane": "%1",
+        "state": "starting"
+      },
+      {
+        "agent_name": "codex",
+        "cwd": "<STATE>/worktrees/ws/t0/proud-owl",
+        "is_agent": true,
+        "label": "r0c1",
+        "name": "proud-owl",
+        "pane": "%3",
+        "state": "starting"
+      },
+      {
+        "agent_name": "echo hello",
+        "cwd": "<STATE>/worktrees/ws/t0/clever-zebra",
+        "is_agent": false,
+        "label": "r1c0",
+        "name": "clever-zebra",
+        "pane": "%2",
+        "state": "starting"
+      },
+      {
+        "agent_name": "claude",
+        "cwd": "<STATE>/worktrees/ws/t0/amber-lynx",
+        "is_agent": true,
+        "label": "r1c1",
+        "name": "amber-lynx",
+        "pane": "%4",
+        "state": "starting"
+      }
+    ],
+    "task_name": "t0"
+  },
+  "tmux": [
+    [
+      "cmd",
+      "%1",
+      "show-options",
+      "-pqv",
+      "@amux_name"
+    ],
+    [
+      "split",
+      "%1",
+      "PaneDirection.Below",
+      "50%",
+      "<REPO>"
+    ],
+    [
+      "split",
+      "%1",
+      "PaneDirection.Right",
+      "50%",
+      "<REPO>"
+    ],
+    [
+      "cmd",
+      "%1",
+      "set-option",
+      "-p",
+      "allow-set-title",
+      "off"
+    ],
+    [
+      "cmd",
+      "%1",
+      "select-pane",
+      "-T",
+      "zesty-tiger[claude]"
+    ],
+    [
+      "cmd",
+      "%1",
+      "set-option",
+      "-p",
+      "@amux_agent",
+      "claude"
+    ],
+    [
+      "cmd",
+      "%1",
+      "set-option",
+      "-p",
+      "@amux_label",
+      "r0c0"
+    ],
+    [
+      "cmd",
+      "%1",
+      "set-option",
+      "-p",
+      "@amux_name",
+      "zesty-tiger"
+    ],
+    [
+      "cmd",
+      "%1",
+      "set-option",
+      "-p",
+      "@amux_pane",
+      "1"
+    ],
+    [
+      "set_hook",
+      "%1",
+      "pane-exited",
+      "run-shell 'amux event emit exit --pane #{hook_pane}'"
+    ],
+    [
+      "cmd",
+      "%3",
+      "set-option",
+      "-p",
+      "allow-set-title",
+      "off"
+    ],
+    [
+      "cmd",
+      "%3",
+      "select-pane",
+      "-T",
+      "proud-owl[codex]"
+    ],
+    [
+      "cmd",
+      "%3",
+      "set-option",
+      "-p",
+      "@amux_agent",
+      "codex"
+    ],
+    [
+      "cmd",
+      "%3",
+      "set-option",
+      "-p",
+      "@amux_label",
+      "r0c1"
+    ],
+    [
+      "cmd",
+      "%3",
+      "set-option",
+      "-p",
+      "@amux_name",
+      "proud-owl"
+    ],
+    [
+      "cmd",
+      "%3",
+      "set-option",
+      "-p",
+      "@amux_pane",
+      "1"
+    ],
+    [
+      "set_hook",
+      "%3",
+      "pane-exited",
+      "run-shell 'amux event emit exit --pane #{hook_pane}'"
+    ],
+    [
+      "split",
+      "%2",
+      "PaneDirection.Right",
+      "50%",
+      "<REPO>"
+    ],
+    [
+      "cmd",
+      "%2",
+      "set-option",
+      "-p",
+      "allow-set-title",
+      "off"
+    ],
+    [
+      "cmd",
+      "%2",
+      "select-pane",
+      "-T",
+      "clever-zebra[echo hello]"
+    ],
+    [
+      "cmd",
+      "%2",
+      "set-option",
+      "-p",
+      "@amux_agent",
+      "echo hello"
+    ],
+    [
+      "cmd",
+      "%2",
+      "set-option",
+      "-p",
+      "@amux_label",
+      "r1c0"
+    ],
+    [
+      "cmd",
+      "%2",
+      "set-option",
+      "-p",
+      "@amux_name",
+      "clever-zebra"
+    ],
+    [
+      "cmd",
+      "%2",
+      "set-option",
+      "-p",
+      "@amux_pane",
+      "1"
+    ],
+    [
+      "set_hook",
+      "%2",
+      "pane-exited",
+      "run-shell 'amux event emit exit --pane #{hook_pane}'"
+    ],
+    [
+      "cmd",
+      "%4",
+      "set-option",
+      "-p",
+      "allow-set-title",
+      "off"
+    ],
+    [
+      "cmd",
+      "%4",
+      "select-pane",
+      "-T",
+      "amber-lynx[claude]"
+    ],
+    [
+      "cmd",
+      "%4",
+      "set-option",
+      "-p",
+      "@amux_agent",
+      "claude"
+    ],
+    [
+      "cmd",
+      "%4",
+      "set-option",
+      "-p",
+      "@amux_label",
+      "r1c1"
+    ],
+    [
+      "cmd",
+      "%4",
+      "set-option",
+      "-p",
+      "@amux_name",
+      "amber-lynx"
+    ],
+    [
+      "cmd",
+      "%4",
+      "set-option",
+      "-p",
+      "@amux_pane",
+      "1"
+    ],
+    [
+      "set_hook",
+      "%4",
+      "pane-exited",
+      "run-shell 'amux event emit exit --pane #{hook_pane}'"
+    ],
+    [
+      "send_keys",
+      "%1",
+      "cd <STATE>/worktrees/ws/t0/zesty-tiger"
+    ],
+    [
+      "send_keys",
+      "%1",
+      "claude --dangerously-skip-permissions"
+    ],
+    [
+      "cmd",
+      "%1",
+      "show-options",
+      "-pqv",
+      "@amux_label"
+    ],
+    [
+      "send_keys",
+      "%3",
+      "cd <STATE>/worktrees/ws/t0/proud-owl"
+    ],
+    [
+      "send_keys",
+      "%3",
+      "codex --dangerously-bypass-approvals-and-sandbox"
+    ],
+    [
+      "cmd",
+      "%3",
+      "show-options",
+      "-pqv",
+      "@amux_label"
+    ],
+    [
+      "send_keys",
+      "%2",
+      "cd <STATE>/worktrees/ws/t0/clever-zebra"
+    ],
+    [
+      "send_keys",
+      "%2",
+      "echo hello"
+    ],
+    [
+      "cmd",
+      "%2",
+      "show-options",
+      "-pqv",
+      "@amux_label"
+    ],
+    [
+      "send_keys",
+      "%4",
+      "cd <STATE>/worktrees/ws/t0/amber-lynx"
+    ],
+    [
+      "send_keys",
+      "%4",
+      "claude --dangerously-skip-permissions"
+    ],
+    [
+      "cmd",
+      "%4",
+      "show-options",
+      "-pqv",
+      "@amux_label"
+    ]
+  ],
+  "worktrees": [
+    {
+      "agent": "claude",
+      "base_ref": "<SHA>",
+      "branch": "amux/ws/t0/zesty-tiger",
+      "name": "zesty-tiger",
+      "pane": "%1",
+      "path": "<STATE>/worktrees/ws/t0/zesty-tiger",
+      "repo": "<REPO>",
+      "status": "active",
+      "task": "t0",
+      "workspace": "ws"
+    },
+    {
+      "agent": "codex",
+      "base_ref": "<SHA>",
+      "branch": "amux/ws/t0/proud-owl",
+      "name": "proud-owl",
+      "pane": "%3",
+      "path": "<STATE>/worktrees/ws/t0/proud-owl",
+      "repo": "<REPO>",
+      "status": "active",
+      "task": "t0",
+      "workspace": "ws"
+    },
+    {
+      "agent": "echo hello",
+      "base_ref": "<SHA>",
+      "branch": "amux/ws/t0/clever-zebra",
+      "name": "clever-zebra",
+      "pane": "%2",
+      "path": "<STATE>/worktrees/ws/t0/clever-zebra",
+      "repo": "<REPO>",
+      "status": "active",
+      "task": "t0",
+      "workspace": "ws"
+    },
+    {
+      "agent": "claude",
+      "base_ref": "<SHA>",
+      "branch": "amux/ws/t0/amber-lynx",
+      "name": "amber-lynx",
+      "pane": "%4",
+      "path": "<STATE>/worktrees/ws/t0/amber-lynx",
+      "repo": "<REPO>",
+      "status": "active",
+      "task": "t0",
+      "workspace": "ws"
+    }
+  ]
+}
