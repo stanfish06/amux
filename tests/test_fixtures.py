@@ -9,6 +9,8 @@ else's module — so the scaffolding is pinned here.
 from __future__ import annotations
 
 import json
+import os
+import stat
 import subprocess
 from pathlib import Path
 
@@ -190,7 +192,21 @@ def test_the_guard_blocks_a_real_sbx(monkeypatch: pytest.MonkeyPatch) -> None:
         subprocess.run(["sbx", "ls"], capture_output=True)
 
 
-def test_the_guard_blocks_docker() -> None:
+def test_the_guard_blocks_docker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A resolvable `docker` must be refused.
+
+    This previously asserted that plain `docker` raised, which passed only
+    because the guard treated *unresolvable* as *real* — and docker is not
+    installed on this machine. It was testing the bug, not the guard. So put a
+    real executable on PATH and block that.
+    """
+    stub_bin = tmp_path / "stub-bin"
+    stub_bin.mkdir()
+    docker = stub_bin / "docker"
+    docker.write_text("#!/bin/sh\nexit 0\n")
+    docker.chmod(docker.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{stub_bin}{os.pathsep}{os.environ['PATH']}")
+
     with pytest.raises(AssertionError, match="use the fake_sbx fixture"):
         subprocess.run(["docker", "ps"], capture_output=True)
 
@@ -246,3 +262,20 @@ def test_emit_and_publish_state_move_the_pane_identically(
     events.publish_state("%7", "needs-input", "amux-root")
 
     assert via_emit == seen
+
+
+def test_no_sbx_lets_the_caller_meet_a_missing_executable(no_sbx) -> None:
+    """`no_sbx` simulates a machine without Docker Sandboxes, so code under
+    test must meet FileNotFoundError — the guard used to raise "invoked real
+    sbx" instead, which made the fixture unusable with any path that actually
+    shells out. An unresolvable name is the one case that certainly is not a
+    real binary."""
+    with pytest.raises(FileNotFoundError):
+        subprocess.run(["sbx", "version"], capture_output=True)
+
+
+def test_the_guard_still_blocks_a_real_sbx_alongside_the_fake(fake_sbx) -> None:
+    """Relaxing the guard must not let a real binary through by absolute path
+    while the fake is installed."""
+    with pytest.raises(AssertionError, match="use the fake_sbx fixture"):
+        subprocess.run(["/opt/homebrew/bin/sbx", "ls"], capture_output=True)
