@@ -680,6 +680,18 @@ def test_no_diagnostic_ever_prints_the_capability_token(run, capsys):
     # the service echoing the token back is still not ours to print
     assert TOKEN not in captured.err
     assert TOKEN not in captured.out
+    assert "***" in captured.err  # replaced, not merely absent
+    assert len(TOKEN) >= sc.MIN_REDACTABLE_TOKEN  # or this proves nothing
+
+
+def test_redaction_does_not_shred_a_message_for_a_too_short_token(config, capsys):
+    """A one-character "token" is not a capability, and replacing every 't' would
+    turn "cannot reach the service" into "canno*** reach ***he service"."""
+    config("http://127.0.0.1:9", token="t")
+    assert sc.main(["ctx"]) == 1
+    err = capsys.readouterr().err
+    assert "cannot reach the amux context service" in err
+    assert "***" not in err
 
 
 def test_the_token_never_reaches_the_url_or_the_process_table(run):

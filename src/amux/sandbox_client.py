@@ -94,6 +94,14 @@ WAIT_STATES = ("idle", "needs-input", "dead")
 #: truncated detail is worth far more than a dropped event.
 DETAIL_LIMIT = 2000
 
+#: Shortest string redaction will treat as a secret. A real capability is
+#: `secrets.token_urlsafe(32)` — 43 characters — so anything shorter cannot be
+#: one, and substring-replacing it would shred the diagnostic instead of
+#: protecting anything: a token of "t" turns "cannot reach the service" into
+#: "canno*** reach ***he service". A short token is a misconfiguration the
+#: service rejects anyway.
+MIN_REDACTABLE_TOKEN = 16
+
 DEFAULT_TIMEOUT_S = 15.0
 #: Longest single long-poll the client asks for. The service caps its own wait;
 #: whichever cap is shorter just means an extra round trip, never a lost event.
@@ -206,8 +214,14 @@ class ContextClient:
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def redact(self, text: str) -> str:
-        """Never let the token appear in output, even echoed back at us."""
-        return text.replace(self.config.token, "***") if self.config.token else text
+        """Never let the token appear in output, even echoed back at us.
+
+        See `MIN_REDACTABLE_TOKEN` for why a very short token is left alone.
+        """
+        token = self.config.token
+        if len(token) < MIN_REDACTABLE_TOKEN:
+            return text
+        return text.replace(token, "***")
 
     def get(
         self, path: str, params: dict[str, Any] | None = None, timeout: float | None = None

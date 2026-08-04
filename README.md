@@ -21,6 +21,83 @@ amux monitor -W 160 -T 60                   # ...at 160 cols, 60 of them for the
 ```
 - runs on a dedicated tmux server (socket `amux-root`); attach: `tmux -L amux-root attach -t myproj`
 
+# runtimes
+
+Two execution backends. `host` is the default and is unchanged: the agent runs
+on your machine, in its own git worktree, on the `amux-root` tmux server.
+
+`docker-sandbox` is opt-in and a prototype. Each agent runs inside a Docker
+Sandboxes microVM instead, so it cannot reach your files, processes,
+credentials, or Docker daemon outside its own clone. amux keeps every
+coordination concern on the host: workspace, task, roster, notes, events,
+worktrees, integration.
+
+> **Status.** The pieces are in — the `sbx` adapter and preflight
+> (`sandbox.py`), the host context service (`context_service.py`), the in-VM
+> client (`sandbox_client.py`), and hook bootstrap (`sandbox_bootstrap.py`) —
+> but the runtime is **not yet wired to the CLI**. Grid creation lands with task
+> 4.5 and the `--runtime` / `--cpus` / `--memory` / doctor flags with 5.5.
+> Anything below marked **(pending)** does not exist yet.
+
+## two rules that define the boundary
+
+1. **The context database never leaves the host.** amux does not mount, copy, or
+   synchronise `context.db`, its WAL/shm files, the amux state directory, or the
+   tmux socket into a sandbox — not read-only, not ever. A sandboxed agent
+   reaches context only through an authenticated loopback HTTP service, and when
+   that service is unreachable it fails loudly rather than falling back to a
+   mounted database, a local shadow copy, or an unauthenticated write.
+2. **A sandbox cannot control the host.** `spw`, `spg`, `kg`, `kw`, `integrate`,
+   `monitor`, `lsw` and `lsg` are not expressible in the capability vocabulary at
+   all, so no sandbox token can be escalated into them. The in-VM `amux` refuses
+   them locally, before it even reads its credentials.
+
+## prerequisites
+
+Docker's `sbx` is an optional external tool, not a Python dependency. amux
+detects it at run time and never installs it, signs you in, or changes your
+Docker policy.
+
+```sh
+sbx version                       # amux requires >= 0.37.0
+sbx policy init balanced          # one-time, host-wide; amux will not do this for you
+sbx policy allow network localhost:47317   # only if preflight tells you to
+```
+
+The policy commands are yours to run deliberately. amux checks both and prints
+the exact remediation, because widening a host-wide network policy on your
+behalf is not its call.
+
+## clone, commit, integrate
+
+A sandbox gets a private clone, not your worktree — Docker mounts the repository
+read-only and the agent works on its own copy, which is why normal git works
+inside and why nothing it does can touch your checkout.
+
+```
+amux/<ws>/<task>/integration   task integration branch, on the host
+amux/<ws>/<task>/<name>        the sandboxed agent's branch, inside the VM
+```
+
+**Uncommitted work does not exist to the rest of amux.** The agent's commits
+become reachable on the host through a `sandbox-<name>` git remote that Docker
+creates; `amux integrate` fetches that branch and merges it into the task
+integration worktree with `--no-ff`. It never imports a dirty working tree.
+
+```sh
+amux spw myproj -p ~/Git/myproj --runtime docker-sandbox -a claude:2 -a codex:2  # (pending)
+amux integrate myproj task0        # merge each sandbox's committed branch
+amux kg myproj task0               # stop the VMs, keep their state for reattach
+amux kg myproj task0 --clean       # remove them; refuses a dirty sandbox  (pending)
+```
+
+## more
+
+- `skills/amux/SKILL.md` — the agent-facing guide: what changes inside a
+  sandbox, the trust model, and troubleshooting.
+- `docs/sandbox-smoke-test.md` — the manual verification procedure, run against
+  a disposable repository on a real authenticated host.
+
 ## monitor
 
 `amux monitor` opens a read-only dashboard (workspace/task/agent tree, agent
