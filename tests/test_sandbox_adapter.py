@@ -124,8 +124,19 @@ def test_resource_flags_disable_shared_skills_by_default():
 
 
 def test_shared_skills_are_opt_in():
+    """The absence below is only evidence if the flags were really produced --
+    an empty tuple would satisfy `not in` while proving nothing."""
     flags = sandbox.Resources(cpus=1, memory="1g", share_skills=True).create_flags()
+    assert flags == ("--cpus", "1", "--memory", "1g")
     assert "--no-share-skills" not in flags
+
+
+def test_shared_skills_opt_in_is_the_only_difference():
+    """Pin the pair: the opt-in changes exactly one thing and nothing else."""
+    off = sandbox.Resources(cpus=1, memory="1g").create_flags()
+    on = sandbox.Resources(cpus=1, memory="1g", share_skills=True).create_flags()
+    assert set(off) - set(on) == {"--no-share-skills"}
+    assert set(on) - set(off) == set()
 
 
 @pytest.mark.parametrize("memory", ["4g", "1024m", "512M", "8gb", "2gi", "16G"])

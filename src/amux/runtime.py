@@ -241,6 +241,7 @@ class _Acquired:
     worktree_id: int | None = None
     token_id: int | None = None
     handle: sandbox.Sandbox | None = None
+    hooks: sandbox_bootstrap.HooksInstalled | None = None
 
 
 class SandboxRuntime:
@@ -264,6 +265,11 @@ class SandboxRuntime:
         self._service_healthy = service_healthy
         self._acquired: list[_Acquired] = []
         self._integration: worktree.TaskIntegration | None = None
+        #: Per-pane hook installation results, keyed by pane id. What 5.4 reads
+        #: to render `state_degraded` and `missing_kinds`: an agent whose hooks
+        #: could not be fully installed cannot report every state, and its
+        #: resolved state must not be presented as authoritative.
+        self.hooks: dict[str, sandbox_bootstrap.HooksInstalled] = {}
 
     # --- preflight ---
 
@@ -370,9 +376,27 @@ class SandboxRuntime:
             acquired.worktree_id, permissions=_context_service().AGENT_PERMISSIONS
         )
         acquired.token_id = token_id
-        sandbox_bootstrap.install_client(
+        installed = sandbox_bootstrap.install_client(
             handle, endpoint=self.config.client_endpoint, token=plaintext
         )
+
+        # The shim and the capability alone give the agent a working `amux` that
+        # never reports anything: state events come from the agent's own hooks.
+        # Without this the sandbox reads permanently idle, which no offline test
+        # can catch because hooks only fire inside a live VM.
+        hooks = sandbox_bootstrap.install_hooks(handle, spec.agent, installed)
+        acquired.hooks = hooks
+        self.hooks[spec.pane] = hooks
+        if hooks.degraded:
+            # Surfaced, not swallowed: a degraded agent cannot report every
+            # state, and presenting its resolved state as authoritative would
+            # claim an accuracy amux does not have.
+            version = hooks.agent_version or "version unknown"
+            missing = ", ".join(hooks.missing_kinds)
+            print(
+                f"amux: {spec.name} ({spec.agent} {version}) cannot report "
+                f"{missing}; its state will be shown as degraded"
+            )
 
         store.set_worktree_runtime(acquired.worktree_id, runtime_status="running")
         return Launch(
