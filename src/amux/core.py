@@ -436,7 +436,7 @@ def load_agent_pane(pane: Pane, facts: events.PaneFacts | None = None) -> AgentP
         agent_name=facts.agent or facts.command,
         label=facts.label or pane.id or "",
         name=facts.name,
-        state=(state or "idle") if facts.name else "-",
+        state=(state or "idle") if facts.kind == "agent" else "-",
     )
 
 

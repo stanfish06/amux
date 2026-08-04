@@ -15,6 +15,7 @@ STATE_OPTION = "@amux_state"
 
 EventKind = Literal["spawn", "busy", "stop", "notify", "exit"]
 AgentState = Literal["starting", "busy", "idle", "needs-input", "dead"]
+PaneKind = Literal["agent", "other"]
 
 STATE_BY_KIND: dict[EventKind, AgentState] = {
     "spawn": "starting",
@@ -249,9 +250,12 @@ _PANE_FORMAT = _DELIM.join(_PANE_FIELDS)
 
 @dataclass
 class PaneFacts:
-    """What tmux knows about one pane, from a single query."""
+    """What tmux knows about one pane, from a single query. `alive` is whether
+    the pane is there, `kind` whether it is one of ours; both carry None for
+    "could not tell", which is not the same as no."""
 
     alive: bool | None
+    kind: PaneKind | None = None
     created: float | None = None
     state_option: str = ""
     name: str = ""
@@ -283,6 +287,7 @@ def _parse_pane(line: str) -> PaneFacts:
         return PaneFacts(alive=True)
     facts = PaneFacts(
         alive=True,
+        kind="agent" if fields[3] else "other",
         created=_as_ts(fields[1]),
         state_option=fields[2],
         name=fields[3],
@@ -375,13 +380,16 @@ def pane_states(socket: str | None = None) -> list[dict]:
         out.append(
             {
                 "pane": pane,
+                "kind": facts.kind,
                 "workspace": facts.workspace,
                 "task": facts.task,
                 "agent": facts.agent,
                 "name": facts.name,
                 "label": facts.label,
-                "state": resolve_state(
-                    alive=True, option=facts.state_option, latest=latest
+                "state": (
+                    resolve_state(alive=True, option=facts.state_option, latest=latest)
+                    if facts.kind == "agent"
+                    else None
                 ),
                 "last_event": (
                     {"kind": latest.kind, "ts": latest.ts, "detail": latest.detail}
@@ -454,8 +462,8 @@ def cmd_state(server, args) -> int:
         return 0
     for entry in states:
         print(
-            f"{entry['pane']}\t{entry['state']}\t{entry['workspace']}/{entry['task']}"
-            f"\t{entry['name']}"
+            f"{entry['pane']}\t{entry['state'] or '-'}\t"
+            f"{entry['workspace']}/{entry['task']}\t{entry['name']}"
         )
     return 0
 
