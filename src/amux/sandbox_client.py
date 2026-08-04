@@ -599,7 +599,10 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, config_path: str | None = None) -> int:
+    """`config_path` overrides the env lookup. Nothing in a sandbox passes it;
+    it exists so two simulated clients can run in one process without racing on
+    a shared environment variable."""
     argv = list(sys.argv[1:] if argv is None else argv)
     boundary = _screen_host_only(argv)
     if boundary is not None:
@@ -610,7 +613,7 @@ def main(argv: list[str] | None = None) -> int:
     emitting = args.func is cmd_event_emit
     client = None
     try:
-        client = ContextClient(load_config())
+        client = ContextClient(load_config(config_path))
         return args.func(client, args)
     except UsageError as exc:
         print(f"amux: {exc}", file=sys.stderr)
