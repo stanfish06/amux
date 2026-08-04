@@ -18,7 +18,7 @@ attribution identical no matter which runtime prepared the launch.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -32,6 +32,31 @@ AGENT_COMMANDS = {
     "claude": "claude --dangerously-skip-permissions",
     "codex": "codex --dangerously-bypass-approvals-and-sandbox",
 }
+
+
+class GridCreationError(RuntimeError):
+    """A grid failed partway through creation and was unwound.
+
+    Carries the originating failure and every cleanup failure alongside it.
+    The original cause is never replaced: a rollback runs while an error is
+    already propagating, and a secondary "could not remove sandbox" would
+    otherwise be the only thing the user sees.
+    """
+
+    def __init__(self, cause: BaseException, cleanup_failures: Sequence[str] = ()):
+        self.cause = cause
+        self.cleanup_failures: list[str] = list(cleanup_failures)
+        super().__init__(str(cause))
+
+    def add_cleanup_failure(self, problem: str) -> None:
+        self.cleanup_failures.append(problem)
+
+    def __str__(self) -> str:
+        text = str(self.cause) or type(self.cause).__name__
+        if not self.cleanup_failures:
+            return text
+        problems = "\n".join(f"  - {p}" for p in self.cleanup_failures)
+        return f"{text}\ncleanup did not complete:\n{problems}"
 
 
 @dataclass(frozen=True)
@@ -212,6 +237,7 @@ class _Acquired:
 
     spec: PaneSpec
     sandbox_name: str
+    repo: str = ""
     worktree_id: int | None = None
     token_id: int | None = None
     handle: sandbox.Sandbox | None = None
@@ -306,7 +332,7 @@ class SandboxRuntime:
         assert self._integration is not None
         branch = worktree.agent_branch(workspace, task, spec.name)
         name = sandbox.sandbox_name(workspace, task, spec.name, repo)
-        acquired = _Acquired(spec=spec, sandbox_name=name)
+        acquired = _Acquired(spec=spec, sandbox_name=name, repo=repo)
         self._acquired.append(acquired)
 
         handle = sandbox.create(name, spec.agent, repo, self.config.resources)
@@ -388,19 +414,31 @@ class SandboxRuntime:
                 sandbox.remove(acquired.sandbox_name, force=True)
             except Exception as exc:  # noqa: BLE001
                 problems.append(f"{acquired.sandbox_name}: remove sandbox: {exc}")
+            # `sbx create --clone` publishes a host-side `sandbox-<name>` remote.
+            # Removing it is best-effort and unchecked: sbx may already have
+            # taken it with the sandbox, and a stale remote is worth reporting
+            # but never worth failing a rollback over.
+            if acquired.repo:
+                try:
+                    worktree.remove_sandbox_remote(
+                        acquired.repo, acquired.sandbox_name
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    problems.append(f"{acquired.sandbox_name}: remove remote: {exc}")
         if acquired.worktree_id is not None:
             # Marked rather than deleted: the registry is append-only, and a row
             # left active would let a later integrate merge a branch whose
-            # sandbox is gone.
-            for update, kwargs in (
-                (store.set_worktree_runtime, {"runtime_status": "failed"}),
-                (store.set_worktree_status, {}),
-            ):
-                try:
-                    if kwargs:
-                        update(acquired.worktree_id, **kwargs)
-                    else:
-                        update(acquired.worktree_id, "removed")
-                except Exception as exc:  # noqa: BLE001
-                    problems.append(f"{acquired.sandbox_name}: mark row: {exc}")
+            # sandbox is gone. Both fields are set because they answer different
+            # questions -- `runtime_status` why the VM is gone, `status` that
+            # amux should stop considering this execution.
+            try:
+                store.set_worktree_runtime(
+                    acquired.worktree_id, runtime_status="failed"
+                )
+            except Exception as exc:  # noqa: BLE001
+                problems.append(f"{acquired.sandbox_name}: mark runtime failed: {exc}")
+            try:
+                store.set_worktree_status(acquired.worktree_id, "removed")
+            except Exception as exc:  # noqa: BLE001
+                problems.append(f"{acquired.sandbox_name}: mark row removed: {exc}")
         return problems

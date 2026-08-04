@@ -229,16 +229,19 @@ def test_context_includes_the_whole_task_roster(probe, crane, deer):
 
 def test_context_reports_no_last_commit_for_a_pathless_row(probe, crane):
     """A sandbox row has no host worktree, and `git -C ""` runs wherever the
-    service happens to live — so the native call reports the *host* checkout's
-    commit subject for a sandbox pane. The service must not pass that on.
+    service happens to live — so an unguarded native call would report the
+    *host* checkout's commit subject for a sandbox pane.
 
-    This also pins the core-side gap that task 5.4 closes: when core becomes
-    runtime-aware, `native` below stops leaking and the service's own guard
-    becomes redundant rather than wrong.
+    The core-side gap this anticipated is now closed: `core._roster_entry` only
+    asks for a commit subject when the row actually has a host path, so it
+    omits the field entirely rather than filling it with someone else's commit.
+    The service's own guard is kept as defence in depth — both layers are
+    asserted here so neither can regress silently.
     """
     native = core.build_context(probe.server, "%1")
     assert native["self"]["worktree"] == ""
-    leaked = native["self"]["last_commit"]
+    # Absent, not merely empty: core no longer runs host git for a pathless row.
+    assert "last_commit" not in native["self"]
 
     _, payload = probe.get("/v1/context", crane)
     entries = [payload["self"], *(a for t in payload["team"] for a in t["agents"])]
@@ -246,10 +249,16 @@ def test_context_reports_no_last_commit_for_a_pathless_row(probe, crane):
     assert registered, "the caller at least must have a registry row"
     for entry in registered:
         assert entry["worktree"] == ""
-        assert entry["last_commit"] == ""
-    if leaked:
-        # Only meaningful while core still leaks: prove we did not echo it.
-        assert leaked not in json.dumps(payload)
+        # Absent or blank both satisfy the contract "no commit is exposed":
+        # core omits the field, and the service blanks it if it ever reappears.
+        assert entry.get("last_commit", "") == ""
+        # The absence above is only meaningful if the entry has real content,
+        # so pin something positive alongside it.
+        assert entry["name"] and entry["pane"]
+
+    # The host checkout's HEAD subject must appear nowhere in a sandbox
+    # agent's context, whichever layer would have introduced it.
+    assert "initial commit" not in json.dumps(payload)
 
 
 def test_context_says_so_when_the_host_pane_is_gone(probe):

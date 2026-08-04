@@ -322,6 +322,20 @@ def remove_task(workspace: str, task: str) -> list[str]:
     return removed
 
 
+def sandbox_remote(sandbox_name: str) -> str:
+    """The host-side remote `sbx create --clone` publishes for a sandbox."""
+    return f"sandbox-{sandbox_name}"
+
+
+def remove_sandbox_remote(repo: str, sandbox_name: str) -> None:
+    """Drop a sandbox's host remote if it is still there.
+
+    Unchecked: `sbx rm` may already have removed it, and `git remote remove`
+    fails loudly on a remote that does not exist.
+    """
+    _git(repo, "remote", "remove", sandbox_remote(sandbox_name), check=False)
+
+
 def latest_commit_subject(path: str) -> str:
     proc = _git(path, "log", "-1", "--format=%s", check=False)
     return proc.stdout.strip() if proc.returncode == 0 else ""
