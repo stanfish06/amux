@@ -458,3 +458,116 @@ def test_sandbox_rows_are_returned_by_existing_queries(
     assert by_name["host-a"]["runtime"] == "host"
     assert by_name["boxed"]["runtime"] == "docker-sandbox"
     assert by_name["boxed"]["sandbox_name"] == "amux-proj-task0-boxed-a1b2"
+
+
+# --- cursor walks ---
+
+
+def _seed(db_path: Path, worktree_id: int, count: int, prefix: str = "n") -> list[int]:
+    return [
+        store.add_note(
+            workspace="proj",
+            task="task0",
+            pane="%1",
+            text=f"{prefix}{i}",
+            scope="task",
+            worktree_id=worktree_id,
+            repo="/tmp/repo",
+            db_path=db_path,
+        )
+        for i in range(count)
+    ]
+
+
+def test_cursor_walk_returns_the_oldest_unseen_notes(
+    db_path: Path, agents: dict[str, int]
+) -> None:
+    """The bug this parameter exists to remove: a newest-first limit combined
+    with a cursor drops the middle of a burst."""
+    _seed(db_path, agents["host_a"], 10)
+    page = store.visible_notes(
+        "proj", "task0", "%1", limit=3, after=0, repo="/tmp/repo", db_path=db_path
+    )
+    assert [n["text"] for n in page] == ["n0", "n1", "n2"]
+
+
+def test_a_cursor_walk_sees_every_note_exactly_once(
+    db_path: Path, agents: dict[str, int]
+) -> None:
+    _seed(db_path, agents["host_a"], 25)
+    seen: list[str] = []
+    cursor = 0
+    while True:
+        page = store.visible_notes(
+            "proj", "task0", "%1", limit=4, after=cursor,
+            repo="/tmp/repo", db_path=db_path,
+        )
+        if not page:
+            break
+        seen.extend(n["text"] for n in page)
+        cursor = page[-1]["id"]
+
+    assert seen == [f"n{i}" for i in range(25)]
+
+
+def test_cursor_walk_still_applies_visibility(
+    db_path: Path, agents: dict[str, int]
+) -> None:
+    """Paging must not become a way around the scope rules."""
+    store.add_note(
+        workspace="proj", task="task0", pane="%3", text="private",
+        scope="agent", worktree_id=agents["sandbox"], repo="/tmp/repo",
+        db_path=db_path,
+    )
+    _seed(db_path, agents["host_a"], 3)
+
+    page = store.visible_notes(
+        "proj", "task0", "%1", limit=50, after=0, repo="/tmp/repo", db_path=db_path
+    )
+    assert [n["text"] for n in page] == ["n0", "n1", "n2"]
+
+
+def test_without_a_cursor_the_shape_is_unchanged(
+    db_path: Path, agents: dict[str, int]
+) -> None:
+    """Every existing caller passes no cursor and must keep getting the latest
+    N, newest first."""
+    _seed(db_path, agents["host_a"], 5)
+    page = store.visible_notes(
+        "proj", "task0", "%1", limit=2, repo="/tmp/repo", db_path=db_path
+    )
+    assert [n["text"] for n in page] == ["n4", "n3"]
+
+
+def test_query_notes_walks_without_any_filter(db_path: Path, agents: dict[str, int]) -> None:
+    """query_notes with no filters builds no WHERE clause, so the cursor has to
+    open one rather than appending AND to nothing."""
+    _seed(db_path, agents["host_a"], 4)
+    page = store.query_notes(limit=2, after=0, db_path=db_path)
+    assert [n["text"] for n in page] == ["n0", "n1"]
+
+
+def test_query_notes_cursor_combines_with_filters(
+    db_path: Path, agents: dict[str, int]
+) -> None:
+    _seed(db_path, agents["host_a"], 3, prefix="a")
+    store.add_note(
+        workspace="proj", task="task0", pane="%1", text="decided",
+        scope="task", kind="decision", worktree_id=agents["host_a"],
+        repo="/tmp/repo", db_path=db_path,
+    )
+    page = store.query_notes(kind="decision", limit=10, after=0, db_path=db_path)
+    assert [n["text"] for n in page] == ["decided"]
+
+
+def test_a_cursor_past_the_end_returns_nothing(
+    db_path: Path, agents: dict[str, int]
+) -> None:
+    ids = _seed(db_path, agents["host_a"], 3)
+    assert (
+        store.visible_notes(
+            "proj", "task0", "%1", limit=10, after=ids[-1],
+            repo="/tmp/repo", db_path=db_path,
+        )
+        == []
+    )

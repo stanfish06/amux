@@ -198,3 +198,51 @@ def test_the_guard_blocks_docker() -> None:
 def test_the_guard_leaves_other_commands_alone(git_repo: Path) -> None:
     result = subprocess.run(["git", "status"], cwd=git_repo, capture_output=True)
     assert result.returncode == 0
+
+
+# --- events.publish_state ---
+
+
+def test_publish_state_sets_the_option_and_wakes_waiters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The context service needs this half of `emit` without the store write
+    beside it, because it attributes events from a token rather than from
+    whichever worktree the pane fronts now."""
+    from amux import events
+
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(events, "_tmux", lambda socket, *a: calls.append((socket, *a)))
+
+    events.publish_state("%7", "needs-input", "amux-root")
+
+    assert calls == [
+        ("amux-root", "set-option", "-p", "-t", "%7", events.STATE_OPTION, "needs-input"),
+        ("amux-root", "wait-for", "-S", "amux-state-7"),
+    ]
+
+
+def test_emit_and_publish_state_move_the_pane_identically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One implementation, so the option name and wait channel cannot drift
+    between the hook path and the service path."""
+    from amux import events
+
+    seen: list[tuple[str, ...]] = []
+    monkeypatch.setattr(events, "_tmux", lambda socket, *a: seen.append((socket, *a)))
+    monkeypatch.setattr(events, "_amux_socket", lambda: "amux-root")
+    monkeypatch.setattr(
+        events, "pane_facts", lambda pane, socket=None: events.PaneFacts(
+            alive=True, created=1.0
+        )
+    )
+    monkeypatch.setattr(events, "resolve_scope", lambda pane, facts=None: ("ws", "t0"))
+
+    events.emit("notify", pane="%7", socket="amux-root")
+    via_emit = list(seen)
+
+    seen.clear()
+    events.publish_state("%7", "needs-input", "amux-root")
+
+    assert via_emit == seen
