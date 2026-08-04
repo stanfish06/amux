@@ -34,7 +34,7 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -419,6 +419,195 @@ def remove(name: str, force: bool = False) -> None:
         args.append("-f")
     args.append(name)
     run(*args)
+
+
+# --- preflight ---
+
+
+@dataclass(frozen=True)
+class Check:
+    """One preflight result. `remediation` is a command or action, not prose."""
+
+    name: str
+    ok: bool
+    detail: str = ""
+    remediation: str = ""
+
+    def __str__(self) -> str:
+        mark = "ok" if self.ok else "FAIL"
+        line = f"  [{mark}] {self.name}"
+        if self.detail:
+            line += f": {self.detail}"
+        if not self.ok and self.remediation:
+            line += f"\n         fix: {self.remediation}"
+        return line
+
+
+@dataclass(frozen=True)
+class Preflight:
+    checks: tuple[Check, ...]
+
+    @property
+    def ok(self) -> bool:
+        return all(check.ok for check in self.checks)
+
+    @property
+    def failures(self) -> tuple[Check, ...]:
+        return tuple(check for check in self.checks if not check.ok)
+
+    def report(self) -> str:
+        return "\n".join(str(check) for check in self.checks)
+
+    def raise_if_failed(self) -> None:
+        if self.ok:
+            return
+        lines = ["docker-sandbox preflight failed:"]
+        lines += [str(check) for check in self.failures]
+        raise SandboxError("\n".join(lines))
+
+
+def is_primary_checkout(repo: str | os.PathLike[str]) -> bool:
+    """True when `repo` is a repository's main checkout.
+
+    A secondary worktree stores `.git` as a *file* pointing elsewhere, and
+    `sbx create --clone` cannot clone from one. This matters in practice
+    because amux runs its own agents inside secondary worktrees, so the
+    obvious thing to hand the sandbox runtime is exactly the thing that
+    cannot work.
+    """
+    return (Path(repo) / ".git").is_dir()
+
+
+def preflight(
+    *,
+    agents: Sequence[str],
+    repo: str,
+    resources: Resources,
+    endpoint: str,
+    service_healthy: Callable[[], tuple[bool, str]] | None = None,
+) -> Preflight:
+    """Check everything that must hold before a sandbox grid is created.
+
+    Read-only by construction: every `sbx` subcommand used here (`version`,
+    `ls`, `diagnose`, `policy check`) inspects state, and none of them creates
+    a sandbox, writes policy, or signs anything in. Nothing here touches tmux,
+    git, or the database either -- the point is that a failure leaves the host
+    exactly as it was.
+
+    `service_healthy` is injected rather than imported so preflight does not
+    depend on the context service being importable, and so the whole check can
+    run in tests without a listener.
+    """
+    checks: list[Check] = []
+
+    # 1. Resource values and agent kinds are pure local validation, so they run
+    #    first: no reason to probe Docker to reject `--cpus 0`.
+    try:
+        resources.validate()
+        checks.append(
+            Check("resources", True, f"{resources.cpus} cpu, {resources.memory}")
+        )
+    except SandboxError as exc:
+        checks.append(Check("resources", False, str(exc), "correct the resource flags"))
+
+    unsupported = sorted({a for a in agents if a not in SUPPORTED_AGENTS})
+    checks.append(
+        Check(
+            "agents",
+            not unsupported,
+            ", ".join(agents) if not unsupported else f"unsupported: {', '.join(unsupported)}",
+            f"the docker-sandbox runtime supports {' and '.join(SUPPORTED_AGENTS)}; "
+            "spawn the others with the default host runtime",
+        )
+    )
+
+    # 2. The repository, before anything external.
+    if not repo:
+        checks.append(
+            Check("repository", False, "no git repository", "spawn inside a git repository")
+        )
+    elif not is_primary_checkout(repo):
+        checks.append(
+            Check(
+                "repository",
+                False,
+                f"{repo} is not a primary checkout",
+                "sbx create --clone cannot clone a secondary git worktree; "
+                "point --path at the repository's main checkout",
+            )
+        )
+    else:
+        checks.append(Check("repository", True, repo))
+
+    # 3. sbx itself: presence, then whether this build has the surface amux
+    #    parses. A missing executable makes every later check meaningless, so
+    #    they are skipped rather than reported as spurious failures.
+    try:
+        detected = version()
+    except SandboxError as exc:
+        checks.append(
+            Check(
+                "sbx",
+                False,
+                str(exc),
+                "install Docker Sandboxes, or spawn without --runtime docker-sandbox",
+            )
+        )
+        return Preflight(tuple(checks))
+
+    reason = unsupported_reason(detected)
+    checks.append(
+        Check(
+            "sbx",
+            not reason,
+            reason or detected,
+            f"upgrade Docker Sandboxes to v{'.'.join(str(n) for n in MIN_VERSION)} "
+            "or newer" if reason else "",
+        )
+    )
+
+    # 4. Docker's own diagnosis, including authentication.
+    try:
+        report = diagnose()
+        bad = failed_checks(report)
+        blocking = [c for c in bad if c.get("status") == "fail"]
+        checks.append(
+            Check(
+                "docker",
+                not blocking,
+                "; ".join(f"{c['name']}: {c.get('message', '')}" for c in bad)
+                or "all checks pass",
+                "; ".join(c["hint"] for c in blocking if c.get("hint"))
+                or "run `sbx diagnose` for detail",
+            )
+        )
+    except SandboxError as exc:
+        checks.append(Check("docker", False, str(exc), "run `sbx diagnose`"))
+
+    # 5. The context service, and whether a sandbox could actually reach it.
+    #    Both matter: a healthy service behind a policy that blocks the port is
+    #    just as broken as no service at all.
+    if service_healthy is not None:
+        healthy, detail = service_healthy()
+        checks.append(
+            Check(
+                "context-service",
+                healthy,
+                detail,
+                "start it with `amux context-service start`",
+            )
+        )
+
+    policy = check_network(endpoint)
+    checks.append(
+        Check(
+            "network-policy",
+            policy.allowed,
+            policy.detail,
+            policy.remediation or allow_network_command(endpoint),
+        )
+    )
+    return Preflight(tuple(checks))
 
 
 @dataclass(frozen=True)
