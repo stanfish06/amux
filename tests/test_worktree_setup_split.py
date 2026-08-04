@@ -18,11 +18,13 @@ from pathlib import Path
 import pytest
 
 from amux import store, worktree
-from test_host_grid_snapshot import (  # noqa: F401 - fixtures
-    git,
-    isolated_state,
-    repo,
-)
+from test_host_grid_snapshot import git
+
+
+@pytest.fixture
+def repo(git_repo):
+    """Alias: these tests read better talking about "the repo"."""
+    return git_repo
 
 
 def branches(repo: Path) -> set[str]:
@@ -46,7 +48,7 @@ def statuses() -> list[str]:
     return [row["status"] for row in store.worktrees_for("ws", "t0")]
 
 
-def test_integration_setup_is_self_contained(repo, isolated_state):
+def test_integration_setup_is_self_contained(repo):
     integration = worktree.setup_task_integration(str(repo), "ws", "t0")
 
     assert integration.branch == "amux/ws/t0/integration"
@@ -57,7 +59,7 @@ def test_integration_setup_is_self_contained(repo, isolated_state):
     assert store.worktrees_for("ws", "t0") == []
 
 
-def test_integration_setup_is_retryable_after_removal(repo, isolated_state):
+def test_integration_setup_is_retryable_after_removal(repo):
     first = worktree.setup_task_integration(str(repo), "ws", "t0")
     worktree.remove_task_integration(first)
 
@@ -70,15 +72,13 @@ def test_integration_setup_is_retryable_after_removal(repo, isolated_state):
     assert second.branch == first.branch
 
 
-def test_integration_setup_refuses_a_repo_without_commits(tmp_path, isolated_state):
-    empty = tmp_path / "empty"
-    empty.mkdir()
-    git(empty, "init", "-q", "-b", "main")
+def test_integration_setup_refuses_a_repo_without_commits(git_factory):
+    empty = git_factory("empty", empty=True)
     with pytest.raises(worktree.WorktreeError, match="no commits"):
         worktree.setup_task_integration(str(empty), "ws", "t0")
 
 
-def test_agent_setup_rolls_back_its_own_worktrees_and_rows(repo, isolated_state):
+def test_agent_setup_rolls_back_its_own_worktrees_and_rows(repo):
     """A duplicate agent name fails the second `worktree add`."""
     integration = worktree.setup_task_integration(str(repo), "ws", "t0")
 
@@ -98,7 +98,7 @@ def test_agent_setup_rolls_back_its_own_worktrees_and_rows(repo, isolated_state)
 
 
 def test_agent_setup_rolls_back_when_the_registry_fails(
-    repo, isolated_state, monkeypatch
+    repo, monkeypatch
 ):
     """The worktree is on disk before the row exists; rollback must undo both."""
     integration = worktree.setup_task_integration(str(repo), "ws", "t0")
@@ -125,7 +125,7 @@ def test_agent_setup_rolls_back_when_the_registry_fails(
     assert worktree_paths(repo) == {str(repo), integration.path}
 
 
-def test_setup_task_rolls_back_both_halves(repo, isolated_state):
+def test_setup_task_rolls_back_both_halves(repo):
     with pytest.raises(worktree.WorktreeError):
         worktree.setup_task(
             str(repo), "ws", "t0", [("%1", "claude", "alpha"), ("%2", "codex", "alpha")]
@@ -137,7 +137,7 @@ def test_setup_task_rolls_back_both_halves(repo, isolated_state):
     assert not (task_root() / worktree.INTEGRATION_DIR).exists()
 
 
-def test_setup_task_leaves_branches_behind_and_can_be_retried(repo, isolated_state):
+def test_setup_task_leaves_branches_behind_and_can_be_retried(repo):
     """Documented non-change: rollback keeps branches, so a retry is clean."""
     with pytest.raises(worktree.WorktreeError):
         worktree.setup_task(
@@ -156,7 +156,7 @@ def test_setup_task_leaves_branches_behind_and_can_be_retried(repo, isolated_sta
     assert sorted(statuses()) == ["active", "active", "removed"]
 
 
-def test_setup_task_matches_the_split_halves(repo, isolated_state):
+def test_setup_task_matches_the_split_halves(repo):
     """The composition is exactly the two halves, so host callers see no change."""
     paths = worktree.setup_task(
         str(repo), "ws", "t0", [("%1", "claude", "alpha"), ("%2", "codex", "beta")]

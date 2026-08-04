@@ -12,6 +12,7 @@ fails loudly instead of silently.
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
 import subprocess
@@ -25,45 +26,25 @@ from amux import core, events, store, worktree
 
 GOLDEN_DIR = Path(__file__).parent / "golden"
 
-GIT_ENV = (
-    "-c",
-    "user.email=test@amux.invalid",
-    "-c",
-    "user.name=amux test",
-    "-c",
-    "commit.gpgsign=false",
-)
-
 
 def git(cwd: Path, *args: str) -> str:
-    proc = subprocess.run(
-        ["git", *GIT_ENV, "-C", str(cwd), *args],
+    """Git with a fixed identity and no user config, matching conftest's."""
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_AUTHOR_NAME": "amux tests",
+        "GIT_AUTHOR_EMAIL": "tests@amux.invalid",
+        "GIT_COMMITTER_NAME": "amux tests",
+        "GIT_COMMITTER_EMAIL": "tests@amux.invalid",
+    }
+    return subprocess.run(
+        ("git", "-C", str(cwd), *args),
+        env=env,
         capture_output=True,
         text=True,
         check=True,
-    )
-    return proc.stdout.strip()
-
-
-@pytest.fixture
-def repo(tmp_path: Path) -> Path:
-    path = tmp_path / "repo"
-    path.mkdir()
-    git(path, "init", "-q", "-b", "main")
-    (path / "README.md").write_text("seed\n")
-    git(path, "add", "README.md")
-    git(path, "commit", "-q", "-m", "seed")
-    return path
-
-
-@pytest.fixture
-def isolated_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point the registry and worktree root at this test's tmp dir."""
-    state = tmp_path / "state"
-    state.mkdir()
-    monkeypatch.setattr(store, "DB_PATH", state / "context.db")
-    monkeypatch.setattr(worktree, "STATE_DIR", state)
-    return state
+    ).stdout.strip()
 
 
 @pytest.fixture
@@ -176,65 +157,69 @@ def build(window, cwd, workspace="ws", task="t0", agents=None, shape=(2, 2)):
     )
 
 
-def test_grid_in_a_repo(repo, isolated_state, tmux_calls):
+def test_grid_in_a_repo(git_repo, isolate_state, tmux_calls):
     """The full host path: worktrees, branches, registry rows, launches."""
     window = fake_tmux.new_window()
-    grid = build(window, str(repo))
+    grid = build(window, str(git_repo))
     assert_golden(
         "grid_in_repo",
-        snapshot(window, tmux_calls, grid, repo=repo, state=isolated_state),
+        snapshot(window, tmux_calls, grid, repo=git_repo, state=isolate_state),
     )
     # The goldens above encode the paths; assert the worktrees really exist so a
     # golden can never pass on a path that git never created.
     for row in store.worktrees_for("ws", "t0"):
         assert Path(row["path"]).is_dir()
+        # Schema 3 added runtime columns. The host path never sets them, so
+        # they must arrive as host defaults rather than as NULL or a sandbox
+        # value -- that is what keeps every runtime-aware query correct for
+        # rows written before the column existed.
+        assert row["runtime"] == "host"
+        assert not row["sandbox_name"] and not row["sandbox_id"]
     int_path = Path(worktree.task_worktree_root("ws", "t0")) / worktree.INTEGRATION_DIR
     assert int_path.is_dir()
 
 
-def test_grid_outside_a_repo(tmp_path, isolated_state, tmux_calls):
+def test_grid_outside_a_repo(tmp_path, isolate_state, tmux_calls):
     """A non-repo target keeps the shared-directory behavior, no registry rows."""
     plain = tmp_path / "plain"
     plain.mkdir()
     window = fake_tmux.new_window()
     grid = build(window, str(plain))
-    snap = snapshot(window, tmux_calls, grid, repo=plain, state=isolated_state)
+    snap = snapshot(window, tmux_calls, grid, repo=plain, state=isolate_state)
     assert snap["worktrees"] == []
     assert_golden("grid_outside_repo", snap)
 
 
-def test_grid_in_a_repo_without_commits(tmp_path, isolated_state, tmux_calls, capsys):
+def test_grid_in_a_repo_without_commits(git_factory, isolate_state, tmux_calls, capsys):
     """Worktree setup fails soft: agents still launch in the shared directory."""
-    empty = tmp_path / "empty"
-    empty.mkdir()
-    git(empty, "init", "-q", "-b", "main")
+    empty = git_factory("empty", empty=True)
     window = fake_tmux.new_window()
     grid = build(window, str(empty))
     assert "worktree isolation unavailable: repo has no commits yet" in capsys.readouterr().out
-    snap = snapshot(window, tmux_calls, grid, repo=empty, state=isolated_state)
+    snap = snapshot(window, tmux_calls, grid, repo=empty, state=isolate_state)
     assert snap["worktrees"] == []
     assert_golden("grid_repo_no_commits", snap)
 
 
-def test_grid_without_workspace_or_task(repo, isolated_state, tmux_calls):
+def test_grid_without_workspace_or_task(git_repo, isolate_state, tmux_calls):
     """`_build_grid` only isolates when it knows the workspace and task."""
     window = fake_tmux.new_window()
     random.seed(1234)
     grid = core._build_grid(  # noqa: SLF001
-        window, 1, 2, ["claude", "codex"], str(repo)
+        window, 1, 2, ["claude", "codex"], str(git_repo)
     )
-    snap = snapshot(window, tmux_calls, grid, repo=repo, state=isolated_state)
+    snap = snapshot(window, tmux_calls, grid, repo=git_repo, state=isolate_state)
     assert snap["worktrees"] == []
     assert_golden("grid_no_scope", snap)
 
 
-def test_grid_without_cwd(repo, isolated_state, tmux_calls):
+def test_grid_without_cwd(git_repo, isolate_state, tmux_calls):
     """No cwd: panes fall back to their own current path and stay shared."""
     window = fake_tmux.new_window()
     random.seed(1234)
     grid = core._build_grid(  # noqa: SLF001
         window, 1, 2, ["claude", "codex"], None, workspace="ws", task="t0"
     )
-    snap = snapshot(window, tmux_calls, grid, repo=repo, state=isolated_state)
+    snap = snapshot(window, tmux_calls, grid, repo=git_repo, state=isolate_state)
     assert snap["worktrees"] == []
     assert_golden("grid_no_cwd", snap)

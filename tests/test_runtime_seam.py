@@ -11,20 +11,24 @@ from __future__ import annotations
 import random
 from pathlib import Path
 
+import pytest
+
 import fake_tmux
 from amux import core, runtime, store
-from test_host_grid_snapshot import (  # noqa: F401 - fixtures
-    isolated_state,
-    repo,
-    tmux_calls,
-)
+from test_host_grid_snapshot import tmux_calls  # noqa: F401 - fixture
+
+
+@pytest.fixture
+def repo(git_repo):
+    """Alias: these tests read better talking about "the repo"."""
+    return git_repo
 
 
 def specs(*panes: tuple[str, str, str]) -> list[runtime.PaneSpec]:
     return [runtime.PaneSpec(pane, agent, name) for pane, agent, name in panes]
 
 
-def test_host_runtime_prepares_a_worktree_per_agent(repo, isolated_state):
+def test_host_runtime_prepares_a_worktree_per_agent(repo):
     launches = runtime.HostRuntime().prepare(
         specs(("%1", "claude", "alpha"), ("%2", "codex", "beta")),
         workspace="ws",
@@ -42,7 +46,7 @@ def test_host_runtime_prepares_a_worktree_per_agent(repo, isolated_state):
         assert Path(launch.cwd).is_dir()
 
 
-def test_host_runtime_passes_raw_commands_through(tmp_path, isolated_state):
+def test_host_runtime_passes_raw_commands_through(tmp_path):
     """A non-repo target: no `cd`, and the raw command is launched verbatim."""
     plain = tmp_path / "plain"
     plain.mkdir()
@@ -53,7 +57,7 @@ def test_host_runtime_passes_raw_commands_through(tmp_path, isolated_state):
     assert launch.keys == ("echo hi",)
 
 
-def test_host_runtime_sends_nothing_for_an_empty_agent(tmp_path, isolated_state):
+def test_host_runtime_sends_nothing_for_an_empty_agent(tmp_path):
     (launch,) = runtime.HostRuntime().prepare(
         specs(("%1", "", "alpha")), workspace="ws", task="t0", cwd=str(tmp_path)
     )
@@ -82,7 +86,7 @@ class RecordingRuntime:
         ]
 
 
-def test_a_custom_runtime_owns_launch_and_cwd(repo, isolated_state, tmux_calls):
+def test_a_custom_runtime_owns_launch_and_cwd(repo, tmux_calls):
     fake = RecordingRuntime()
     window = fake_tmux.new_window()
     random.seed(1234)
@@ -117,7 +121,7 @@ def test_a_custom_runtime_owns_launch_and_cwd(repo, isolated_state, tmux_calls):
 
 
 def test_pane_metadata_and_events_do_not_depend_on_the_runtime(
-    repo, isolated_state, tmux_calls
+    repo, tmux_calls
 ):
     """Same grid, two runtimes: everything except the launch keys is identical."""
 
@@ -139,7 +143,7 @@ def test_pane_metadata_and_events_do_not_depend_on_the_runtime(
     assert host_events == sandbox_events
 
 
-def test_build_grid_defaults_to_the_host_runtime(repo, isolated_state, tmux_calls):
+def test_build_grid_defaults_to_the_host_runtime(repo, tmux_calls):
     window = fake_tmux.new_window()
     random.seed(1234)
     grid = core._build_grid(  # noqa: SLF001
@@ -149,7 +153,7 @@ def test_build_grid_defaults_to_the_host_runtime(repo, isolated_state, tmux_call
     assert pane.cwd.endswith(f"/worktrees/ws/t0/{pane.name}")
 
 
-def test_spawn_agent_grid_forwards_the_runtime(repo, isolated_state, tmux_calls):
+def test_spawn_agent_grid_forwards_the_runtime(repo, tmux_calls):
     """`spg`'s entry point must reach the seam, not just `_build_grid`."""
     fake = RecordingRuntime()
     window = fake_tmux.new_window()
