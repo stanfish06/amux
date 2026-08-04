@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import stat
 from pathlib import Path
 
@@ -31,6 +32,8 @@ class FakeOps:
     def __init__(self, name: str = "amux-myproj-fix-brave-hawk-ab12cd", home: str = "/root"):
         self.name = name
         self.home = home
+        #: What the image already ships, keyed by absolute in-VM path.
+        self.files: dict[str, str] = {}
         self.copies: list[tuple[Path, str]] = []
         self.execs: list[list[str]] = []
         self.copied: dict[str, bytes] = {}
@@ -51,6 +54,11 @@ class FakeOps:
         if self.fail_on and self.fail_on in " ".join(argv):
             raise sb.BootstrapError(f"sbx exec {self.name} {' '.join(argv)} failed: rc 1")
         if argv[:2] == ["sh", "-lc"]:
+            script = argv[2]
+            if script.startswith("cat "):
+                # what `_read_optional` runs; "" is a file the image lacks
+                path = shlex.split(script)[1]
+                return self.files.get(path, "")
             return self.home
         return ""
 

@@ -88,6 +88,12 @@ NOTE_KINDS = ("note", "decision", "finding", "blocker")
 EVENT_KINDS = ("busy", "exit", "notify", "spawn", "stop")
 WAIT_STATES = ("idle", "needs-input", "dead")
 
+#: Longest `detail` this client will send. The service caps it too and refuses
+#: anything longer — but `event emit` swallows failures, so an over-long detail
+#: from a hook payload would silently lose the state transition itself. A
+#: truncated detail is worth far more than a dropped event.
+DETAIL_LIMIT = 2000
+
 DEFAULT_TIMEOUT_S = 15.0
 #: Longest single long-poll the client asks for. The service caps its own wait;
 #: whichever cap is shorter just means an extra round trip, never a lost event.
@@ -459,10 +465,13 @@ def cmd_event_emit(client: ContextClient, args: argparse.Namespace) -> int:
         or payload.get("message")  # Notification: what the agent is asking
         or payload.get("tool_name")  # PreToolUse: which tool went busy
         or payload.get("reason")  # SessionEnd: why it exited
+        or payload.get("last-assistant-message")  # Codex notify: end of turn
         or ""
     )
     try:
-        client.post("/v1/events", {"kind": args.kind, "detail": detail})
+        client.post(
+            "/v1/events", {"kind": args.kind, "detail": str(detail)[:DETAIL_LIMIT]}
+        )
     except Exception:
         pass
     return EXIT_OK

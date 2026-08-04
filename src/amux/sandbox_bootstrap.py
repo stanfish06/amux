@@ -23,11 +23,12 @@ from __future__ import annotations
 import json
 import os
 import posixpath
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Sequence
 
-from amux import shared
+from amux import sandbox_hooks, shared
 from amux.sandbox_client import CONFIG_ENV  # noqa: F401  (re-export: one env name)
 
 #: Where the shim lands inside the VM. On PATH, so `amux` just works, and the
@@ -70,6 +71,27 @@ class Installed:
     shim_path: str
     config_path: str
     home: str
+
+
+@dataclass(frozen=True)
+class HooksInstalled:
+    """The result of wiring one agent's hooks, including what it cannot report.
+
+    `missing_kinds` is not a warning to be swallowed: for Codex it is always
+    non-empty, because that agent has one end-of-turn notification slot and no
+    per-tool event. A caller that presents such a sandbox's resolved state as
+    being as live as a Claude one is claiming accuracy it does not have.
+    """
+
+    agent: str
+    settings_path: str
+    missing_kinds: tuple[str, ...]
+    location_verified: bool
+    previous_notify: tuple[str, ...] | None = None
+
+    @property
+    def degraded(self) -> bool:
+        return bool(self.missing_kinds)
 
 
 def default_staging_dir() -> Path:
@@ -152,6 +174,80 @@ def install_client(
         return Installed(shim_path=SHIM_PATH, config_path=config_path, home=home)
     finally:
         staged.unlink(missing_ok=True)
+
+
+def install_hooks(
+    ops: SandboxOps, agent: str, installed: Installed, *, staging_dir: Path | None = None
+) -> HooksInstalled:
+    """Merge amux's hooks into one agent's sandbox-local configuration.
+
+    Reads whatever the image ships, merges only amux's own entries into it, and
+    writes it back. Nothing of the user's host configuration is copied: it names
+    host paths and host tools that do not exist in a microVM.
+
+    No capability material is involved, so unlike `install_client` there is
+    nothing here to scrub — the hook command carries the config file's *path*.
+    """
+    adapter = sandbox_hooks.hooks_for(agent)
+    staging = staging_dir or default_staging_dir()
+    staging.mkdir(parents=True, exist_ok=True)
+    settings_path = posixpath.join(installed.home, adapter.settings_relpath)
+    existing = _read_optional(ops, settings_path)
+    previous: tuple[str, ...] | None = None
+
+    if adapter.format == "json":
+        document = json.loads(existing) if existing and existing.strip() else None
+        text = sandbox_hooks.render_claude_settings(
+            sandbox_hooks.merge_claude_settings(
+                document, shim=installed.shim_path, config_path=installed.config_path
+            )
+        )
+    else:
+        text, replaced = sandbox_hooks.merge_codex_config(existing or "")
+        previous = tuple(replaced) if replaced else None
+        _write_into(
+            ops,
+            staging,
+            "amux-codex-notify",
+            sandbox_hooks.CODEX_DISPATCH_PATH,
+            sandbox_hooks.render_codex_dispatch(
+                installed.shim_path, installed.config_path, list(replaced or ())
+            ),
+        )
+        _exec(ops, "", ["chmod", "755", sandbox_hooks.CODEX_DISPATCH_PATH])
+
+    _exec(ops, "", ["mkdir", "-p", posixpath.dirname(settings_path)])
+    _write_into(ops, staging, posixpath.basename(settings_path), settings_path, text)
+    return HooksInstalled(
+        agent=agent,
+        settings_path=settings_path,
+        missing_kinds=sandbox_hooks.missing_kinds(agent),
+        location_verified=not adapter.paths_are_assumed,
+        previous_notify=previous,
+    )
+
+
+def _read_optional(ops: SandboxOps, path: str) -> str | None:
+    """The file's contents, or None when the image does not ship one. A missing
+    file is the expected case and must not look like a failure."""
+    try:
+        return ops.exec(["sh", "-lc", f'cat {shlex.quote(path)} 2>/dev/null || true'])
+    except Exception as exc:
+        raise _fail(ops, "", f"reading {path}", exc) from None
+
+
+def _write_into(
+    ops: SandboxOps, staging: Path, filename: str, destination: str, text: str
+) -> None:
+    """Deliver text as a file rather than through a shell heredoc: an argument
+    would put the whole document in the process table and make quoting a
+    correctness problem."""
+    local = staging / filename
+    local.write_text(text)
+    try:
+        _copy(ops, "", local, destination)
+    finally:
+        local.unlink(missing_ok=True)
 
 
 # --- sandbox operations, with the token scrubbed from every diagnostic -------
