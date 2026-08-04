@@ -260,6 +260,18 @@ def _attribution(
     return worktree_id, repo or ""
 
 
+def schema_version(db_path: Path | None = None) -> int:
+    """The store's schema version, after opening it.
+
+    Opening migrates, so a store this build is merely *ahead* of reports the
+    current version rather than an old one — the caller learns "compatible",
+    not "stale". A version above `SCHEMA_VERSION` means a newer amux has been
+    here and is left for the caller to judge: `_migrate` will not touch it.
+    """
+    with _connect(db_path) as conn:
+        return int(conn.execute("PRAGMA user_version").fetchone()[0])
+
+
 # --- events ---
 
 
