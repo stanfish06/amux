@@ -468,7 +468,7 @@ def _roster_entry(pane: Pane) -> dict:
     facts = events.pane_facts(pane.id or "", _socket_name(pane))
     _, last = events.pane_status(pane.id or "", facts=facts)
     ap = load_agent_pane(pane, facts=facts)
-    wt = store.worktree_for_pane(pane.id or "")
+    wt = store.worktree_for_pane(pane.id or "", since=facts.boundary)
     entry = {
         "name": ap.name,
         "agent": ap.agent_name,

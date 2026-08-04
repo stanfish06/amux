@@ -93,9 +93,21 @@ CREATE INDEX IF NOT EXISTS idx_notes_repo ON notes(repo, ts);
 
 
 _PANE_WORKTREE_SQL = (
-    "SELECT {cols} FROM worktrees WHERE pane = ?"
+    "SELECT {cols} FROM worktrees WHERE pane = ?{since}"
     " ORDER BY (status = 'active') DESC, created_ts DESC, id DESC LIMIT 1"
 )
+
+
+def _pane_worktree(
+    conn: sqlite3.Connection, pane: str, cols: str, since: float | None
+) -> sqlite3.Row | None:
+    """The worktree row a pane fronts. `since` drops rows registered before the
+    pane existed, which a recycled `%N` would otherwise inherit."""
+    sql = _PANE_WORKTREE_SQL.format(
+        cols=cols, since="" if since is None else " AND created_ts >= ?"
+    )
+    params = (pane,) if since is None else (pane, since)
+    return conn.execute(sql, params).fetchone()
 
 
 def _apply_schema(conn: sqlite3.Connection) -> None:
@@ -193,14 +205,13 @@ def _attribution(
     pane: str,
     worktree_id: int | None,
     repo: str | None,
+    since: float | None = None,
 ) -> tuple[int | None, str]:
     """(worktree_id, repo) to store on a note or event. Callers holding the
-    worktree row pass both; hook callers such as events.emit pass neither and
-    get whatever worktree the pane fronts right now."""
+    worktree row pass both; hook callers pass neither and get whatever worktree
+    the pane fronts now, bounded by `since`."""
     if worktree_id is None and repo is None:
-        row = conn.execute(
-            _PANE_WORKTREE_SQL.format(cols="id, repo"), (pane,)
-        ).fetchone()
+        row = _pane_worktree(conn, pane, "id, repo", since)
         return (row["id"], row["repo"]) if row else (None, "")
     return worktree_id, repo or ""
 
@@ -218,12 +229,13 @@ def add_event(
     detail: str = "",
     worktree_id: int | None = None,
     repo: str | None = None,
+    worktree_since: float | None = None,
     db_path: Path | None = None,
 ) -> int:
     """Record a state change. `worktree_id`/`repo` default to whatever worktree
-    the pane fronts right now, so hook callers need not know either."""
+    the pane fronts now, bounded by `worktree_since`."""
     with _connect(db_path) as conn:
-        worktree_id, repo = _attribution(conn, pane, worktree_id, repo)
+        worktree_id, repo = _attribution(conn, pane, worktree_id, repo, worktree_since)
         cur = conn.execute(
             "INSERT INTO events"
             " (ts, worktree_id, repo, workspace, task, pane, agent, kind, detail)"
@@ -451,12 +463,15 @@ def register_worktree(
         return cur.lastrowid or 0
 
 
-def worktree_for_pane(pane: str, db_path: Path | None = None) -> dict[str, Any] | None:
+def worktree_for_pane(
+    pane: str, since: float | None = None, db_path: Path | None = None
+) -> dict[str, Any] | None:
     """The worktree a pane currently fronts. A pane id can head several rows once
-    tmux recycles it, so active wins, then most recently created."""
+    tmux recycles it, so active wins, then most recently created; `since` rules
+    out rows the pane never owned."""
     with _connect(db_path) as conn:
-        rows = _rows(conn, _PANE_WORKTREE_SQL.format(cols="*"), (pane,))
-    return rows[0] if rows else None
+        row = _pane_worktree(conn, pane, "*", since)
+    return dict(row) if row else None
 
 
 def worktree_by_id(

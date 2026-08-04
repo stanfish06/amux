@@ -121,14 +121,14 @@ def _cmd_note(server, args) -> int:
         raise ValueError(
             f"not inside an amux {ALIAS['pane']} pane; pass --pane to attribute the note"
         )
-    workspace, task = events.resolve_scope(pane)
-    if not workspace:
+    ctx = events.pane_context(pane)
+    if not ctx.workspace:
         raise ValueError(
             f"could not resolve workspace/task for {ALIAS['pane']} {pane}; "
             f"pass --pane or run inside the pane"
         )
+    row = ctx.worktree
     agent = ""
-    row = store.worktree_for_pane(pane)
     if row:
         agent = row["agent"]
     else:
@@ -138,19 +138,19 @@ def _cmd_note(server, args) -> int:
                     if p.id == pane:
                         agent = core.load_agent_pane(p).agent_name
     note_id = store.add_note(
-        workspace=workspace,
-        task=task,
+        workspace=ctx.workspace,
+        task=ctx.task,
         pane=pane,
         agent=agent,
         worktree_id=row["id"] if row else None,
-        repo=row["repo"] if row else None,
+        repo=row["repo"] if row else "",
         text=" ".join(args.text),
         scope=args.scope,
         kind=args.kind,
     )
     origin = f" [{row['name']}]" if row and row["name"] else ""
     print(
-        f"note #{note_id} @ {workspace}/{task}{origin} "
+        f"note #{note_id} @ {ctx.workspace}/{ctx.task}{origin} "
         f"(scope={args.scope}, kind={args.kind})"
     )
     return 0
@@ -184,11 +184,11 @@ def _cmd_notes(server, args) -> int:
             raise ValueError(
                 f"not inside an amux {ALIAS['pane']} pane; pass --workspace or --pane"
             )
-        workspace, task = events.resolve_scope(pane)
+        ctx = events.pane_context(pane)
+        workspace, task = ctx.workspace, ctx.task
         if not workspace:
             raise ValueError(f"could not resolve workspace for {ALIAS['pane']} {pane}")
-        row = store.worktree_for_pane(pane)
-        repo = row["repo"] if row else None
+        repo = ctx.worktree["repo"] if ctx.worktree else None
         if args.scope:
             notes = store.query_notes(
                 workspace=workspace,

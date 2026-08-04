@@ -158,6 +158,7 @@ def emit(
         task=task,
         agent=agent,
         detail=detail,
+        worktree_since=facts.boundary,
     )
     _tmux(socket, "set-option", "-p", "-t", pane, STATE_OPTION, event.state)
     _tmux(socket, "wait-for", "-S", _wait_channel(pane))
@@ -326,6 +327,25 @@ def pane_status(
 
 def current_state(pane: str, socket: str | None = None) -> AgentState | None:
     return pane_status(pane, socket)[0]
+
+
+@dataclass
+class PaneContext:
+    """Where a pane's writes belong: its scope and the worktree it fronts."""
+
+    workspace: str
+    task: str
+    worktree: dict | None
+
+
+def pane_context(pane: str, socket: str | None = None) -> PaneContext:
+    facts = pane_facts(pane, socket)
+    workspace, task = resolve_scope(pane, facts=facts)
+    return PaneContext(
+        workspace=workspace,
+        task=task,
+        worktree=store.worktree_for_pane(pane, since=facts.boundary),
+    )
 
 
 def pane_states(socket: str | None = None) -> list[dict]:
