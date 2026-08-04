@@ -35,7 +35,8 @@ function isServerDown(stderr: unknown): boolean {
 
 interface PaneStatus {
   pane: string;
-  state: AgentState;
+  kind: 'amux' | 'other' | null;
+  state: AgentState | null;
   last_event: { ts: number; kind: EventKind; detail?: string } | null;
 }
 
@@ -101,7 +102,9 @@ export class TmuxService {
         name: nameOpt || '',
         agentName: agentOpt || paneCmd || 'unknown',
         label: labelOpt || paneId,
-        state: status?.state || (stateOpt as AgentState) || 'unknown',
+        state: status
+          ? status.state ?? 'unknown'
+          : (stateOpt as AgentState) || 'unknown',
         cwd: paneCwd || '',
         lastEvent,
         taskName: task.name,

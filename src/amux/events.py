@@ -289,7 +289,7 @@ def _parse_pane(line: str) -> PaneFacts:
     facts = PaneFacts(
         alive=True,
         kind="amux" if fields[1] else "other",
-        created=_as_ts(fields[2]),
+        created=_as_ts(fields[2]) or time.time(),
         state_option=fields[3],
         name=fields[4],
         label=fields[5],
@@ -368,8 +368,10 @@ def pane_states(socket: str | None = None) -> list[dict]:
         if facts.alive:
             facts_by_pane[line.split(_DELIM)[0]] = facts
 
-    bounds = [f.boundary for f in facts_by_pane.values() if f.boundary is not None]
-    floor = min(bounds) if len(bounds) == len(facts_by_pane) else None
+    floor = min(
+        (f.boundary for f in facts_by_pane.values() if f.boundary is not None),
+        default=None,
+    )
 
     newest_by_pane: dict[str, Event] = {}
     for row in store.events_for_panes(list(facts_by_pane), since=floor):
