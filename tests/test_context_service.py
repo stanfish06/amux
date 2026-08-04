@@ -184,6 +184,7 @@ def test_busy_port_fails_loudly_without_a_second_listener(tmp_path):
 def test_healthz_needs_no_token_and_reports_schema(client):
     status, payload, _ = client.request("GET", "/healthz")
     assert status == 200
+    assert payload["ok"] is True
     assert payload["service"] == cs.SERVICE_NAME
     assert payload["api"] == "v1"
     assert payload["status"] == "ok"
@@ -198,6 +199,7 @@ def test_healthz_leaks_no_paths_or_identity(client):
     assert str(client.handle.service.db_path) not in blob
     assert "/" not in blob.replace('"api":"v1"', "")
     assert set(payload) == {
+        "ok",
         "service",
         "api",
         "status",
@@ -221,6 +223,7 @@ def test_healthz_is_degraded_on_an_unsupported_schema(tmp_path):
     for probe in _serve(_config(tmp_path)):
         status, payload, _ = probe.request("GET", "/healthz")
         assert status == 503
+        assert payload["ok"] is False
         assert payload["status"] == "degraded"
         assert payload["compatible"] is False
         assert payload["schema_version"] == store.SCHEMA_VERSION + 5
@@ -233,6 +236,7 @@ def test_healthz_is_unavailable_when_the_store_cannot_be_opened(tmp_path):
     for probe in _serve(_config(tmp_path)):
         status, payload, _ = probe.request("GET", "/healthz")
         assert status == 503
+        assert payload["ok"] is False
         assert payload["status"] == "unavailable"
         assert payload["schema_version"] is None
         break

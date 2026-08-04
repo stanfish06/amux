@@ -456,6 +456,9 @@ def _healthz(service: ContextService, request: Request) -> tuple[int, dict[str, 
     workspace, or agent."""
     info = service.schema_info()
     payload = {
+        # `ok` and `schema_version` are what the sandbox client reads; the rest
+        # is for a human running `curl` or reading a preflight failure.
+        "ok": info.compatible,
         "service": SERVICE_NAME,
         "api": API_VERSION,
         "status": info.status,
