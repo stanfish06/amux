@@ -76,8 +76,8 @@ def notes_tmux(monkeypatch):
         id="@1",
         name="fix",
         panes=[
-            make_pane("%1", "swift-caller", "claude", 1000.0),
-            make_pane("%2", "happy-teammate", "codex", 1000.0),
+            make_pane("%1", "swift-crane", "claude", 1000.0),
+            make_pane("%2", "happy-deer", "codex", 1000.0),
         ],
     )
     server = FakeServer(sessions=[FakeSession(name="proj", windows=[window])])
@@ -173,14 +173,14 @@ def notes_probe(tmp_path, db_path, notes_tmux):
 
 @pytest.fixture
 def caller(notes_probe):
-    """The caller: %1, `swift-caller`."""
-    return notes_probe.agent("%1", "swift-caller")
+    """The caller: %1, `swift-crane`."""
+    return notes_probe.agent("%1", "swift-crane")
 
 
 @pytest.fixture
 def teammate(notes_probe):
-    """A teammate in the same task: %2, `happy-teammate`."""
-    return notes_probe.agent("%2", "happy-teammate", agent="codex")
+    """A teammate in the same task: %2, `happy-deer`."""
+    return notes_probe.agent("%2", "happy-deer", agent="codex")
 
 
 # --- GET /v1/context ---
@@ -217,11 +217,11 @@ def test_context_self_carries_the_runtime_identity(notes_probe, caller):
     _, payload = notes_probe.get("/v1/context", caller)
     assert payload["self"]["runtime"] == "docker-sandbox"
     assert payload["self"]["runtime_status"] == "running"
-    assert payload["self"]["sandbox_name"] == "amux-proj-fix-swift-caller"
-    assert payload["self"]["sandbox_id"] == "sbx-swift-caller"
+    assert payload["self"]["sandbox_name"] == "amux-proj-fix-swift-crane"
+    assert payload["self"]["sandbox_id"] == "sbx-swift-crane"
     assert payload["self"]["workspace"] == "proj"
     assert payload["self"]["task"] == "fix"
-    assert payload["self"]["name"] == "swift-caller"
+    assert payload["self"]["name"] == "swift-crane"
 
 
 def test_context_includes_the_whole_task_roster(notes_probe, caller, teammate):
@@ -229,7 +229,7 @@ def test_context_includes_the_whole_task_roster(notes_probe, caller, teammate):
     tasks = {t["task"] for t in payload["team"]}
     assert tasks == {"fix"}
     names = {a["name"] for t in payload["team"] for a in t["agents"]}
-    assert names == {"swift-caller", "happy-teammate"}
+    assert names == {"swift-crane", "happy-deer"}
 
 
 def test_context_reports_no_last_commit_for_a_pathless_row(notes_probe, caller):
@@ -266,7 +266,7 @@ def test_context_says_so_when_the_host_pane_is_gone(notes_probe):
 
 
 def test_context_needs_the_read_capability(notes_probe):
-    notes_probe.agent("%1", "swift-caller", permissions=())
+    notes_probe.agent("%1", "swift-crane", permissions=())
     worktree_id = store.register_worktree(
         pane="%1",
         workspace="proj",
@@ -429,9 +429,9 @@ def test_a_posted_note_is_attributed_to_the_caller(notes_probe, caller):
     assert note["task"] == "fix"
     assert note["pane"] == "%1"
     assert note["agent"] == "claude"
-    assert note["worktree_id"] == notes_probe.worktrees["swift-caller"]
+    assert note["worktree_id"] == notes_probe.worktrees["swift-crane"]
     assert note["repo"] == "/repos/proj"
-    assert note["name"] == "swift-caller"
+    assert note["name"] == "swift-crane"
     assert note["scope"] == "task"
     assert note["kind"] == "note"
 
@@ -460,8 +460,8 @@ def test_a_body_cannot_attribute_a_note_to_anyone_else(notes_probe, caller, team
             "agent": "codex",
             "workspace": "elsewhere",
             "task": "other",
-            "worktree_id": notes_probe.worktrees["happy-teammate"],
-            "name": "happy-teammate",
+            "worktree_id": notes_probe.worktrees["happy-deer"],
+            "name": "happy-deer",
         },
         caller,
     )
@@ -470,8 +470,24 @@ def test_a_body_cannot_attribute_a_note_to_anyone_else(notes_probe, caller, team
     assert note["pane"] == "%1"
     assert note["agent"] == "claude"
     assert note["workspace"] == "proj"
-    assert note["worktree_id"] == notes_probe.worktrees["swift-caller"]
-    assert note["name"] == "swift-caller"
+    assert note["worktree_id"] == notes_probe.worktrees["swift-crane"]
+    assert note["name"] == "swift-crane"
+
+    # And what was actually stored, which is the part that matters: a receipt
+    # assembled from the identity would report the caller's own pane whatever
+    # the insert did.
+    stored = [
+        n
+        for n in store.query_notes(workspace="proj", limit=10, db_path=notes_probe.db)
+        if n["id"] == note["id"]
+    ]
+    assert len(stored) == 1
+    assert stored[0]["pane"] == "%1"
+    assert stored[0]["agent"] == "claude"
+    assert stored[0]["worktree_id"] == notes_probe.worktrees["swift-crane"]
+    assert stored[0]["workspace"] == "proj"
+    assert stored[0]["task"] == "fix"
+    assert store.query_notes(pane="%2", limit=10, db_path=notes_probe.db) == []
 
 
 def test_every_scope_and_kind_round_trips(notes_probe, caller):
@@ -494,9 +510,14 @@ def test_a_posted_note_is_visible_to_a_teammate_and_to_the_native_path(
 
 
 def test_an_agent_scoped_note_is_invisible_to_a_teammate(notes_probe, caller, teammate):
-    note = _post_note(notes_probe, caller, "just for me", scope="agent")
+    """The shared note is the control: without it, an empty list would satisfy
+    the absence check for any reason at all, including a failed request."""
+    private = _post_note(notes_probe, caller, "just for me", scope="agent")
+    shared = _post_note(notes_probe, caller, "for the task")
     _, theirs = notes_probe.get("/v1/notes", teammate)
-    assert note["id"] not in [n["id"] for n in theirs["notes"]]
+    visible = [n["id"] for n in theirs["notes"]]
+    assert shared["id"] in visible
+    assert private["id"] not in visible
 
 
 def test_posting_needs_the_write_capability(notes_probe):

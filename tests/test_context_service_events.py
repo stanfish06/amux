@@ -273,6 +273,12 @@ def test_a_body_cannot_attribute_an_event_to_another_pane(events_probe, crane):
     assert payload["event"]["worktree_id"] == events_probe.worktrees["swift-crane"]
     assert events_probe.events_tmux.options()[-1][1] == "%1"
 
+    # The stored row, not just the receipt.
+    stored = store.iter_events(db_path=events_probe.db)
+    assert [(e["pane"], e["worktree_id"], e["agent"]) for e in stored] == [
+        ("%1", events_probe.worktrees["swift-crane"], "claude")
+    ]
+
 
 @pytest.mark.parametrize("kind", ["", "restart", "BUSY", "busy ", None, 7])
 def test_an_unknown_event_kind_is_refused(events_probe, crane, kind):

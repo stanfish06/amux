@@ -919,7 +919,11 @@ def _add_note(service: ContextService, request: Request) -> tuple[int, dict[str,
         ts=ts,
         db_path=service.db_path,
     )
-    row = {
+    # Read the row back rather than describing what we think we wrote. A
+    # response assembled from the identity would report the caller's own pane
+    # even if the insert had somehow filed the note under another one, which
+    # makes the receipt evidence of nothing.
+    row = _note_by_id(service, caller.worktree_id, note_id) or {
         "id": note_id,
         "ts": ts,
         "worktree_id": caller.worktree_id,
@@ -935,6 +939,23 @@ def _add_note(service: ContextService, request: Request) -> tuple[int, dict[str,
     # `name` is not a notes column — it is the execution's stable name, which
     # the client prints in its receipt line.
     return 200, {"note": {**row, "name": caller.name}}
+
+
+def _note_by_id(
+    service: ContextService, worktree_id: int, note_id: int
+) -> dict[str, Any] | None:
+    """The one note with this id, through the public cursor: ids ascend, so the
+    first row after `note_id - 1` is it."""
+    rows = store.query_notes(
+        worktree_id=worktree_id,
+        after=note_id - 1,
+        limit=1,
+        db_path=service.db_path,
+    )
+    if rows and int(rows[0]["id"]) == note_id:
+        return rows[0]
+    service.log.warning("note %d could not be read back after insert", note_id)
+    return None
 
 
 # --- events ---

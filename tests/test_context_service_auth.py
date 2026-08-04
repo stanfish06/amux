@@ -8,6 +8,7 @@ A body or query string that names any of those is data.
 
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import logging
@@ -400,13 +401,23 @@ def test_a_foreign_repository_is_refused():
     assert "/repos/elsewhere" in caught.value.message
 
 
-def test_a_sibling_task_is_not_a_scope_error():
-    """Task is not part of the scope check on purpose: native `amux notes
-    --task other` is allowed, and visibility — not authorization — is what
-    keeps another task's private notes private."""
-    identity = cs.Identity(worktree_id=1, workspace="proj", task="fix")
-    cs.require_scope(identity, workspace="proj")  # no task argument exists
-    assert "task" not in cs.require_scope.__code__.co_varnames
+def test_the_scope_boundary_is_workspace_shaped_not_task_shaped():
+    """Task is deliberately not part of the check: native `amux notes --task
+    other` is allowed, and visibility — not authorization — is what keeps
+    another task's private notes private. Two callers in the same workspace and
+    different tasks are therefore treated identically.
+
+    That a sibling task is really *served* is a request-level claim, proved by
+    test_a_sibling_task_is_readable_but_its_private_notes_are_not in
+    test_context_service_notes.py.
+    """
+    here = cs.Identity(worktree_id=1, workspace="proj", task="fix", repo="/r")
+    sibling = cs.Identity(worktree_id=2, workspace="proj", task="review", repo="/r")
+    for identity in (here, sibling):
+        cs.require_scope(identity, workspace="proj", repo="/r")
+        with pytest.raises(cs.ServiceError) as caught:
+            cs.require_scope(identity, workspace="other")
+        assert caught.value.code == "forbidden"
 
 
 def test_a_refusal_quotes_the_request_safely():
@@ -494,14 +505,35 @@ def test_a_handler_cannot_forget_to_authenticate(token_probe):
 # --- the token stays out of everything durable ---
 
 
+def _store_bytes(db: Path) -> bytes:
+    """Everything SQLite has written for this store.
+
+    The main file is not enough on its own: in WAL mode a freshly minted
+    capability lives in `-wal` until a checkpoint moves it, so searching only
+    `context.db` would look at a file holding no token at all.
+    """
+    blob = db.read_bytes()
+    for suffix in ("-wal", "-shm"):
+        sidecar = db.with_name(db.name + suffix)
+        if sidecar.exists():
+            blob += sidecar.read_bytes()
+    return blob
+
+
 def test_the_plaintext_token_is_absent_from_the_database(token_probe, spy):
+    """The hash has to be found first. An absent plaintext proves nothing about
+    bytes that might hold no capability at all — the trap clever-mole hit in
+    f499eaa, and the reason this searches the WAL too.
+    """
     token, _, _ = token_probe.agent()
     assert token_probe.get(spy, token=token)[0] == 200
-    assert token.encode() not in token_probe.db.read_bytes()
-    for suffix in ("-wal", "-shm"):
-        sidecar = token_probe.db.with_name(token_probe.db.name + suffix)
-        if sidecar.exists():
-            assert token.encode() not in sidecar.read_bytes()
+    stored = _store_bytes(token_probe.db)
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    assert digest.encode() in stored, (
+        "the capability hash is nowhere in this store, so the assertion below"
+        " would pass on an empty file"
+    )
+    assert token.encode() not in stored
 
 
 def test_the_plaintext_token_is_absent_from_the_logs(token_probe, spy):
