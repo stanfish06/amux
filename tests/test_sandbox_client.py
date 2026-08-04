@@ -498,6 +498,39 @@ def test_event_wait_repolls_from_its_cursor_until_the_state_arrives(run, capsys)
     assert seen == [None, "31", "32"]
 
 
+def test_event_wait_always_names_the_states_it_is_waiting_for(run):
+    """The service reads an EMPTY parameter as unspecified and substitutes its own
+    default, so sending `states=` would silently mean something else."""
+    _, service = run(
+        {("GET", "/v1/events/wait"): {"pane": "%9", "state": "idle", "cursor": 41}},
+        "event",
+        "wait",
+        "%9",
+    )
+    request = service.only("GET", "/v1/events/wait")
+    assert request.q("states") == "idle,needs-input,dead"
+
+
+@pytest.mark.parametrize(
+    "argv,route",
+    [
+        (("notes",), ("GET", "/v1/notes")),
+        (("event", "wait", "%9"), ("GET", "/v1/events/wait")),
+    ],
+)
+def test_no_request_ever_sends_an_empty_query_parameter(run, argv, route):
+    """An empty value is not "no value" to the service — it reads as unspecified
+    and falls back to a default, which is a different question than the one the
+    client asked. Omit the parameter instead."""
+    routes = {
+        ("GET", "/v1/notes"): _notes_route,
+        ("GET", "/v1/events/wait"): {"pane": "%9", "state": "idle", "cursor": 42},
+    }
+    _, service = run(routes, *argv)
+    for key, values in service.only(*route).query.items():
+        assert all(v != "" for v in values), f"{key} was sent empty"
+
+
 def test_event_wait_bounds_each_poll_by_its_remaining_time(run):
     _, service = run(
         {("GET", "/v1/events/wait"): {"pane": "%9", "state": "idle", "cursor": 40}},
