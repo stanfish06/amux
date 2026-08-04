@@ -27,25 +27,58 @@ from typing import Any
 
 import pytest
 
-from amux import events, shared, store
+# Imported for their side effect: both bind STATE_DIR as their own module-level
+# name, and `isolate_state` can only redirect a module it can see in
+# sys.modules. Importing them here makes that deterministic rather than
+# dependent on what some other test happened to import first.
+from amux import events, shared, store, worktree  # noqa: F401
 
 # --- state isolation ---
+
+
+def _modules_binding_state_dir() -> list[Any]:
+    """Every imported amux module carrying its own `STATE_DIR` name.
+
+    `from amux.shared import STATE_DIR` copies the value into the importing
+    module, so patching `shared.STATE_DIR` alone does not reach it. Discovered
+    rather than hand-listed: the list would otherwise silently rot as new
+    modules start importing it, and the failure mode is writing to live state.
+
+    Modules imported *after* the patch are safe on their own — they re-read the
+    already-patched `shared.STATE_DIR`.
+    """
+    return [
+        module
+        for name, module in list(sys.modules.items())
+        if (name == "amux" or name.startswith("amux."))
+        and module is not None
+        and module is not shared
+        and isinstance(getattr(module, "STATE_DIR", None), Path)
+    ]
 
 
 @pytest.fixture(autouse=True)
 def isolate_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point every state-directory consumer at a per-test scratch directory.
 
-    Autouse and unconditional. `STATE_DIR` and `DB_PATH` are resolved at import
-    time, so setting `XDG_STATE_HOME` alone would be silently ineffective for
-    any module already imported — both constants are patched as well.
+    Autouse and unconditional. amux is developed from inside a live amux
+    session, so a test that resolved the real state directory would create and
+    delete worktrees in the very directory holding the agents running it.
+
+    `STATE_DIR` and `DB_PATH` are resolved at import time, so setting
+    `XDG_STATE_HOME` alone is silently ineffective for anything already
+    imported — every binding is patched too.
     """
     state = tmp_path / "state"
-    (state / "amux").mkdir(parents=True)
+    amux_state = state / "amux"
+    amux_state.mkdir(parents=True)
+
     monkeypatch.setenv("XDG_STATE_HOME", str(state))
-    monkeypatch.setattr(shared, "STATE_DIR", state / "amux")
-    monkeypatch.setattr(store, "DB_PATH", state / "amux" / "context.db")
-    return state / "amux"
+    monkeypatch.setattr(shared, "STATE_DIR", amux_state)
+    for module in _modules_binding_state_dir():
+        monkeypatch.setattr(module, "STATE_DIR", amux_state)
+    monkeypatch.setattr(store, "DB_PATH", amux_state / "context.db")
+    return amux_state
 
 
 @pytest.fixture

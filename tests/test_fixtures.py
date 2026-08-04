@@ -41,6 +41,35 @@ def test_the_live_database_is_never_touched(db_path: Path) -> None:
     assert "state/amux/context.db" in str(db_path)
 
 
+def test_no_module_still_points_at_the_real_state_dir(isolate_state: Path) -> None:
+    """`from amux.shared import STATE_DIR` copies the value into the importing
+    module, so patching `shared.STATE_DIR` alone never reached `worktree` or
+    `events`. That let `worktree.setup_task` create and delete worktrees in the
+    live state directory. Discovered dynamically, so a module that starts
+    importing STATE_DIR tomorrow is covered without editing a list."""
+    import sys
+
+    real = Path("~/.local/state/amux").expanduser()
+    leaked = {
+        name
+        for name, module in list(sys.modules.items())
+        if (name == "amux" or name.startswith("amux."))
+        and module is not None
+        and getattr(module, "STATE_DIR", None) == real
+    }
+    assert not leaked, f"modules still bound to the live state dir: {leaked}"
+
+
+def test_worktree_paths_resolve_inside_the_sandbox(isolate_state: Path) -> None:
+    """The concrete consequence of the bug above: this is the call that would
+    have written to the directory holding the running agents' worktrees."""
+    from amux import worktree
+
+    root = Path(worktree.task_worktree_root("ws", "t0"))
+    assert isolate_state in root.parents
+    assert "/Users/stan/.local/state/amux/worktrees" not in str(root)
+
+
 def test_default_db_path_also_lands_in_the_sandbox(isolate_state: Path) -> None:
     """Calls that pass no `db_path` must still be isolated, since most
     production call sites do exactly that."""
