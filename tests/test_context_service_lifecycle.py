@@ -11,8 +11,10 @@ same store — and never the live one.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -134,8 +136,9 @@ def test_status_detects_a_stale_run_file(config):
 
 def test_status_detects_a_live_process_that_does_not_answer(config):
     """Our own pid is alive and is certainly not serving on that port."""
-    cs.write_runfile(config, cs.RunFile(pid=os.getpid(), port=_free_port(), started_ts=1.0))
-    result = cs.status(config)
+    with _refused_port() as port:
+        cs.write_runfile(config, cs.RunFile(pid=os.getpid(), port=port, started_ts=1.0))
+        result = cs.status(config)
     assert result.state == "unresponsive"
     assert str(os.getpid()) in result.message
     assert "stop it before starting another" in result.message
@@ -148,12 +151,43 @@ def _dead_pid() -> int:
     return child.pid
 
 
-def _free_port() -> int:
-    import socket as _socket
+@contextlib.contextmanager
+def _refused_port():
+    """A port that provably refuses connections, held open for the test.
 
-    with _socket.socket() as sock:
-        sock.bind((cs.LOOPBACK, 0))
-        return int(sock.getsockname()[1])
+    Bound but never listened on. Both halves matter: the socket is ours, so no
+    `serve --port 0` in a sibling test can take the number, and a connection to
+    it is refused rather than accepted.
+
+    Reading a port from a socket and then *closing* it — the obvious version of
+    this helper — is a TOCTOU across tests, not within one. Twelve tests in this
+    file spawn real services with `--port 0`, drawing from the same ephemeral
+    range, so one of them landing on a just-released number turns "nothing
+    answers here" into "something does" and `status` reports `running` where
+    `unresponsive` was wanted. Diagnosed and proved by clever-mole (%34), note
+    #50; re-probing before use would only narrow the window.
+    """
+    sock = socket.socket()
+    sock.bind((cs.LOOPBACK, 0))
+    try:
+        yield int(sock.getsockname()[1])
+    finally:
+        sock.close()
+
+
+# Below the ephemeral range (49152+ on this platform), so `--port 0` elsewhere
+# in the suite can never draw it. For the tests where the service must really
+# try to bind, and therefore where holding the port would mask what is
+# being asserted.
+BINDABLE_PORT = 47401
+
+
+def _bindable_port() -> int:
+    assert cs.probe_health(BINDABLE_PORT, timeout=0.5) is None, (
+        f"something is already serving on {BINDABLE_PORT}; this test needs a"
+        f" port the service can bind"
+    )
+    return BINDABLE_PORT
 
 
 # --- serve ---
@@ -208,7 +242,7 @@ def test_serve_refuses_a_newer_schema_and_binds_nothing(config):
     conn = sqlite3.connect(config.database)
     conn.execute(f"PRAGMA user_version = {store.SCHEMA_VERSION + 9}")
     conn.close()
-    port = _free_port()
+    port = _bindable_port()
 
     result = _run("serve", "--port", str(port))
     assert result.returncode == 1
@@ -228,7 +262,7 @@ def test_serve_refuses_an_unopenable_store(config):
         config.database.with_name(config.database.name + suffix).unlink(missing_ok=True)
     config.database.write_text("this is not a database")
     assert cs.schema_info(config.database).version is None
-    port = _free_port()
+    port = _bindable_port()
     result = _run("serve", "--port", str(port))
     assert result.returncode == 1
     assert "cannot open the context store" in result.stderr + config.log_file.read_text()
@@ -273,10 +307,11 @@ def test_start_clears_a_stale_run_file(config, children):
 
 def test_start_refuses_to_stand_up_a_second_service_beside_a_confused_one(config):
     """A live pid that does not answer is a problem to look at, not to double."""
-    cs.write_runfile(config, cs.RunFile(pid=os.getpid(), port=_free_port(), started_ts=1.0))
-    launched = []
-    with pytest.raises(cs.ServiceLifecycleError) as caught:
-        cs.start(config, launcher=lambda c: launched.append(1))
+    with _refused_port() as port:
+        cs.write_runfile(config, cs.RunFile(pid=os.getpid(), port=port, started_ts=1.0))
+        launched = []
+        with pytest.raises(cs.ServiceLifecycleError) as caught:
+            cs.start(config, launcher=lambda c: launched.append(1))
     assert launched == []
     assert "stop it before starting another" in str(caught.value)
 
@@ -349,7 +384,9 @@ def test_stop_reports_a_process_that_will_not_go(config, children):
     )
     children.append(child)
     _await(ready.exists, what="the child to ignore SIGTERM")
-    port = _free_port()
+    stack = contextlib.ExitStack()
+    port = stack.enter_context(_refused_port())
+    children_cleanup = stack.close
     cs.write_runfile(config, cs.RunFile(pid=child.pid, port=port, started_ts=1.0))
     # Unresponsive, so stop() must still be willing to signal it.
     with pytest.raises(cs.ServiceLifecycleError) as caught:
@@ -361,6 +398,7 @@ def test_stop_reports_a_process_that_will_not_go(config, children):
     result = cs.stop(config, force=True, timeout=20.0)
     assert result.state == "stopped"
     assert cs.read_runfile(config) is None
+    children_cleanup()
 
 
 # --- the module entry point ---
@@ -394,7 +432,7 @@ def test_a_bad_port_on_the_command_line_is_an_error_not_a_traceback(config):
 
 
 def test_the_port_can_come_from_the_environment(config, children):
-    port = _free_port()
+    port = _bindable_port()
     _spawn(children, "serve", env={cs.ENV_PORT: str(port)})
     run = _await(lambda: cs.read_runfile(config), what="a run file")
     assert run.port == port

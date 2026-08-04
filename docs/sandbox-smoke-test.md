@@ -220,18 +220,21 @@ that looks permanently idle, and you will spend the afternoon debugging amux.
 The service is host-only and the sole context path for a sandbox. It owns
 `context.db`; nothing here mounts a database into a VM.
 
-> **The command name below is a placeholder.** Task 2.5 owns the service
-> lifecycle CLI and had not landed when this was written, so
-> `amux context-service …` is what this guide assumes, not something verified.
-> Check `amux --help` and substitute the real subcommand — then fix this guide.
-> Everything after the first line works regardless of what starts the service,
-> including running it in the foreground in another terminal.
+`amux context-service` takes `serve`, `start`, `status` and `stop`. `start` is
+idempotent — sandbox preflight calls it on every spawn — so running it twice is
+not an error, and `serve` runs in the foreground of another terminal when you
+want to watch it. Both accept `--port`; the default is 47317.
 
 ```sh
 amux context-service status || amux context-service start
 amux context-service status
 curl -sS "http://127.0.0.1:$PORT/healthz" | tee /tmp/healthz.json
 ```
+
+If `status` reports a stale run file, `start` clears it. If it reports a live
+pid that answers nothing, it says so and refuses to start a second service
+beside it: stop that one first (`amux context-service stop`, or `--force` for
+SIGKILL).
 
 Expect `{"ok": true, "schema_version": 3, ...}`. Then confirm the two things
 that must be true of it:
@@ -259,13 +262,17 @@ Preflight is read-only by construction: it never touches tmux, git, the
 database, or `sbx` state. Run it on its own first, so a failure leaves the host
 exactly as it was.
 
-> `amux doctor` and the `--runtime` family come from task 5.5, unlanded when this
-> was written. The checks themselves exist (`sandbox.preflight`); only the command
-> that invokes them is assumed. Check `amux --help` and substitute.
+`amux doctor` defaults to `--runtime docker-sandbox`, since checking the
+optional backend is what it is for. It reports and never fixes: each failure
+prints the exact command to run, and no amux command installs `sbx`, signs you
+in, or widens Docker's network policy.
 
 ```sh
 amux doctor --runtime docker-sandbox --path "$SMOKE"
 ```
+
+Add `--cpus`, `--memory`, `--share-skills` or `--context-port` to check the
+values a real spawn would use; they are the same flags `spw` and `spg` take.
 
 Expect a check for each of: `sbx` present and supported, agent kinds supported,
 `$SMOKE` is a primary checkout, context service healthy, Docker
@@ -552,6 +559,13 @@ Compare against `/tmp/sbx-ls-after-spawn.json`. A new ID means reattachment
 created a fresh VM and silently lost the old one's state.
 
 ### Cleanup, including the refusals
+
+> **Not landed yet.** Safe sandbox cleanup — the dirty check, preserving the
+> committed tip, revoking the token, and the force flag that overrides the
+> refusal — is task 5.3. Task 5.5 deliberately did not add a `--force` flag to
+> `kg`/`kw`, because a flag whose help text promises to override a check that
+> does not exist is worse than no flag. Until 5.3 lands, remove a sandbox with
+> `sbx rm` yourself and expect `--clean` to handle only host worktrees.
 
 ```sh
 # A dirty sandbox must be REFUSED without an explicit force flag.

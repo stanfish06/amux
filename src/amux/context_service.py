@@ -1655,15 +1655,22 @@ def _require_compatible_schema(config: ServiceConfig) -> SchemaInfo:
     return info
 
 
-def _default_launcher(config: ServiceConfig) -> subprocess.Popen:
-    """Re-exec this module as a detached foreground service.
+def launch_argv(config: ServiceConfig) -> list[str]:
+    """How to re-exec amux as a detached foreground service.
 
-    `python -m amux.context_service` keeps the launcher independent of the CLI.
-    A frozen build has no `-m`, so a packaged amux should pass its own launcher.
+    A frozen build has no `-m`: `sys.executable` *is* the amux binary, so it is
+    invoked through its own subcommand. From a source checkout the module form
+    keeps the launcher working even where the `amux` script is not on PATH.
     """
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "context-service", "serve", "--port", str(config.port)]
+    module = __spec__.name if __spec__ else "amux.context_service"
+    return [sys.executable, "-m", module, "serve", "--port", str(config.port)]
+
+
+def _default_launcher(config: ServiceConfig) -> subprocess.Popen:
     return subprocess.Popen(
-        [sys.executable, "-m", __spec__.name if __spec__ else "amux.context_service",
-         "serve", "--port", str(config.port)],
+        launch_argv(config),
         start_new_session=True,  # survives the shell that asked for it
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
@@ -1815,16 +1822,40 @@ def serve_foreground(
     return 0
 
 
+ACTIONS = ("serve", "start", "status", "stop")
+
+
+def run_action(
+    action: str, config: ServiceConfig, *, force: bool = False
+) -> tuple[int, str]:
+    """Perform one lifecycle action and return `(exit code, message)`.
+
+    Shared by `python -m amux.context_service` and `amux context-service`, so
+    the two cannot drift into reporting the same state differently.
+    """
+    if action == "serve":
+        return serve_foreground(config), ""
+    try:
+        result = (
+            start(config)
+            if action == "start"
+            else status(config)
+            if action == "status"
+            else stop(config, force=force)
+        )
+    except ServiceLifecycleError as exc:
+        return 1, str(exc)
+    return (0 if result.state in ("running", "stopped") else 1), result.message
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """`python -m amux.context_service <serve|start|status|stop>`.
 
-    A debugging and launcher entry point. The user-facing `amux` subcommand is
-    task 5.5's; it can call these same functions.
+    A debugging and launcher entry point; `amux context-service` is the
+    user-facing one, and both go through `run_action`.
     """
     parser = argparse.ArgumentParser(prog="amux-context-service")
-    parser.add_argument(
-        "action", choices=("serve", "start", "status", "stop"), help="what to do"
-    )
+    parser.add_argument("action", choices=ACTIONS, help="what to do")
     parser.add_argument("--port", type=int, default=None, help="loopback port")
     parser.add_argument("--db", default=None, help="context store path")
     parser.add_argument(
@@ -1839,20 +1870,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         overrides["db_path"] = Path(args.db).expanduser()
     try:
         config = ServiceConfig.from_env(**overrides)
-        if args.action == "serve":
-            return serve_foreground(config)
-        result = (
-            start(config)
-            if args.action == "start"
-            else status(config)
-            if args.action == "status"
-            else stop(config, force=args.force)
-        )
-    except (ConfigError, ServiceLifecycleError) as exc:
+        code, message = run_action(args.action, config, force=args.force)
+    except ConfigError as exc:
         print(f"amux context-service: {exc}", file=sys.stderr)
         return 1
-    print(result.message)
-    return 0 if result.state in ("running", "stopped") else 1
+    if message:
+        print(message, file=sys.stderr if code else sys.stdout)
+    return code
 
 
 if __name__ == "__main__":
