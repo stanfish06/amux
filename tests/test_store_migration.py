@@ -307,3 +307,32 @@ def test_set_worktree_runtime_leaves_unnamed_fields_alone(db_path: Path) -> None
     assert row is not None
     assert row["sandbox_name"] == "box"
     assert row["sandbox_id"] == "sbx_1"
+
+
+# --- version reporting ---
+
+
+def test_schema_version_reports_the_current_version(db_path: Path) -> None:
+    assert store.schema_version(db_path=db_path) == store.SCHEMA_VERSION
+
+
+def test_schema_version_migrates_an_old_store_before_reporting(v2_db: Path) -> None:
+    """The context service gates on this. Reporting a stale version for a store
+    that would migrate on first use would make a healthy host look
+    incompatible and refuse to serve."""
+    assert store.schema_version(db_path=v2_db) == store.SCHEMA_VERSION
+    assert _user_version(v2_db) == store.SCHEMA_VERSION
+
+
+def test_schema_version_reports_a_newer_store_verbatim(db_path: Path) -> None:
+    """A store written by a newer amux is left alone by `_migrate`, so callers
+    can see they are behind and decide for themselves."""
+    store.register_worktree(
+        pane="%1", workspace="proj", task="task0", path="", branch="b",
+        db_path=db_path,
+    )
+    conn = sqlite3.connect(db_path, isolation_level=None)
+    conn.execute(f"PRAGMA user_version = {store.SCHEMA_VERSION + 1}")
+    conn.close()
+
+    assert store.schema_version(db_path=db_path) == store.SCHEMA_VERSION + 1
