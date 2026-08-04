@@ -205,8 +205,13 @@ def test_a_host_agents_ctx_output_is_byte_identical_to_the_native_render(run, ca
         "team": [{"task": "fix", "agents": [{**host_self, "runtime": "host"}, TEAMMATE]}],
         "notes": [NOTE],
     }
-    run({("GET", "/v1/context"): document}, "ctx")
-    assert not any(ln.startswith("runtime:") for ln in out(capsys).splitlines())
+    rc, _ = run({("GET", "/v1/context"): document}, "ctx")
+    assert rc == 0
+    lines = out(capsys).splitlines()
+    # positive first: without it, a render that printed nothing would pass
+    assert lines[0].startswith("you: brave-hawk  claude @r0c1 %7")
+    assert lines[1] == "team @ myproj"
+    assert not any(ln.startswith("runtime:") for ln in lines)
 
 
 def test_ctx_refuses_to_inspect_another_pane(run, capsys):
@@ -277,7 +282,10 @@ def test_ctx_treats_an_empty_last_commit_as_none(run, capsys):
     rc, _ = run({("GET", "/v1/context"): document}, "ctx")
     assert rc == 0
     owl = next(ln for ln in out(capsys).splitlines() if "golden-owl" in ln)
-    assert '""' not in owl and "  \n" not in owl
+    # the row still renders its real fields, so this is not passing on an empty line
+    assert "codex" in owl and "idle" in owl
+    assert owl.rstrip() == owl  # no trailing gap where the commit subject would go
+    assert '""' not in owl  # and no empty quoted subject
 
 
 def test_notes_rejects_an_unknown_scope_before_calling_the_service(run, capsys):
@@ -326,6 +334,8 @@ def test_note_never_claims_an_identity_the_token_does_not_grant(run):
     created = {**NOTE, "name": "brave-hawk"}
     _, service = run({("POST", "/v1/notes"): (201, {"note": created})}, "note", "hi")
     body = service.body_of("POST", "/v1/notes")
+    # positive first: an empty body would satisfy every `not in` below
+    assert body == {"text": "hi", "scope": "task", "kind": "note"}
     for field in ("pane", "agent", "workspace", "task", "repo", "worktree_id", "name"):
         assert field not in body
 
@@ -694,13 +704,23 @@ def test_redaction_does_not_shred_a_message_for_a_too_short_token(config, capsys
     assert "***" not in err
 
 
-def test_the_token_never_reaches_the_url_or_the_process_table(run):
+def test_the_token_travels_only_in_the_authorization_header(run):
+    """The Authorization header is the one place it may appear — not the path, the
+    query, or any other header.
+
+    The process table is not checked here: this client never spawns a subprocess
+    at all, which `test_a_sandbox_client_reaches_the_store_only_through_the_service`
+    asserts over the import graph. Scanning this process's `sys.argv` would only
+    have inspected pytest's own command line, and could never have failed.
+    """
     _, service = run({("GET", "/v1/context"): CONTEXT}, "ctx")
     request = service.only("GET", "/v1/context")
+    assert TOKEN in request.authorization
     assert TOKEN not in request.path
     assert not request.query
-    assert TOKEN in request.authorization
-    assert not any(TOKEN in arg for arg in sys.argv)
+    others = {k: v for k, v in request.headers.items() if k.lower() != "authorization"}
+    assert others, "no other headers were sent, so scanning them proves nothing"
+    assert not any(TOKEN in value for value in others.values())
 
 
 def test_a_non_json_service_response_is_a_clear_failure(config, capsys, tmp_path):
@@ -718,9 +738,14 @@ def test_a_non_json_service_response_is_a_clear_failure(config, capsys, tmp_path
 
 
 def test_the_client_imports_only_the_standard_library():
-    source = (sc.__file__ or "")
+    """A text scan, so it must first prove it read the real file — an empty read
+    would satisfy both `not in` checks. The authoritative version of this check
+    walks the import graph in
+    `test_a_sandbox_client_reaches_the_store_only_through_the_service`."""
+    source = sc.__file__ or ""
     assert source.endswith("sandbox_client.py")
     text = open(source).read()
+    assert "def main(" in text and "class ContextClient" in text
     assert "import amux" not in text
     assert "from amux" not in text
 

@@ -178,6 +178,11 @@ def test_install_creates_the_config_directory_before_copying_into_it(staging):
 def test_the_token_never_appears_in_an_argument_or_a_destination_path(staging):
     ops = FakeOps()
     sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    # An install that did nothing would satisfy every `not in` below, so prove
+    # the work happened AND that the token really did travel — as file contents.
+    assert len(ops.copies) == 2 and ops.execs
+    assert TOKEN in ops.copied[f"{ops.home}/.config/amux/context.json"].decode()
+
     assert TOKEN not in ops.argv_text
     assert not any(TOKEN in dest for _, dest in ops.copies)
     assert not any(TOKEN in str(src) for src, _ in ops.copies)
@@ -246,7 +251,11 @@ def test_install_never_writes_the_capability_into_the_sandbox_environment(stagin
     """An env var is visible to every process in the VM and to `sbx` inspection;
     the token belongs in one 0600 file the shim opens."""
     ops = FakeOps()
-    sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    result = sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    # Guard on the install's own commands, not merely on `execs` being non-empty:
+    # the $HOME probe alone would satisfy that while the install did nothing.
+    assert ops.mode_set_for(result.config_path) == "600"
+    assert ops.mode_set_for(sb.SHIM_PATH) == "755"
     for argv in ops.execs:
         assert not any(arg.startswith("AMUX_CONTEXT_TOKEN") for arg in argv)
         assert "export" not in " ".join(argv)
@@ -258,8 +267,10 @@ def test_install_never_writes_the_capability_into_the_sandbox_environment(stagin
 def test_nothing_the_bootstrap_copies_comes_from_the_host_state_directory(staging):
     ops = FakeOps()
     sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    assert ops.copies and ops.execs, "nothing was copied or run to inspect"
     for source, _ in ops.copies:
         text = str(source)
+        assert source.name in ("context.json", "sandbox_client.py")  # only these two
         assert "context.db" not in text
         assert not text.endswith(".db")
     assert not any("context.db" in " ".join(a) for a in ops.execs)
