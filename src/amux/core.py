@@ -311,6 +311,7 @@ def _build_grid(
 
     # The runtime decides where each pane works and what it runs; everything
     # tmux-facing stays here so pane metadata and events are runtime-agnostic.
+    socket = _socket_name(window)
     launches = {
         launch.pane: launch
         for launch in runtime.prepare(
@@ -318,10 +319,10 @@ def _build_grid(
             workspace=workspace,
             task=task,
             cwd=cwd,
+            socket=socket,
         )
     }
 
-    socket = _socket_name(window)
     for pane, agent, name in panes_info:
         launch = launches[pane.id or ""]
         pane_cwd = launch.cwd or pane.pane_current_path or ""
@@ -361,6 +362,13 @@ def spawn_agent_space(
 ) -> AgentSpace:
     if server.has_session(session_name):
         raise ValueError(f"{ALIAS['session']} '{session_name}' already exists")
+    agents = init_grid_agents or ["claude"] * (init_grid_nrows * init_grid_ncols)
+    # Before the session exists: a runtime that cannot run this grid must leave
+    # no tmux session, sandbox, git reference or registry row behind.
+    runtime = runtime or HostRuntime()
+    runtime.preflight(
+        agents, workspace=session_name, task=init_task_name, cwd=session_path
+    )
     # Detached sessions get a virtual size; make it big enough to split evenly.
     width = max(200, 80 * init_grid_ncols)
     height = max(50, 24 * init_grid_nrows)
@@ -380,7 +388,6 @@ def spawn_agent_space(
     assert session is not None
     window = session.windows[0]
     window.rename_window(init_task_name)
-    agents = init_grid_agents or ["claude"] * (init_grid_nrows * init_grid_ncols)
     grid = _build_grid(
         window,
         init_grid_nrows,
@@ -408,6 +415,12 @@ def spawn_agent_grid(
     cwd: str | None = None,
     runtime: Runtime | None = None,
 ) -> AgentGrid:
+    agents = agents or ["claude"] * (nrows * ncols)
+    # Before the window exists, for the same reason as `spawn_agent_space`.
+    runtime = runtime or HostRuntime()
+    runtime.preflight(
+        agents, workspace=session.name or "", task=window_name, cwd=cwd
+    )
     window = session.new_window(
         window_name=window_name, start_directory=cwd, attach=False
     )
@@ -415,7 +428,7 @@ def spawn_agent_grid(
         window,
         nrows,
         ncols,
-        agents or ["claude"] * (nrows * ncols),
+        agents,
         cwd,
         workspace=session.name or "",
         task=window_name,

@@ -72,10 +72,19 @@ class RecordingRuntime:
     def __init__(self):
         self.seen: list[runtime.PaneSpec] = []
         self.scope: tuple = ()
+        self.preflighted: list[list[str]] = []
+        self.socket = ""
 
-    def prepare(self, panes, *, workspace, task, cwd):
+    def preflight(self, agents, *, workspace, task, cwd):
+        self.preflighted.append(list(agents))
+
+    def rollback(self):
+        return []
+
+    def prepare(self, panes, *, workspace, task, cwd, socket=""):
         self.seen = list(panes)
         self.scope = (workspace, task, cwd)
+        self.socket = socket
         return [
             runtime.Launch(
                 pane=spec.pane,
