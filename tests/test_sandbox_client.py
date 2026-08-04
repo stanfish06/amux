@@ -258,6 +258,28 @@ def test_notes_filters_travel_as_query_parameters(run):
     assert request.q("limit") == "5"
 
 
+def test_notes_never_sends_a_cursor_so_it_keeps_the_native_newest_first_order(run):
+    """The service returns newest-first without `after` and ascending-from-cursor
+    with it. `notes` renders like native amux, so it must not pass one."""
+    _, service = run({("GET", "/v1/notes"): _notes_route}, "notes")
+    assert service.only("GET", "/v1/notes").q("after") is None
+
+
+def test_ctx_treats_an_empty_last_commit_as_none(run, capsys):
+    """The service blanks `last_commit` for sandbox rows, because computing it
+    host-side would return the host repository's subject instead."""
+    teammate = {**TEAMMATE, "last_commit": ""}
+    document = {
+        "self": SELF,
+        "team": [{"task": "fix", "agents": [SELF, teammate]}],
+        "notes": [],
+    }
+    rc, _ = run({("GET", "/v1/context"): document}, "ctx")
+    assert rc == 0
+    owl = next(ln for ln in out(capsys).splitlines() if "golden-owl" in ln)
+    assert '""' not in owl and "  \n" not in owl
+
+
 def test_notes_rejects_an_unknown_scope_before_calling_the_service(run, capsys):
     rc, service = run({("GET", "/v1/notes"): _notes_route}, "notes", "--scope", "global")
     assert rc == 2

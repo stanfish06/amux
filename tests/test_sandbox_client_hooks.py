@@ -75,7 +75,7 @@ def test_every_hook_carries_a_timeout_so_an_unreachable_host_cannot_stall_the_ag
         for group in document["hooks"][event]:
             for hook in group["hooks"]:
                 if sh.HOOK_MARKER in hook["command"]:
-                    assert hook["timeout"] == sh.CLAUDE_HOOK_TIMEOUT
+                    assert hook["timeout"] == sh.HOOK_TIMEOUT
 
 
 def test_tool_events_get_a_match_all_matcher_and_prompt_submit_gets_none():
@@ -148,7 +148,141 @@ def test_configuration_that_cannot_be_merged_safely_is_refused(broken):
         sh.merge_claude_settings(broken, shim=SHIM, config_path=CONFIG)  # type: ignore[arg-type]
 
 
-# --- Codex: the single notify slot -------------------------------------------
+# --- Codex: the real hook surface, at parity with Claude ---------------------
+
+
+def merged_codex(name: str | None) -> dict:
+    existing = json.loads(fixture(name)) if name else None
+    return sh.merge_codex_hooks(existing, shim=SHIM, config_path=CONFIG)
+
+
+def test_codex_reaches_every_amux_kind_through_its_hook_events():
+    """Codex is not structurally weaker than Claude: `hooks.json` has the events
+    for all four kinds, with PermissionRequest standing in for Notification."""
+    document = merged_codex("codex_hooks_template_empty.json")
+    kinds = {
+        command.rsplit("event emit ", 1)[1].split()[0]
+        for event in sh.CODEX_EVENT_KINDS
+        for command in commands(document, event)
+    }
+    assert kinds == {"busy", "stop", "notify", "exit"}
+
+
+def test_codex_has_no_notification_event_and_uses_permission_request():
+    assert "Notification" not in sh.CODEX_EVENT_KINDS
+    assert sh.CODEX_EVENT_KINDS["PermissionRequest"] == "notify"
+
+
+def test_codex_hooks_name_the_codex_agent_not_claude():
+    document = merged_codex("codex_hooks_template_empty.json")
+    for event in sh.CODEX_EVENT_KINDS:
+        for command in commands(document, event):
+            assert command.endswith("--agent codex")
+
+
+def test_a_codex_templates_own_hooks_are_preserved():
+    before = json.loads(fixture("codex_hooks_template.json"))
+    after = merged_codex("codex_hooks_template.json")
+    groups = after["hooks"]["PreToolUse"]
+    assert groups[0] == before["hooks"]["PreToolUse"][0]
+    assert groups[0]["hooks"][0]["statusMessage"] == "Auditing tool use"
+    assert len(groups) == 2
+
+
+def test_every_codex_event_carries_a_match_all_matcher():
+    """Unlike Claude, the verified Codex config puts a matcher on every event."""
+    document = merged_codex("codex_hooks_template_empty.json")
+    for event in sh.CODEX_EVENT_KINDS:
+        assert document["hooks"][event][-1]["matcher"] == ""
+
+
+def test_merging_codex_hooks_twice_is_a_no_op():
+    once = merged_codex("codex_hooks_template.json")
+    assert sh.merge_codex_hooks(once, shim=SHIM, config_path=CONFIG) == once
+
+
+# --- Codex: hooks.json is inert without the feature switch -------------------
+
+
+def test_the_hooks_feature_is_enabled_under_features_not_at_top_level():
+    text = sh.enable_codex_hooks(fixture("codex_template.toml"))
+    document = tomllib.loads(text)
+    assert document["features"]["hooks"] is True
+    assert "hooks" not in {k for k, v in document.items() if not isinstance(v, dict)}
+
+
+def test_a_features_table_is_appended_when_the_image_has_none():
+    """A new table header is safe at the end of a file; a bare key would land in
+    whichever table happens to be last."""
+    text = sh.enable_codex_hooks(fixture("codex_template.toml"))
+    document = tomllib.loads(text)
+    assert document["features"]["hooks"] is True
+    assert document["projects"]["/work/repo"] == {"trust_level": "trusted"}
+    assert "hooks" not in document["projects"]["/work/repo"]
+
+
+def test_hooks_false_in_an_existing_features_table_is_switched_on():
+    text = sh.enable_codex_hooks(fixture("codex_config_hooks_off.toml"))
+    document = tomllib.loads(text)
+    assert document["features"]["hooks"] is True
+    assert document["features"]["js_repl"] is False  # sibling survives
+    assert document["projects"]["/work/repo"] == {"trust_level": "trusted"}
+
+
+def test_a_replaced_feature_line_is_commented_not_deleted():
+    text = sh.enable_codex_hooks(fixture("codex_config_hooks_off.toml"))
+    assert "# amux replaced this: hooks = false" in text
+
+
+def test_an_already_enabled_config_is_left_untouched():
+    before = fixture("codex_config_hooks_on.toml")
+    assert sh.enable_codex_hooks(before) == before
+    assert sh.codex_hooks_enabled(before) is True
+
+
+def test_enabling_hooks_on_an_empty_config_produces_valid_toml():
+    text = sh.enable_codex_hooks("")
+    assert tomllib.loads(text)["features"]["hooks"] is True
+
+
+def test_invalid_toml_is_refused_rather_than_rewritten():
+    with pytest.raises(sh.HookMergeError):
+        sh.enable_codex_hooks('model = "x\n[features\n')
+
+
+# --- Codex version detection -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "output,expected",
+    [
+        ("codex-cli 0.146.0", (0, 146, 0)),
+        ("codex-cli 0.200.1\n", (0, 200, 1)),
+        ("1.2", (1, 2)),
+        ("", None),
+        ("codex-cli unknown", None),
+    ],
+)
+def test_the_codex_version_is_parsed_from_its_own_output(output, expected):
+    assert sh.parse_codex_version(output) == expected
+
+
+def test_the_verified_version_counts_as_having_hooks():
+    assert sh.codex_supports_hooks("codex-cli 0.146.0") is True
+
+
+def test_an_older_codex_does_not_count_as_having_hooks():
+    assert sh.codex_supports_hooks("codex-cli 0.100.0") is False
+
+
+def test_an_unreadable_version_falls_back_rather_than_assuming_hooks():
+    """Falling back still reports `stop` and says what is missing; assuming a
+    hook surface that is not there would report nothing at all."""
+    assert sh.codex_supports_hooks("") is False
+    assert sh.codex_supports_hooks("codex-cli dev") is False
+
+
+# --- Codex: the older single notify slot, kept as a fallback ------------------
 
 
 def test_codex_notify_is_pointed_at_the_amux_dispatch_script():
@@ -272,16 +406,31 @@ def test_without_a_previous_notify_the_script_does_not_exec_anything():
 
 
 def test_claude_covers_every_state_a_host_agent_reports():
-    assert set(sh.claude_state_coverage()) == {"busy", "stop", "notify", "exit"}
+    assert set(sh.state_coverage("claude")) == {"busy", "stop", "notify", "exit"}
     assert sh.missing_kinds("claude") == ()
 
 
-def test_codex_covers_only_stop_and_says_so():
-    """Codex has one notify slot fired at end of turn and no per-tool or
-    per-notification event, so its sandbox state is genuinely weaker. The
-    runtime has to report degraded integration rather than imply live state."""
-    assert sh.codex_state_coverage() == ("stop",)
-    assert set(sh.missing_kinds("codex")) == {"busy", "notify", "exit"}
+def test_a_current_codex_covers_every_state_too():
+    """Parity, not degradation: `hooks.json` supplies all four kinds."""
+    assert set(sh.state_coverage("codex")) == {"busy", "stop", "notify", "exit"}
+    assert sh.missing_kinds("codex") == ()
+
+
+def test_only_a_codex_without_hooks_is_degraded_and_it_says_which_kinds():
+    assert sh.state_coverage("codex", hooks_supported=False) == ("stop",)
+    assert set(sh.missing_kinds("codex", hooks_supported=False)) == {
+        "busy",
+        "notify",
+        "exit",
+    }
+
+
+def test_spawn_is_never_reported_missing_because_no_hook_supplies_it():
+    """`spawn` is stamped by the host at grid creation, so an adapter cannot be
+    missing it and reporting it as absent would be a false alarm."""
+    assert "spawn" not in sh.missing_kinds("codex", hooks_supported=False)
+    assert "spawn" in sh.ALL_KINDS
+    assert "spawn" not in sh.HOOK_SUPPLIED_KINDS
 
 
 def test_an_unsupported_agent_is_refused_by_name():
@@ -357,11 +506,58 @@ def test_the_settings_directory_is_created_before_the_file_is_copied(tmp_path, i
     assert ["mkdir", "-p", "/root/.claude"] in ops.execs
 
 
-def test_installing_codex_hooks_also_installs_the_dispatch_script(tmp_path, installed):
+def codex_ops(version: str = "codex-cli 0.146.0", **files) -> FakeOps:
     ops = FakeOps()
-    ops.files["/root/.codex/config.toml"] = fixture("codex_template_with_notify.toml")
+    ops.versions["codex"] = version
+    ops.files.update(files)
+    return ops
+
+
+def test_a_current_codex_gets_hooks_json_and_is_not_degraded(tmp_path, installed):
+    ops = codex_ops(**{"/root/.codex/hooks.json": fixture("codex_hooks_template.json")})
     result = sb.install_hooks(ops, "codex", installed, staging_dir=tmp_path)
 
+    assert result.settings_path == "/root/.codex/hooks.json"
+    assert result.mechanism == "hooks"
+    assert result.degraded is False
+    assert result.missing_kinds == ()
+    assert result.agent_version == "codex-cli 0.146.0"
+    document = json.loads(written(ops, result.settings_path))
+    assert set(document["hooks"]) == set(sh.CODEX_EVENT_KINDS)
+    assert len(document["hooks"]["PreToolUse"]) == 2  # template's plus ours
+
+
+def test_installing_codex_hooks_also_switches_the_feature_on(tmp_path, installed):
+    """hooks.json alone is inert."""
+    ops = codex_ops(**{"/root/.codex/config.toml": fixture("codex_config_hooks_off.toml")})
+    sb.install_hooks(ops, "codex", installed, staging_dir=tmp_path)
+    config = tomllib.loads(written(ops, "/root/.codex/config.toml"))
+    assert config["features"]["hooks"] is True
+    assert config["projects"]["/work/repo"] == {"trust_level": "trusted"}
+
+
+def test_a_config_that_already_enables_hooks_is_not_rewritten(tmp_path, installed):
+    ops = codex_ops(**{"/root/.codex/config.toml": fixture("codex_config_hooks_on.toml")})
+    sb.install_hooks(ops, "codex", installed, staging_dir=tmp_path)
+    assert "/root/.codex/config.toml" not in ops.copied
+
+
+def test_no_dispatch_script_is_installed_for_a_codex_that_has_hooks(tmp_path, installed):
+    ops = codex_ops()
+    sb.install_hooks(ops, "codex", installed, staging_dir=tmp_path)
+    assert sh.CODEX_DISPATCH_PATH not in ops.copied
+
+
+def test_an_old_codex_falls_back_to_notify_and_is_reported_degraded(tmp_path, installed):
+    ops = codex_ops(
+        "codex-cli 0.100.0",
+        **{"/root/.codex/config.toml": fixture("codex_template_with_notify.toml")},
+    )
+    result = sb.install_hooks(ops, "codex", installed, staging_dir=tmp_path)
+
+    assert result.mechanism == "notify"
+    assert result.degraded is True
+    assert set(result.missing_kinds) == {"busy", "notify", "exit"}
     config = tomllib.loads(written(ops, result.settings_path))
     assert config["notify"] == [sh.CODEX_DISPATCH_PATH]
     assert config["model"] == "gpt-5.6"
@@ -372,13 +568,30 @@ def test_installing_codex_hooks_also_installs_the_dispatch_script(tmp_path, inst
     assert ops.mode_set_for(sh.CODEX_DISPATCH_PATH) == "755"
 
 
-def test_a_codex_sandbox_is_reported_as_degraded_with_the_kinds_it_cannot_send(
+def test_a_codex_whose_version_cannot_be_read_falls_back_rather_than_guessing(
     tmp_path, installed
 ):
-    ops = FakeOps()
+    ops = codex_ops("")
     result = sb.install_hooks(ops, "codex", installed, staging_dir=tmp_path)
+    assert result.mechanism == "notify"
     assert result.degraded is True
-    assert set(result.missing_kinds) == {"busy", "notify", "exit"}
+
+
+def test_claude_is_never_version_probed(tmp_path, installed):
+    """Claude's hook surface is not conditional, so probing would be noise."""
+    ops = FakeOps()
+    sb.install_hooks(ops, "claude", installed, staging_dir=tmp_path)
+    assert not any("--version" in " ".join(argv) for argv in ops.execs)
+
+
+def test_image_configuration_that_is_not_valid_json_is_refused(tmp_path, installed):
+    """Overwriting an image file we cannot parse would destroy settings silently."""
+    ops = FakeOps()
+    ops.files["/root/.claude/settings.json"] = "{not json"
+    with pytest.raises(sb.BootstrapError) as failure:
+        sb.install_hooks(ops, "claude", installed, staging_dir=tmp_path)
+    assert "settings.json" in str(failure.value)
+    assert ops.copied == {}
 
 
 def test_hook_installation_reports_whether_the_location_was_verified(tmp_path, installed):

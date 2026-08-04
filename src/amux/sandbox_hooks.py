@@ -1,42 +1,51 @@
 """Generate sandbox-local Claude and Codex hooks that call the amux shim.
 
 A sandbox inherits none of the user's agent configuration, so without this an
-agent inside a microVM never reports busy/idle/needs-input/dead and every
-roster read about it is a guess. Bootstrap therefore writes the hooks itself.
+agent inside a microVM never reports busy/idle/needs-input/dead and every roster
+read about it is a guess. Bootstrap therefore writes the hooks itself.
 
 It writes *only* the amux entries. The user's own host configuration is never
-copied in — it names host paths, host tools, and in the reference host config
-below, host notification helpers that do not exist in a VM.
+copied in — it names host paths and host helpers that do not exist in a VM.
 
-Everything here is a pure function from existing configuration text to merged
-configuration text, so the merge is tested against fixtures rather than against
-a live sandbox. Only the *file locations* need a real image to confirm; see
+Everything here is a pure function from existing configuration to merged
+configuration, so the merge is tested against fixtures rather than a live
+sandbox. Only the *file locations* need a real image to confirm; see
 `AgentHooks.paths_are_assumed`.
 
-Reference host configuration
-----------------------------
-The Claude shape is taken from a verified working host `settings.json`, which is
-the configuration amux relies on today:
+Reference configuration
+-----------------------
+Both shapes are taken from verified working host configuration — the files amux
+relies on today — not from documentation or memory.
+
+Claude Code, `~/.claude/settings.json`; Codex, `~/.codex/hooks.json`. The
+structure is the same in both:
 
     hooks:
       <EventName>: [ { matcher?: str,
                        hooks: [ {type: "command", command: str,
-                                 timeout?: int, async?: bool} ] } ]
+                                 timeout?: int, ...} ] } ]
 
-with `UserPromptSubmit`/`PreToolUse` -> busy, `Stop` -> stop,
-`Notification` -> notify, `SessionEnd` -> exit. That host file also carries
-several unrelated hooks in the same event arrays, which is exactly the case the
-merge has to preserve: amux appends its own match-all group and never edits or
-replaces a group it did not write.
+The event *names* differ, so each agent gets its own map. Codex has no
+`Notification`; its equivalent is `PermissionRequest`. Both reach every amux
+kind, so **a sandboxed Codex is not structurally weaker than a sandboxed
+Claude** — an earlier revision of this module claimed otherwise on the strength
+of Codex's older single-slot `notify` key, which is a different, superseded
+mechanism.
 
-Codex is structurally weaker and this is a real limitation, not an oversight.
-`~/.codex/config.toml` has a single top-level `notify` array — one slot, one
-consumer, fired when a turn ends. There is no per-tool or per-notification
-event. So a Codex sandbox can report `stop` and nothing else; `busy`, `notify`
-and `exit` have no source. `codex_state_coverage()` states that plainly so the
-runtime can report degraded integration rather than implying live state it does
-not have. To keep the single slot shareable, amux installs a small dispatch
-script and chains any previous value through it.
+Two Codex-specific requirements that `hooks.json` alone does not satisfy:
+
+- `config.toml` must carry `hooks = true` **under `[features]`**. It is not a
+  top-level key. Writing `hooks.json` without it leaves the hooks inert.
+- `config.toml` also grows a `[hooks.state]` table in which Codex records a
+  `trusted_hash = "sha256:..."` per hook entry, keyed
+  `<hooks.json path>:<event_snake_case>:<group>:<index>`. amux does **not**
+  write those: what exactly is hashed is not documented, and a wrong hash is
+  worse than an absent one. It means hook trust may need approval on first run,
+  which is listed as an open question for the live smoke test — a headless
+  sandbox cannot answer an approval prompt.
+
+The older `notify` slot is kept as a fallback for a Codex too old to have hooks,
+selected by version detection rather than assumed. See `codex_supports_hooks`.
 """
 
 from __future__ import annotations
@@ -44,12 +53,12 @@ from __future__ import annotations
 import json
 import shlex
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 #: Marker used to recognise an amux-installed hook, so merging twice is a no-op.
 HOOK_MARKER = "event emit"
 
-#: Claude Code event -> amux event kind, mirroring the verified host config.
+#: Claude Code event -> amux event kind, from the verified host `settings.json`.
 CLAUDE_EVENT_KINDS: dict[str, str] = {
     "UserPromptSubmit": "busy",
     "PreToolUse": "busy",
@@ -57,15 +66,42 @@ CLAUDE_EVENT_KINDS: dict[str, str] = {
     "Notification": "notify",
     "SessionEnd": "exit",
 }
-#: `UserPromptSubmit` takes no matcher; the rest carry an empty match-all one,
-#: as in the reference host file.
+#: Codex event -> amux event kind, from the verified host `hooks.json`
+#: (codex-cli 0.146.0). `PermissionRequest` is Codex's `Notification`.
+CODEX_EVENT_KINDS: dict[str, str] = {
+    "UserPromptSubmit": "busy",
+    "PreToolUse": "busy",
+    "Stop": "stop",
+    "PermissionRequest": "notify",
+    "SessionEnd": "exit",
+}
+
+#: Claude's `UserPromptSubmit` carries no matcher in the reference host file;
+#: every Codex event does. Mirrored rather than reasoned about.
 CLAUDE_UNMATCHED_EVENTS = frozenset({"UserPromptSubmit"})
+CODEX_UNMATCHED_EVENTS: frozenset[str] = frozenset()
+
 #: Seconds. A hook that cannot reach the host must not stall the agent.
-CLAUDE_HOOK_TIMEOUT = 10
+HOOK_TIMEOUT = 10
+
+#: Where Codex's feature switch lives, and the table it lives in.
+CODEX_FEATURES_TABLE = "features"
+CODEX_HOOKS_FEATURE = "hooks"
+
+#: Earliest Codex verified to support `hooks.json`. The real introduction may be
+#: earlier; this is deliberately conservative, because guessing low would install
+#: hooks that never fire, while guessing high only falls back to `notify` — which
+#: still reports `stop` and says so.
+CODEX_HOOKS_MIN_VERSION = (0, 146, 0)
 
 CODEX_DISPATCH_PATH = "/usr/local/bin/amux-codex-notify"
-#: Codex fires its single notify hook when a turn ends, which is `stop`.
+#: The fallback slot fires when a turn ends, which is `stop`.
 CODEX_NOTIFY_KIND = "stop"
+
+ALL_KINDS = ("spawn", "busy", "stop", "notify", "exit")
+#: `spawn` is amux's own — it is stamped by the host at grid creation, never by
+#: an agent hook, so it is not something an adapter can be missing.
+HOOK_SUPPLIED_KINDS = ("busy", "stop", "notify", "exit")
 
 
 class HookMergeError(Exception):
@@ -74,9 +110,9 @@ class HookMergeError(Exception):
 
 @dataclass(frozen=True)
 class AgentHooks:
-    """Where one agent's hook configuration lives inside a sandbox.
+    """Where and how one agent's hook configuration is written in a sandbox.
 
-    `paths_are_assumed` is the honest part: the formats below come from verified
+    `paths_are_assumed` is the honest part: the formats above come from verified
     working configuration, but the *locations* inside Docker's agent images were
     not inspectable when this was written (`sbx policy init` had not been run, so
     no sandbox could be created). They are the documented defaults. Re-record
@@ -85,19 +121,25 @@ class AgentHooks:
 
     agent: str
     settings_relpath: str
-    format: str
+    events: Mapping[str, str]
+    unmatched_events: frozenset[str] = field(default_factory=frozenset)
+    #: Config file that must switch hooks on before `settings_relpath` is read.
+    enable_relpath: str | None = None
     paths_are_assumed: bool = True
-    extra_files: tuple[str, ...] = field(default_factory=tuple)
 
 
 CLAUDE = AgentHooks(
-    agent="claude", settings_relpath=".claude/settings.json", format="json"
+    agent="claude",
+    settings_relpath=".claude/settings.json",
+    events=CLAUDE_EVENT_KINDS,
+    unmatched_events=CLAUDE_UNMATCHED_EVENTS,
 )
 CODEX = AgentHooks(
     agent="codex",
-    settings_relpath=".codex/config.toml",
-    format="toml",
-    extra_files=(CODEX_DISPATCH_PATH,),
+    settings_relpath=".codex/hooks.json",
+    events=CODEX_EVENT_KINDS,
+    unmatched_events=CODEX_UNMATCHED_EVENTS,
+    enable_relpath=".codex/config.toml",
 )
 
 HOOKS_BY_AGENT: dict[str, AgentHooks] = {CLAUDE.agent: CLAUDE, CODEX.agent: CODEX}
@@ -126,7 +168,7 @@ def emit_command(shim: str, config_path: str, kind: str, agent: str) -> str:
     )
 
 
-# --- Claude: JSON settings ----------------------------------------------------
+# --- the shared JSON hook document -------------------------------------------
 
 
 def _already_installed(groups: Iterable[Any]) -> bool:
@@ -139,8 +181,10 @@ def _already_installed(groups: Iterable[Any]) -> bool:
     return False
 
 
-def merge_claude_settings(existing: dict | None, *, shim: str, config_path: str) -> dict:
-    """Add amux's hooks to a Claude `settings.json` document.
+def merge_hook_settings(
+    existing: dict | None, adapter: AgentHooks, *, shim: str, config_path: str
+) -> dict:
+    """Add amux's hooks to an agent's hook document.
 
     Template-owned settings survive: every key outside `hooks` is untouched, and
     within `hooks` amux only *appends its own group* to each event array. It
@@ -148,12 +192,13 @@ def merge_claude_settings(existing: dict | None, *, shim: str, config_path: str)
     someone else's group would silently inherit their matcher, which for
     `PreToolUse` would mean the busy hook fires for one tool instead of all.
 
-    Idempotent: a document that already carries an amux hook for an event is
-    left alone, so re-running bootstrap cannot stack duplicates.
+    Idempotent: an event that already carries an amux hook is left alone, so
+    re-running bootstrap cannot stack duplicates.
     """
     if existing is not None and not isinstance(existing, dict):
         raise HookMergeError(
-            f"Claude settings must be a JSON object, got {type(existing).__name__}"
+            f"{adapter.agent} hook settings must be a JSON object, "
+            f"got {type(existing).__name__}"
         )
     merged = json.loads(json.dumps(existing or {}))  # deep copy, no shared state
     hooks = merged.setdefault("hooks", {})
@@ -161,31 +206,131 @@ def merge_claude_settings(existing: dict | None, *, shim: str, config_path: str)
         raise HookMergeError(
             f"the 'hooks' key must be an object, got {type(hooks).__name__}"
         )
-    for event, kind in CLAUDE_EVENT_KINDS.items():
+    for event, kind in adapter.events.items():
         groups = hooks.setdefault(event, [])
         if not isinstance(groups, list):
             raise HookMergeError(f"hooks.{event} must be an array, got {groups!r}")
         if _already_installed(groups):
             continue
         group: dict[str, Any] = {}
-        if event not in CLAUDE_UNMATCHED_EVENTS:
+        if event not in adapter.unmatched_events:
             group["matcher"] = ""
         group["hooks"] = [
             {
                 "type": "command",
-                "command": emit_command(shim, config_path, kind, "claude"),
-                "timeout": CLAUDE_HOOK_TIMEOUT,
+                "command": emit_command(shim, config_path, kind, adapter.agent),
+                "timeout": HOOK_TIMEOUT,
             }
         ]
         groups.append(group)
     return merged
 
 
-def render_claude_settings(document: dict) -> str:
+def merge_claude_settings(existing: dict | None, *, shim: str, config_path: str) -> dict:
+    return merge_hook_settings(existing, CLAUDE, shim=shim, config_path=config_path)
+
+
+def merge_codex_hooks(existing: dict | None, *, shim: str, config_path: str) -> dict:
+    return merge_hook_settings(existing, CODEX, shim=shim, config_path=config_path)
+
+
+def render_hook_settings(document: dict) -> str:
     return json.dumps(document, indent=2) + "\n"
 
 
-# --- Codex: one TOML notify slot ---------------------------------------------
+#: Kept as the historical name used elsewhere.
+render_claude_settings = render_hook_settings
+
+
+# --- Codex: switching hooks on in config.toml --------------------------------
+
+
+def codex_hooks_enabled(config_text: str) -> bool:
+    import tomllib
+
+    try:
+        document = tomllib.loads(config_text)
+    except tomllib.TOMLDecodeError as exc:
+        raise HookMergeError(f"the Codex config.toml is not valid TOML: {exc}") from None
+    features = document.get(CODEX_FEATURES_TABLE)
+    return bool(isinstance(features, dict) and features.get(CODEX_HOOKS_FEATURE))
+
+
+def enable_codex_hooks(config_text: str) -> str:
+    """Ensure `hooks = true` under `[features]` in a Codex `config.toml`.
+
+    `hooks.json` alone is inert without this, and the switch is **not** a
+    top-level key — it lives in the `[features]` table, as on the verified host.
+
+    An existing `hooks = ...` inside `[features]` is commented out rather than
+    edited in place, so nothing is lost and a commented line cannot collide as a
+    duplicate key. When there is no `[features]` table, one is *appended*: a new
+    table header is safe at the end of a file, whereas a bare key would land in
+    whichever table happens to be last.
+    """
+    if codex_hooks_enabled(config_text):
+        return config_text
+    lines = config_text.splitlines()
+    setting = f"{CODEX_HOOKS_FEATURE} = true"
+    header = _table_header_index(lines, CODEX_FEATURES_TABLE)
+    if header is None:
+        prefix = config_text if config_text.endswith("\n") or not config_text else config_text + "\n"
+        return (
+            prefix
+            + f"\n# {CODEX_FEATURES_TABLE}.{CODEX_HOOKS_FEATURE}: enabled by amux "
+            f"sandbox bootstrap; hooks.json is inert without it\n"
+            f"[{CODEX_FEATURES_TABLE}]\n{setting}\n"
+        )
+    out = list(lines[: header + 1])
+    out.append(f"# {CODEX_HOOKS_FEATURE} enabled by amux sandbox bootstrap")
+    out.append(setting)
+    index = header + 1
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if stripped.startswith("["):
+            break  # left the [features] table; the rest is copied untouched
+        key = stripped.split("=", 1)[0].strip() if "=" in stripped else ""
+        if key == CODEX_HOOKS_FEATURE and not stripped.startswith("#"):
+            out.append(f"# amux replaced this: {stripped}")
+        else:
+            out.append(lines[index])
+        index += 1
+    out.extend(lines[index:])
+    return "\n".join(out) + "\n"
+
+
+def _table_header_index(lines: list[str], table: str) -> int | None:
+    for index, line in enumerate(lines):
+        if line.strip() == f"[{table}]":
+            return index
+    return None
+
+
+# --- Codex version detection -------------------------------------------------
+
+
+def parse_codex_version(output: str) -> tuple[int, ...] | None:
+    """The version tuple from `codex --version` output, or None.
+
+    Accepts the verified `codex-cli 0.146.0` shape and anything else whose first
+    dotted-numeric token is the version. None means "could not tell", which is
+    treated as no hook support: falling back to `notify` still reports `stop` and
+    says what is missing, whereas assuming hooks that are not there reports
+    nothing at all.
+    """
+    for token in (output or "").replace(",", " ").split():
+        parts = token.split(".")
+        if len(parts) >= 2 and all(p.isdigit() for p in parts):
+            return tuple(int(p) for p in parts)
+    return None
+
+
+def codex_supports_hooks(version_output: str) -> bool:
+    version = parse_codex_version(version_output)
+    return version is not None and version >= CODEX_HOOKS_MIN_VERSION
+
+
+# --- the older single notify slot, kept as a fallback ------------------------
 
 
 def _find_top_level_notify(text: str) -> tuple[int, int] | None:
@@ -198,7 +343,7 @@ def _find_top_level_notify(text: str) -> tuple[int, int] | None:
     lines = text.splitlines()
     for index, line in enumerate(lines):
         stripped = line.strip()
-        if stripped.startswith("[") and not stripped.startswith("[["):
+        if stripped.startswith("["):
             return None  # reached the first table: no top-level notify
         if stripped.startswith("#"):
             continue
@@ -218,18 +363,20 @@ def _find_top_level_notify(text: str) -> tuple[int, int] | None:
 def render_codex_dispatch(
     shim: str, config_path: str, previous: list[str] | None = None
 ) -> str:
-    """A `/bin/sh` script for Codex's single notify slot.
+    """A `/bin/sh` script for Codex's single `notify` slot.
 
-    Codex passes the notification JSON as one argument, not on stdin, so it is
-    piped into the shim, which reads hook payloads from stdin. Any previous
-    notify command is chained afterwards with `exec`, so installing amux does not
-    take the slot away from whatever already owned it.
+    Only used when the image's Codex is too old for `hooks.json`. Codex passes
+    the notification JSON as one argument, not on stdin, so it is piped into the
+    shim, which reads hook payloads from stdin. Any previous notify command is
+    chained with `exec`, so installing amux does not take the slot away from
+    whatever already owned it.
     """
     lines = [
         "#!/bin/sh",
-        "# Installed by amux sandbox bootstrap. Codex has a single notify slot,",
-        "# so this dispatches to amux and then chains the previous consumer.",
-        "# The notification JSON arrives as $1; the amux shim reads it on stdin.",
+        "# Installed by amux sandbox bootstrap for a Codex without hooks.json.",
+        "# Codex has a single notify slot, so this dispatches to amux and then",
+        "# chains the previous consumer. The JSON arrives as $1; the amux shim",
+        "# reads hook payloads on stdin.",
         "set -u",
         f'printf %s "${{1:-}}" | AMUX_CONTEXT_CONFIG={shlex.quote(config_path)} '
         f"{shlex.quote(shim)} event emit {CODEX_NOTIFY_KIND} --agent codex "
@@ -245,7 +392,7 @@ def render_codex_dispatch(
 def merge_codex_config(
     existing: str, *, dispatch_path: str = CODEX_DISPATCH_PATH
 ) -> tuple[str, list[str] | None]:
-    """Point Codex's `notify` slot at the amux dispatch script.
+    """Point Codex's `notify` slot at the amux dispatch script (fallback path).
 
     Returns the new config text and whatever `notify` held before, which the
     caller bakes into the dispatch script so the previous consumer keeps firing.
@@ -296,25 +443,22 @@ def _parse_notify_value(assignment: str) -> list[str] | None:
 
 # --- what a sandbox agent's state can actually cover -------------------------
 
-ALL_KINDS = ("spawn", "busy", "stop", "notify", "exit")
 
+def state_coverage(agent: str, *, hooks_supported: bool = True) -> tuple[str, ...]:
+    """The event kinds a sandboxed agent can report.
 
-def claude_state_coverage() -> tuple[str, ...]:
-    """The event kinds a sandboxed Claude reports. `spawn` is amux's own."""
-    return tuple(sorted(set(CLAUDE_EVENT_KINDS.values())))
-
-
-def codex_state_coverage() -> tuple[str, ...]:
-    """The event kinds a sandboxed Codex reports — only `stop`.
-
-    Codex's single `notify` slot fires at end of turn and there is no per-tool or
-    per-notification event, so `busy`, `notify` and `exit` have no source inside
-    the VM. Callers must surface this as degraded integration rather than
-    presenting a Codex sandbox's resolved state as being as live as Claude's.
+    Claude always reaches all four. Codex reaches all four through `hooks.json`
+    and only `stop` through the older `notify` slot, so its coverage depends on
+    the version actually present in the image — detected, never assumed.
     """
-    return (CODEX_NOTIFY_KIND,)
+    adapter = hooks_for(agent)
+    if adapter.agent == CODEX.agent and not hooks_supported:
+        return (CODEX_NOTIFY_KIND,)
+    return tuple(sorted(set(adapter.events.values())))
 
 
-def missing_kinds(agent: str) -> tuple[str, ...]:
-    covered = claude_state_coverage() if agent == "claude" else codex_state_coverage()
-    return tuple(k for k in ALL_KINDS if k not in covered and k != "spawn")
+def missing_kinds(agent: str, *, hooks_supported: bool = True) -> tuple[str, ...]:
+    """Kinds this sandbox cannot report. Non-empty means degraded integration:
+    the caller must not present such an agent's state as authoritative."""
+    covered = state_coverage(agent, hooks_supported=hooks_supported)
+    return tuple(k for k in HOOK_SUPPLIED_KINDS if k not in covered)

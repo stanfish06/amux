@@ -34,6 +34,8 @@ class FakeOps:
         self.home = home
         #: What the image already ships, keyed by absolute in-VM path.
         self.files: dict[str, str] = {}
+        #: What `<binary> --version` reports inside the image.
+        self.versions: dict[str, str] = {}
         self.copies: list[tuple[Path, str]] = []
         self.execs: list[list[str]] = []
         self.copied: dict[str, bytes] = {}
@@ -59,6 +61,8 @@ class FakeOps:
                 # what `_read_optional` runs; "" is a file the image lacks
                 path = shlex.split(script)[1]
                 return self.files.get(path, "")
+            if "--version" in script:
+                return self.versions.get(shlex.split(script)[0], "")
             return self.home
         return ""
 

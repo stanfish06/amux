@@ -46,6 +46,10 @@ class BootstrapError(Exception):
     """A sandbox operation failed, or refused to proceed."""
 
 
+class HookMergeErrorFromImage(BootstrapError):
+    """The image shipped agent configuration amux will not silently overwrite."""
+
+
 class SandboxOps(Protocol):
     """The sandbox operations bootstrap needs. `sandbox.py` implements this.
 
@@ -77,10 +81,12 @@ class Installed:
 class HooksInstalled:
     """The result of wiring one agent's hooks, including what it cannot report.
 
-    `missing_kinds` is not a warning to be swallowed: for Codex it is always
-    non-empty, because that agent has one end-of-turn notification slot and no
-    per-tool event. A caller that presents such a sandbox's resolved state as
-    being as live as a Claude one is claiming accuracy it does not have.
+    `missing_kinds` is not a warning to be swallowed. It is empty for Claude and
+    for any Codex new enough to have `hooks.json`; it is non-empty only for a
+    Codex old enough to be limited to the single `notify` slot, which is
+    *detected* in the image rather than assumed. A caller that presents a
+    degraded sandbox's resolved state as authoritative is claiming accuracy it
+    does not have.
     """
 
     agent: str
@@ -88,6 +94,10 @@ class HooksInstalled:
     missing_kinds: tuple[str, ...]
     location_verified: bool
     previous_notify: tuple[str, ...] | None = None
+    #: Version string the image reported, for diagnostics. Empty if unavailable.
+    agent_version: str = ""
+    #: Which mechanism was installed: "hooks" or the older "notify" fallback.
+    mechanism: str = "hooks"
 
     @property
     def degraded(self) -> bool:
@@ -191,40 +201,122 @@ def install_hooks(
     adapter = sandbox_hooks.hooks_for(agent)
     staging = staging_dir or default_staging_dir()
     staging.mkdir(parents=True, exist_ok=True)
+
+    version = ""
+    hooks_supported = True
+    if agent == sandbox_hooks.CODEX.agent:
+        # Detected, not assumed: an old Codex has only the single `notify` slot,
+        # a current one has a full hook surface, and the image's version is the
+        # one fact that decides which.
+        version = _agent_version(ops, "codex")
+        hooks_supported = sandbox_hooks.codex_supports_hooks(version)
+
+    if hooks_supported:
+        return _install_hook_document(ops, adapter, installed, staging, version)
+    return _install_codex_notify_fallback(ops, adapter, installed, staging, version)
+
+
+def _install_hook_document(
+    ops: SandboxOps,
+    adapter: sandbox_hooks.AgentHooks,
+    installed: Installed,
+    staging: Path,
+    version: str,
+) -> HooksInstalled:
+    """The normal path for both agents: merge into the agent's hook document."""
     settings_path = posixpath.join(installed.home, adapter.settings_relpath)
     existing = _read_optional(ops, settings_path)
-    previous: tuple[str, ...] | None = None
-
-    if adapter.format == "json":
-        document = json.loads(existing) if existing and existing.strip() else None
-        text = sandbox_hooks.render_claude_settings(
-            sandbox_hooks.merge_claude_settings(
-                document, shim=installed.shim_path, config_path=installed.config_path
-            )
+    document = _parse_json(existing, settings_path)
+    text = sandbox_hooks.render_hook_settings(
+        sandbox_hooks.merge_hook_settings(
+            document,
+            adapter,
+            shim=installed.shim_path,
+            config_path=installed.config_path,
         )
-    else:
-        text, replaced = sandbox_hooks.merge_codex_config(existing or "")
-        previous = tuple(replaced) if replaced else None
-        _write_into(
-            ops,
-            staging,
-            "amux-codex-notify",
-            sandbox_hooks.CODEX_DISPATCH_PATH,
-            sandbox_hooks.render_codex_dispatch(
-                installed.shim_path, installed.config_path, list(replaced or ())
-            ),
-        )
-        _exec(ops, "", ["chmod", "755", sandbox_hooks.CODEX_DISPATCH_PATH])
-
+    )
     _exec(ops, "", ["mkdir", "-p", posixpath.dirname(settings_path)])
     _write_into(ops, staging, posixpath.basename(settings_path), settings_path, text)
+
+    if adapter.enable_relpath:
+        # Codex: hooks.json is inert until `hooks = true` under [features].
+        enable_path = posixpath.join(installed.home, adapter.enable_relpath)
+        current = _read_optional(ops, enable_path) or ""
+        switched = sandbox_hooks.enable_codex_hooks(current)
+        if switched != current:
+            _exec(ops, "", ["mkdir", "-p", posixpath.dirname(enable_path)])
+            _write_into(
+                ops, staging, posixpath.basename(enable_path), enable_path, switched
+            )
+
     return HooksInstalled(
-        agent=agent,
+        agent=adapter.agent,
         settings_path=settings_path,
-        missing_kinds=sandbox_hooks.missing_kinds(agent),
+        missing_kinds=sandbox_hooks.missing_kinds(adapter.agent, hooks_supported=True),
         location_verified=not adapter.paths_are_assumed,
-        previous_notify=previous,
+        agent_version=version,
+        mechanism="hooks",
     )
+
+
+def _install_codex_notify_fallback(
+    ops: SandboxOps,
+    adapter: sandbox_hooks.AgentHooks,
+    installed: Installed,
+    staging: Path,
+    version: str,
+) -> HooksInstalled:
+    """A Codex too old for `hooks.json`: use its single `notify` slot and report
+    exactly which kinds that cannot cover."""
+    assert adapter.enable_relpath is not None
+    config_path = posixpath.join(installed.home, adapter.enable_relpath)
+    existing = _read_optional(ops, config_path) or ""
+    text, replaced = sandbox_hooks.merge_codex_config(existing)
+    _write_into(
+        ops,
+        staging,
+        "amux-codex-notify",
+        sandbox_hooks.CODEX_DISPATCH_PATH,
+        sandbox_hooks.render_codex_dispatch(
+            installed.shim_path, installed.config_path, list(replaced or ())
+        ),
+    )
+    _exec(ops, "", ["chmod", "755", sandbox_hooks.CODEX_DISPATCH_PATH])
+    _exec(ops, "", ["mkdir", "-p", posixpath.dirname(config_path)])
+    _write_into(ops, staging, posixpath.basename(config_path), config_path, text)
+    return HooksInstalled(
+        agent=adapter.agent,
+        settings_path=config_path,
+        missing_kinds=sandbox_hooks.missing_kinds(adapter.agent, hooks_supported=False),
+        location_verified=not adapter.paths_are_assumed,
+        previous_notify=tuple(replaced) if replaced else None,
+        agent_version=version,
+        mechanism="notify",
+    )
+
+
+def _parse_json(text: str | None, path: str) -> dict | None:
+    if not text or not text.strip():
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise HookMergeErrorFromImage(
+            f"{path} in the sandbox image is not valid JSON: {exc}"
+        ) from None
+
+
+def _agent_version(ops: SandboxOps, binary: str) -> str:
+    """`<binary> --version` inside the VM, or "" when it cannot be asked.
+
+    An empty answer is treated as "no hook support" downstream, which falls back
+    to a mechanism that works and says what it misses — better than assuming a
+    hook surface that may not be there and reporting nothing at all.
+    """
+    try:
+        return ops.exec(["sh", "-lc", f"{shlex.quote(binary)} --version 2>/dev/null"]).strip()
+    except Exception:
+        return ""
 
 
 def _read_optional(ops: SandboxOps, path: str) -> str | None:
