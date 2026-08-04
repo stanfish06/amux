@@ -267,6 +267,13 @@ class PaneFacts:
     workspace: str = ""
     task: str = ""
 
+    def __post_init__(self) -> None:
+        if self.alive and self.created is None:
+            raise ValueError(
+                "a live pane must carry a creation time: without one its events "
+                "cannot be bounded and a recycled id inherits the last agent's"
+            )
+
     @property
     def boundary(self) -> float | None:
         """Cut-off for store rows about this pane, or None once it is gone.
