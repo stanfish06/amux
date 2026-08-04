@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from amux import core, shared, store
+from amux import core, events, shared, store
 from amux.shared import DEFAULT_SOCKET
 
 SERVICE_NAME = "amux-context"
@@ -195,6 +195,9 @@ class ServiceConfig:
     max_results: int = 200
     default_results: int = 10
     max_wait_s: float = 60.0
+    # How often a long poll re-queries SQLite. In-process writes wake it
+    # immediately; this is what makes a *native* host write visible too.
+    poll_interval_s: float = 0.25
     request_timeout_s: float = 30.0
 
     def __post_init__(self) -> None:
@@ -218,6 +221,11 @@ class ServiceConfig:
             )
         if self.max_wait_s <= 0:
             raise ConfigError(f"max_wait_s must be positive, got {self.max_wait_s}")
+        if not 0 < self.poll_interval_s <= self.max_wait_s:
+            raise ConfigError(
+                f"poll_interval_s must be positive and no larger than max_wait_s,"
+                f" got {self.poll_interval_s}"
+            )
 
     @classmethod
     def from_env(
@@ -552,6 +560,7 @@ class ContextService:
         self.log = get_logger()
         self._servers: dict[str, Any] = {}
         self._servers_lock = threading.Lock()
+        self._changed = threading.Condition()
 
     @property
     def db_path(self) -> Path:
@@ -598,6 +607,16 @@ class ContextService:
 
     def authenticate(self, request: Request) -> Identity:
         return self.authenticator(self, _token_from_authorization(request.authorization))
+
+    def wake(self) -> None:
+        """Release every waiter: something this service committed has changed."""
+        with self._changed:
+            self._changed.notify_all()
+
+    def sleep(self, timeout: float) -> None:
+        """Wait to be woken, or for `timeout` — whichever comes first."""
+        with self._changed:
+            self._changed.wait(timeout)
 
     def tmux_server(self, socket: str) -> Any:
         """The libtmux server a caller's pane lives on, cached per socket.
@@ -713,6 +732,27 @@ def _cursor_param(request: Request, name: str) -> int | None:
     return _int_param(request, name, 0, 0, 2**63 - 1)
 
 
+def _float_param(
+    request: Request, name: str, default: float, minimum: float, maximum: float
+) -> float:
+    raw = _one(request, name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ServiceError(
+            "invalid_request", f"parameter '{name}' must be a number"
+        ) from None
+    if not minimum <= value <= maximum:
+        raise ServiceError(
+            "invalid_request",
+            f"parameter '{name}' must be between {minimum:g} and {maximum:g},"
+            f" got {value:g}",
+        )
+    return value
+
+
 def _choice(request: Request, name: str, allowed: Sequence[str]) -> str | None:
     raw = _one(request, name)
     if raw is None or raw == "":
@@ -798,18 +838,22 @@ def _notes(service: ContextService, request: Request) -> tuple[int, dict[str, An
     kind = _choice(request, "kind", store.NOTE_KINDS)
     task = _one(request, "task") or caller.task
 
-    def fetch(count: int) -> list[dict[str, Any]]:
-        if scope is None:
-            return store.visible_notes(
-                workspace=caller.workspace,
-                task=task,
-                pane=caller.pane,
-                kind=kind,
-                repo=caller.repo,
-                limit=count,
-                db_path=service.db_path,
-            )
-        return store.query_notes(
+    # `after` is a store-level cursor: `id > after` ascending, so a walk is
+    # caught up page by page and cannot leave a hole behind the cursor. Without
+    # one the query keeps its native newest-first shape.
+    if scope is None:
+        notes = store.visible_notes(
+            workspace=caller.workspace,
+            task=task,
+            pane=caller.pane,
+            kind=kind,
+            repo=caller.repo,
+            limit=limit,
+            after=after,
+            db_path=service.db_path,
+        )
+    else:
+        notes = store.query_notes(
             workspace=caller.workspace,
             task=task,
             scope=scope,
@@ -818,31 +862,10 @@ def _notes(service: ContextService, request: Request) -> tuple[int, dict[str, An
             # anyone else must not return this agent's private notes.
             pane=caller.pane if scope == "agent" else None,
             repo=caller.repo,
-            limit=count,
+            limit=limit,
+            after=after,
             db_path=service.db_path,
         )
-
-    if after is None:
-        return 200, {"notes": (rows := fetch(limit)), "cursor": _cursor(rows, after)}
-
-    # Resuming from a cursor. The store's limit takes the *newest* rows, while a
-    # walk needs the oldest ones past the cursor, so over-fetch and slice here:
-    # ascending ids mean a burst larger than one page is caught up over
-    # successive reads instead of leaving a hole behind the cursor. The
-    # over-fetch is itself bounded, so a burst larger than `max_results` between
-    # two polls can still hide rows — that is logged, not quietly served as a
-    # complete page. A store-level `after` would remove the bound entirely.
-    window = fetch(service.config.max_results)
-    fresh = sorted((n for n in window if int(n["id"]) > after), key=lambda n: n["id"])
-    if len(window) >= service.config.max_results and len(fresh) == len(window):
-        service.log.warning(
-            "note cursor %d for wt%d fell behind a full %d-row window; older"
-            " visible notes past that cursor were not returned",
-            after,
-            caller.worktree_id,
-            service.config.max_results,
-        )
-    notes = fresh[:limit]
     return 200, {"notes": notes, "cursor": _cursor(notes, after)}
 
 
@@ -888,6 +911,194 @@ def _add_note(service: ContextService, request: Request) -> tuple[int, dict[str,
     # `name` is not a notes column — it is the execution's stable name, which
     # the client prints in its receipt line.
     return 200, {"note": {**row, "name": caller.name}}
+
+
+# --- events ---
+
+EVENT_KINDS: tuple[str, ...] = tuple(events.STATE_BY_KIND)
+AGENT_STATES: tuple[str, ...] = tuple(dict.fromkeys(events.STATE_BY_KIND.values()))
+
+# What `events.wait` blocks for when a caller names nothing.
+DEFAULT_WAIT_STATES: tuple[str, ...] = ("idle", "needs-input", "dead")
+
+
+def _publish_state(socket: str, pane: str, state: str) -> None:
+    """Set a pane's state option and wake anything waiting on it.
+
+    The last two lines of `events.emit`, reached through its own helpers so the
+    option name, the channel name and the socket-argument rules stay in one
+    place. A public `events.publish_state` would be tidier; the store write is
+    deliberately *not* shared with `emit`, which attributes by pane rather than
+    by capability.
+    """
+    events._tmux(socket, "set-option", "-p", "-t", pane, events.STATE_OPTION, state)
+    events._tmux(socket, "wait-for", "-S", events._wait_channel(pane))
+
+
+def _states_param(request: Request) -> tuple[str, ...]:
+    raw = _one(request, "states")
+    if raw is None or raw == "":
+        return DEFAULT_WAIT_STATES
+    wanted = tuple(s.strip() for s in raw.split(",") if s.strip())
+    if not wanted or len(wanted) > len(AGENT_STATES):
+        raise ServiceError(
+            "invalid_request",
+            f"parameter 'states' must be 1 to {len(AGENT_STATES)} comma-separated"
+            f" values from {', '.join(AGENT_STATES)}",
+        )
+    unknown = [s for s in wanted if s not in AGENT_STATES]
+    if unknown:
+        raise ServiceError(
+            "invalid_request",
+            f"parameter 'states' must be from {', '.join(AGENT_STATES)},"
+            f" got {_quote(unknown[0])}",
+        )
+    return wanted
+
+
+def _pane_param(service: ContextService, request: Request) -> str:
+    """The pane a wait is about: the caller's own unless it names another in
+    its scope. A pane outside the scope is refused rather than watched."""
+    caller = request.caller
+    pane = _one(request, "pane")
+    if pane is None or pane == "" or pane == caller.pane:
+        return caller.pane
+    if len(pane) > 32:
+        raise ServiceError("invalid_request", "parameter 'pane' is too long")
+    in_scope = {
+        row["pane"]
+        for row in store.worktrees_for(
+            caller.workspace,
+            task=caller.task,
+            repo=caller.repo,
+            db_path=service.db_path,
+        )
+    }
+    if pane not in in_scope:
+        raise deny("pane", pane, caller)
+    return pane
+
+
+@route("POST", "/v1/events", requires=PERM_EVENTS_WRITE)
+def _add_event(service: ContextService, request: Request) -> tuple[int, dict[str, Any]]:
+    """Record a state change for the caller and update its host pane.
+
+    Attribution is the capability's execution row, passed explicitly rather
+    than resolved from the pane. `events.emit` asks the store which worktree a
+    pane fronts *now*, which is right for a hook running inside that pane and
+    wrong here: tmux recycles `%N`, and a token outlives the coincidence.
+    """
+    caller = request.caller
+    kind = _choice_field(request.body, "kind", EVENT_KINDS, "")
+    detail = _text_field(
+        request.body, "detail", service.config.max_detail_chars, required=False
+    )
+    ts = time.time()
+    event_id = store.add_event(
+        ts=ts,
+        pane=caller.pane,
+        kind=kind,
+        workspace=caller.workspace,
+        task=caller.task,
+        agent=caller.agent,
+        detail=detail,
+        worktree_id=caller.worktree_id,
+        repo=caller.repo,
+        db_path=service.db_path,
+    )
+    state = events.STATE_BY_KIND[kind]  # type: ignore[index]
+    # Only after the event is durable: a pane option that claims a state the
+    # store cannot corroborate is worse than a late one.
+    alive = events.pane_facts(caller.pane, caller.socket).alive
+    if alive:
+        _publish_state(caller.socket, caller.pane, state)
+    service.wake()
+    return 200, {
+        "event": {
+            "id": event_id,
+            "ts": ts,
+            "worktree_id": caller.worktree_id,
+            "repo": caller.repo,
+            "workspace": caller.workspace,
+            "task": caller.task,
+            "pane": caller.pane,
+            "agent": caller.agent,
+            "kind": kind,
+            "detail": detail,
+            "state": state,
+        },
+        "cursor": event_id,
+        # False when the host pane is gone — a stopped grid with a live
+        # sandbox. The event is still recorded; nothing was signalled.
+        "pane_updated": bool(alive),
+    }
+
+
+@route("GET", "/v1/events/state", requires=PERM_CONTEXT_READ)
+def _event_state(service: ContextService, request: Request) -> tuple[int, dict[str, Any]]:
+    """Resolved state for the panes in the caller's workspace.
+
+    `events.pane_states` answers for the whole tmux server, which is more than
+    this caller may see. The workspace is the boundary, which is exactly what
+    `amux ctx` already discloses to the same agent.
+    """
+    caller = request.caller
+    panes = [
+        entry
+        for entry in events.pane_states(caller.socket)
+        if entry.get("workspace") == caller.workspace
+    ]
+    return 200, {"panes": panes[: service.config.max_results]}
+
+
+@route("GET", "/v1/events/wait", requires=PERM_CONTEXT_READ)
+def _event_wait(service: ContextService, request: Request) -> tuple[int, dict[str, Any]]:
+    """Block until a pane reaches one of `states`, or until the cap expires.
+
+    Two wake-ups, on purpose: an in-process signal from `POST /v1/events`, and
+    a re-query every `poll_interval_s` so a *native* host write — a hook in a
+    host pane, a `kg` — is seen too. Expiring is not a failure: the answer is
+    `state: null` plus a cursor the caller resumes from, so capping the poll
+    costs a round trip and never a lost transition.
+    """
+    caller = request.caller
+    pane = _pane_param(service, request)
+    wanted = _states_param(request)
+    after = _cursor_param(request, "after")
+    # The caller's timeout is a request, not a promise: the cap wins, and
+    # expiring early is a resumable answer rather than an error.
+    timeout = min(
+        _float_param(request, "timeout", service.config.max_wait_s, 0.0, 86400.0),
+        service.config.max_wait_s,
+    )
+
+    deadline = time.monotonic() + timeout
+    while True:
+        state, _ = events.pane_status(pane, caller.socket)
+        fresh = _events_after(service, pane, after)
+        cursor = _cursor(fresh, after)
+        if state is not None and state in wanted:
+            return 200, {
+                "pane": pane,
+                "state": state,
+                "cursor": cursor,
+                "events": fresh,
+            }
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return 200, {"pane": pane, "state": None, "cursor": cursor, "events": fresh}
+        service.sleep(min(remaining, service.config.poll_interval_s))
+
+
+def _events_after(
+    service: ContextService, pane: str, after: int | None
+) -> list[dict[str, Any]]:
+    """A pane's events past a cursor, oldest first and bounded."""
+    rows = store.iter_events(pane=pane, db_path=service.db_path)
+    if after is not None:
+        rows = [r for r in rows if int(r["id"]) > after]
+    rows.sort(key=lambda r: int(r["id"]))
+    return rows[-service.config.max_results :]
 
 
 # --- HTTP plumbing ---
@@ -1181,6 +1392,16 @@ def start_service(
         target=server.serve_forever, name=SERVICE_NAME, daemon=True
     )
     thread.start()
+    if config is not None and config.db_path not in (None, store.DB_PATH):
+        # The native read paths — core.build_context, events.pane_status — take
+        # no db_path and always use the store's own. Pointing the service
+        # somewhere else makes those two disagree, which is a debugging aid at
+        # best and a wrong answer at worst.
+        service.log.warning(
+            "the configured database is not the store's own; the native context"
+            " and state paths will still read %s",
+            store.DB_PATH,
+        )
     service.log.info(
         "%s listening on %s:%d (schema %s)",
         SERVICE_NAME,
