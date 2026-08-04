@@ -243,6 +243,11 @@ class AgentPane:
         )
 
 
+def _socket_name(obj) -> str:
+    """Socket of the server behind any libtmux object."""
+    return getattr(obj.server, "socket_name", None) or DEFAULT_SOCKET
+
+
 def _pane_option(pane: Pane, name: str) -> str | None:
     out = pane.cmd("show-options", "-pqv", name).stdout
     return out[0] if out else None
@@ -320,6 +325,7 @@ def _build_grid(
             except worktree.WorktreeError as exc:
                 print(f"amux: worktree isolation unavailable: {exc}")
 
+    socket = _socket_name(window)
     for pane, agent, name in panes_info:
         command = AGENT_COMMANDS.get(agent, agent)
         wt = worktree_paths.get(pane.id or "")
@@ -328,6 +334,7 @@ def _build_grid(
             pane.send_keys(worktree.shell_cd(wt))
         if command:
             pane.send_keys(command)
+        events.emit("spawn", pane=pane.id, agent=agent, socket=socket)
         agent_panes.append(
             AgentPane(
                 pane=pane,
@@ -419,15 +426,17 @@ def spawn_agent_grid(
     )
 
 
-def load_agent_pane(pane: Pane) -> AgentPane:
-    name = _pane_option(pane, NAME_OPTION) or ""
+def load_agent_pane(pane: Pane, facts: events.PaneFacts | None = None) -> AgentPane:
+    """One tmux query per pane, not one per option; `facts` carries them all."""
+    facts = facts or events.pane_facts(pane.id or "", _socket_name(pane))
+    state, _ = events.pane_status(pane.id or "", facts=facts)
     return AgentPane(
         pane=pane,
-        cwd=pane.pane_current_path or "",
-        agent_name=_pane_option(pane, AGENT_OPTION) or pane.pane_current_command or "",
-        label=_pane_option(pane, LABEL_OPTION) or pane.id or "",
-        name=name,
-        state=_pane_option(pane, events.STATE_OPTION) or ("starting" if name else "-"),
+        cwd=facts.cwd,
+        agent_name=facts.agent or facts.command,
+        label=facts.label or pane.id or "",
+        name=facts.name,
+        state=(state or "idle") if facts.name else "-",
     )
 
 
@@ -456,8 +465,9 @@ def load_agent_spaces(server: Server) -> list[AgentSpace]:
 
 
 def _roster_entry(pane: Pane) -> dict:
-    ap = load_agent_pane(pane)
-    last = events.tail(n=1, pane=pane.id or "")
+    facts = events.pane_facts(pane.id or "", _socket_name(pane))
+    _, last = events.pane_status(pane.id or "", facts=facts)
+    ap = load_agent_pane(pane, facts=facts)
     wt = store.worktree_for_pane(pane.id or "")
     entry = {
         "name": ap.name,
@@ -467,9 +477,7 @@ def _roster_entry(pane: Pane) -> dict:
         "state": ap.state,
         "cwd": ap.cwd,
         "last_event": (
-            {"kind": last[0].kind, "ts": last[0].ts, "detail": last[0].detail}
-            if last
-            else None
+            {"kind": last.kind, "ts": last.ts, "detail": last.detail} if last else None
         ),
     }
     if wt:

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
 
@@ -188,7 +189,10 @@ def _rows(
 
 
 def _attribution(
-    conn: sqlite3.Connection, pane: str, worktree_id: int | None, repo: str | None
+    conn: sqlite3.Connection,
+    pane: str,
+    worktree_id: int | None,
+    repo: str | None,
 ) -> tuple[int | None, str]:
     """(worktree_id, repo) to store on a note or event. Callers holding the
     worktree row pass both; hook callers such as events.emit pass neither and
@@ -262,6 +266,8 @@ def iter_events(
 
 
 def latest_event(pane: str, db_path: Path | None = None) -> dict[str, Any] | None:
+    """The pane's newest event, whichever incarnation wrote it. Callers bound it
+    with `events.in_incarnation`."""
     with _connect(db_path) as conn:
         rows = _rows(
             conn,
@@ -269,6 +275,21 @@ def latest_event(pane: str, db_path: Path | None = None) -> dict[str, Any] | Non
             (pane,),
         )
     return rows[0] if rows else None
+
+
+def events_for_panes(
+    panes: Sequence[str], since: float | None = None, db_path: Path | None = None
+) -> list[dict[str, Any]]:
+    """Events for several panes in one query, oldest first."""
+    if not panes:
+        return []
+    sql = f"SELECT * FROM events WHERE pane IN ({', '.join('?' * len(panes))})"
+    params: tuple = tuple(panes)
+    if since is not None:
+        sql += " AND ts >= ?"
+        params += (since,)
+    with _connect(db_path) as conn:
+        return _rows(conn, sql + " ORDER BY ts, id", params)
 
 
 # --- notes ---
@@ -288,7 +309,8 @@ def add_note(
     db_path: Path | None = None,
 ) -> int:
     """Publish a note. `worktree_id`/`repo` default to whatever worktree the pane
-    fronts right now; pass them explicitly when the caller already has the row."""
+    fronts right now; pass them explicitly when the caller already resolved the
+    row (an empty `repo` is how a caller says "there is none")."""
     if scope not in NOTE_SCOPES:
         raise ValueError(f"scope must be one of {NOTE_SCOPES}, got '{scope}'")
     if kind not in NOTE_KINDS:

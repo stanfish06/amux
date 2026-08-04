@@ -10,16 +10,6 @@ import {
 
 const execFileAsync = promisify(execFile);
 
-const STATE_BY_KIND: Record<EventKind, AgentState> = {
-  spawn: 'starting',
-  busy: 'busy',
-  stop: 'idle',
-  notify: 'needs-input',
-  exit: 'dead',
-};
-
-const MAX_EVENTS = 100;
-
 const PANE_FORMAT = [
   '#{session_id}',
   '#{session_name}',
@@ -43,13 +33,10 @@ function isServerDown(stderr: unknown): boolean {
   );
 }
 
-function resolveState(
-  paneOption: string,
-  lastEvent: AmuxEvent | undefined,
-  amuxName: string
-): AgentState {
-  const fromEvent = lastEvent && STATE_BY_KIND[lastEvent.kind];
-  return (paneOption as AgentState) || fromEvent || (amuxName ? 'starting' : 'idle');
+interface PaneStatus {
+  pane: string;
+  state: AgentState;
+  last_event: { ts: number; kind: EventKind; detail?: string } | null;
 }
 
 export class TmuxService {
@@ -61,7 +48,7 @@ export class TmuxService {
       return [];
     }
 
-    const latestEventByPane = await this.latestEventByPane();
+    const statusByPane = await this.paneStatuses();
     const workspaceById = new Map<string, WorkspaceSessionInfo>();
     const taskByKey = new Map<string, TaskWindowInfo>();
 
@@ -105,13 +92,16 @@ export class TmuxService {
         workspace.tasks.push(task);
       }
 
-      const lastEvent = latestEventByPane.get(paneId);
+      const status = statusByPane.get(paneId);
+      const lastEvent: AmuxEvent | undefined = status?.last_event
+        ? { ...status.last_event, pane: paneId }
+        : undefined;
       task.panes.push({
         id: paneId,
         name: nameOpt || '',
         agentName: agentOpt || paneCmd || 'unknown',
         label: labelOpt || paneId,
-        state: resolveState(stateOpt, lastEvent, nameOpt || ''),
+        state: status?.state || (stateOpt as AgentState) || 'unknown',
         cwd: paneCwd || '',
         lastEvent,
         taskName: task.name,
@@ -143,33 +133,22 @@ export class TmuxService {
     }
   }
 
-  // Events live in the sqlite context store, not a flat file. Rather than open
-  // context.db here — which would duplicate the schema and skip the migration
-  // that only the Python side runs — shell out to amux and read the JSONL it
-  // already emits. $AMUX_BIN is set by `amux monitor` so the frozen binary
+  // Shell out rather than open context.db from Node: schema and migration live
+  // on the Python side. $AMUX_BIN is set by `amux monitor` so the frozen binary
   // finds itself; a bare `amux` on PATH covers `npm run dev`.
-  private async latestEventByPane(): Promise<Map<string, AmuxEvent>> {
-    const latest = new Map<string, AmuxEvent>();
-
-    let content: string;
+  private async paneStatuses(): Promise<Map<string, PaneStatus>> {
+    const byPane = new Map<string, PaneStatus>();
     try {
       const { stdout } = await execFileAsync(
         process.env.AMUX_BIN || 'amux',
-        ['event', 'tail', '-n', String(MAX_EVENTS)],
+        ['-L', this.socketName, 'event', 'state', '--json'],
         { maxBuffer: 4 * 1024 * 1024 }
       );
-      content = stdout;
-    } catch {
-      return latest;
-    }
-
-    for (const line of content.trim().split('\n').filter(Boolean).slice(-MAX_EVENTS)) {
-      try {
-        const event: AmuxEvent = JSON.parse(line);
-        latest.set(event.pane, event);
-      } catch {
+      for (const status of JSON.parse(stdout) as PaneStatus[]) {
+        byPane.set(status.pane, status);
       }
+    } catch {
     }
-    return latest;
+    return byPane;
   }
 }

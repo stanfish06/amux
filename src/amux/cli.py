@@ -423,6 +423,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_emit.set_defaults(func=events.cmd_emit)
 
+    p_state = ev_sub.add_parser(
+        "state", help=f"resolved state of every {ALIAS['pane']} on the server"
+    )
+    p_state.add_argument("--json", action="store_true", help="machine-readable output")
+    p_state.set_defaults(func=events.cmd_state)
+
     p_tail = ev_sub.add_parser("tail", help="print recent events as JSONL")
     p_tail.add_argument("-n", type=int, default=20, help="number of events")
     p_tail.add_argument("--pane", default=None, help="only this pane id")

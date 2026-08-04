@@ -2,13 +2,12 @@ import time
 
 from libtmux import Pane, Session, Window
 
-from amux.core import _pane_option
-from amux.events import STATE_OPTION
+from amux.core import load_agent_pane
 from amux.shared import ALIAS
 
 
 def _pane_state(pane: Pane) -> str:
-    return _pane_option(pane, STATE_OPTION) or "-"
+    return load_agent_pane(pane).state
 
 
 def _age(ts: float) -> str:

@@ -1,6 +1,6 @@
 ---
 name: amux
-description: Use when orchestrating AI agents in tmux with the amux CLI — spawning or killing agent grids (`amux spw`/`spg`/`kw`/`kg`), listing them (`lsw`/`lsg`), mixed claude+codex grids, the `amux-root` tmux socket, agent state events (`amux event emit`/`tail`/`wait`), per-agent git worktrees and task integration branches (`amux integrate`), scoped context notes (`amux note`/`notes`), sending messages from one agent pane to another, when an agent needs to discover which workspace, task, and pane it is running in (`amux ctx`), or when an agent needs to start work elsewhere — a task whose context no longer fits the current window, or a change that belongs to another repo.
+description: Use when orchestrating AI agents in tmux with the amux CLI — spawning or killing agent grids (`amux spw`/`spg`/`kw`/`kg`), listing them (`lsw`/`lsg`), mixed claude+codex grids, the `amux-root` tmux socket, agent state events (`amux event emit`/`state`/`tail`/`wait`), per-agent git worktrees and task integration branches (`amux integrate`), scoped context notes (`amux note`/`notes`), sending messages from one agent pane to another, when an agent needs to discover which workspace, task, and pane it is running in (`amux ctx`), or when an agent needs to start work elsewhere — a task whose context no longer fits the current window, or a change that belongs to another repo.
 ---
 
 # amux
@@ -34,6 +34,7 @@ commands use the left.
 | `amux note <text> [--scope agent\|task\|workspace] [--kind note\|decision\|finding\|blocker]` | publish a scoped context note |
 | `amux notes [--workspace WS] [--task T] [--scope S] [--kind K] [-n N] [--json]` | list scoped notes |
 | `amux integrate <ws> <task> [--agent NAME...] [--all]` | merge agent worktree branches into the task integration branch |
+| `amux event state [--json]` | resolved state of every agent on the server |
 | `amux event tail [-n N] [--pane ID] [--workspace WS] [--task T]` | recent state events as JSONL |
 | `amux event wait <pane> [--timeout S]` | block until a pane goes idle / needs-input / dead |
 | `amux event emit <kind> [--pane ID] [--agent K] [--detail T]` | record a state change (for hooks) |
@@ -147,10 +148,30 @@ a tmux `wait-for` channel. Kinds map to states:
 | `notify` | needs-input |
 | `exit` | dead |
 
-Wire it from agent hooks — Claude Code's `PreToolUse` → `busy`, `Stop` → `stop`,
-`Notification` → `notify`, `SessionEnd` → `exit`. With `--detail` omitted, the
-detail is pulled from the hook's JSON on stdin (`message` / `tool_name` /
-`reason`). `emit` swallows all errors so a hook never looks like agent failure.
+`spawn` is amux's own: spawning a grid stamps every new pane with it, so an
+agent has a state from its first moment. The rest come from agent hooks — Claude
+Code's `PreToolUse` → `busy`, `Stop` → `stop`, `Notification` → `notify`,
+`SessionEnd` → `exit`. With `--detail` omitted, the detail is pulled from the
+hook's JSON on stdin (`message` / `tool_name` / `reason`). `emit` swallows all
+errors so a hook never looks like agent failure.
+
+An agent that has come up but has never been prompted reads `idle`, not
+`starting`: nothing on the agent side announces "my prompt is ready", so
+`starting` settles to `idle` a few seconds after spawn.
+
+`amux event state` reads the other way — the resolved state of every pane, which
+is what `monitor` and `lsw` render:
+
+```sh
+amux event state          # %7  idle  myproj/task0  brave-hawk
+amux event state --json   # same, with each pane's last event
+```
+
+Read state from there rather than from `event tail`. A `%N` id is only unique
+while the tmux server that issued it lives, so the newest raw event for `%1` may
+belong to an agent that is long gone; `event state` discards anything older than
+the pane in front of it, and treats a pane tmux has lost as dead however its
+events end.
 
 To coordinate, block on a teammate instead of polling:
 
