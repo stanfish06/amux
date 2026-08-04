@@ -25,14 +25,14 @@ import re
 import sqlite3
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from amux import shared, store
+from amux import core, shared, store
 from amux.shared import DEFAULT_SOCKET
 
 SERVICE_NAME = "amux-context"
@@ -273,8 +273,13 @@ PERM_CONTEXT_READ = "context:read"
 PERM_NOTES_WRITE = "notes:write"
 PERM_EVENTS_WRITE = "events:write"
 
-# What amux mints for a sandboxed agent: the context command subset, nothing
-# more. Host control is not expressible here at all.
+# What amux mints for a sandboxed agent. Every agent token carries all three,
+# so this is *not* least privilege in practice, and documentation must not
+# claim it is. Two things are true instead: host control — spawn, kill, clean,
+# integrate, monitor — is not expressible in this vocabulary at all, so no
+# token can be escalated into it; and `requires=` on each route is the seam
+# through which a narrower capability can be minted later without changing any
+# handler.
 AGENT_PERMISSIONS = (PERM_CONTEXT_READ, PERM_NOTES_WRITE, PERM_EVENTS_WRITE)
 
 
@@ -331,11 +336,20 @@ def identity_from_record(
         sandbox_name=record["sandbox_name"] or "",
         sandbox_id=record["sandbox_id"] or "",
         status=record["status"] or "active",
-        # A row that names its tmux server wins; the service's own socket is
-        # only a fallback for rows registered before that column existed.
+        # A row that names its tmux server wins. An empty value means exactly
+        # one thing — a row migrated from schema 2, before the column existed —
+        # since register_worktree now always records it. That reading is
+        # unambiguous only while amux runs one tmux server per host, which holds
+        # for the prototype.
         socket=record["socket_name"] or default_socket,
         permissions=frozenset(record["permissions"]),
     )
+
+
+def _libtmux_server(socket: str) -> Any:
+    import libtmux
+
+    return libtmux.Server(socket_name=socket)
 
 
 # `authenticator(service, token) -> Identity`, raising ServiceError to refuse.
@@ -530,10 +544,14 @@ class ContextService:
         config: ServiceConfig | None = None,
         *,
         authenticator: Authenticator | None = None,
+        server_factory: Callable[[str], Any] | None = None,
     ) -> None:
         self.config = config or ServiceConfig()
         self.authenticator: Authenticator = authenticator or store_authenticator
+        self.server_factory = server_factory or _libtmux_server
         self.log = get_logger()
+        self._servers: dict[str, Any] = {}
+        self._servers_lock = threading.Lock()
 
     @property
     def db_path(self) -> Path:
@@ -581,6 +599,53 @@ class ContextService:
     def authenticate(self, request: Request) -> Identity:
         return self.authenticator(self, _token_from_authorization(request.authorization))
 
+    def tmux_server(self, socket: str) -> Any:
+        """The libtmux server a caller's pane lives on, cached per socket.
+
+        A seam, so the read paths can be exercised without a tmux server. In
+        production this is the same object the native commands build.
+        """
+        with self._servers_lock:
+            server = self._servers.get(socket)
+            if server is None:
+                server = self.server_factory(socket)
+                self._servers[socket] = server
+            return server
+
+    def build_context(self, identity: Identity) -> dict[str, Any]:
+        """`core.build_context` for a sandboxed caller.
+
+        Same function the native `amux ctx` calls, so a sandbox and an
+        equivalently scoped host agent see the same roster and the same notes.
+        Only the runtime fields are added on top, and only to `self`.
+        """
+        try:
+            context = core.build_context(self.tmux_server(identity.socket), identity.pane)
+        except ValueError as exc:
+            # The pane the execution was attached to is gone — a killed task,
+            # usually, with the sandbox still running. Say so instead of
+            # returning a roster that quietly claims to be complete.
+            raise ServiceError(
+                "service_unavailable",
+                f"the host pane for {identity.name or identity.agent} is no longer on"
+                f" the tmux server, so its roster cannot be resolved",
+            ) from exc
+        context["self"] = {
+            **context["self"],
+            "runtime": identity.runtime,
+            "runtime_status": identity.runtime_status,
+            "sandbox_name": identity.sandbox_name,
+            "sandbox_id": identity.sandbox_id,
+        }
+        for entry in [context["self"], *(a for t in context["team"] for a in t["agents"])]:
+            # A sandbox row has no host worktree, and `git -C ""` silently runs
+            # wherever the service happens to live — which would report the
+            # host's own checkout as the agent's last commit. Task 5.4 makes
+            # core runtime-aware; this boundary must not pass it on regardless.
+            if entry.get("worktree") == "" and entry.get("last_commit"):
+                entry["last_commit"] = ""
+        return context
+
 
 @route("GET", "/healthz", public=True)
 def _healthz(service: ContextService, request: Request) -> tuple[int, dict[str, Any]]:
@@ -600,6 +665,229 @@ def _healthz(service: ContextService, request: Request) -> tuple[int, dict[str, 
         "compatible": info.compatible,
     }
     return (200 if info.compatible else 503, payload)
+
+
+# --- bounded input ---
+
+
+def _one(request: Request, name: str) -> str | None:
+    """A single query value, or None. A repeated parameter is a refusal rather
+    than a guess about which one the caller meant."""
+    values = request.query.get(name)
+    if not values:
+        return None
+    if len(values) > 1:
+        raise ServiceError(
+            "invalid_request", f"parameter '{name}' was given more than once"
+        )
+    return values[0]
+
+
+def _int_param(
+    request: Request, name: str, default: int, minimum: int, maximum: int
+) -> int:
+    raw = _one(request, name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ServiceError(
+            "invalid_request", f"parameter '{name}' must be an integer"
+        ) from None
+    if not minimum <= value <= maximum:
+        raise ServiceError(
+            "invalid_request",
+            f"parameter '{name}' must be between {minimum} and {maximum},"
+            f" got {value}",
+        )
+    return value
+
+
+def _cursor_param(request: Request, name: str) -> int | None:
+    """A cursor, where absent and zero are different things: 0 means "from the
+    beginning of my walk", which is not the same as "just give me a page"."""
+    raw = _one(request, name)
+    if raw is None or raw == "":
+        return None
+    return _int_param(request, name, 0, 0, 2**63 - 1)
+
+
+def _choice(request: Request, name: str, allowed: Sequence[str]) -> str | None:
+    raw = _one(request, name)
+    if raw is None or raw == "":
+        return None
+    if raw not in allowed:
+        raise ServiceError(
+            "invalid_request",
+            f"parameter '{name}' must be one of {', '.join(allowed)}",
+        )
+    return raw
+
+
+def _text_field(
+    body: Mapping[str, Any], name: str, limit: int, *, required: bool = True
+) -> str:
+    """A bounded string from a JSON body, with the limit and the actual length
+    in the refusal — the agent sees only this text, and truncating its note
+    silently would be worse than refusing it."""
+    value = body.get(name, "")
+    if not isinstance(value, str):
+        raise ServiceError("invalid_request", f"field '{name}' must be a string")
+    if required and not value.strip():
+        raise ServiceError("invalid_request", f"field '{name}' is required")
+    if len(value) > limit:
+        raise ServiceError(
+            "invalid_request",
+            f"field '{name}' is {len(value)} characters, over the {limit}"
+            f" character limit",
+        )
+    return value
+
+
+def _choice_field(
+    body: Mapping[str, Any], name: str, allowed: Sequence[str], default: str
+) -> str:
+    value = body.get(name) or default
+    if value not in allowed:
+        raise ServiceError(
+            "invalid_request",
+            f"field '{name}' must be one of {', '.join(allowed)}",
+        )
+    return str(value)
+
+
+def _cursor(rows: Sequence[Mapping[str, Any]], after: int | None) -> int | None:
+    """The highest id the caller has now seen. Monotonic: an empty page keeps
+    the cursor the caller came in with, so it never rewinds and never skips."""
+    ids = [int(r["id"]) for r in rows]
+    if not ids:
+        return after
+    return max(ids + ([after] if after is not None else []))
+
+
+# --- context and notes ---
+
+
+@route("GET", "/v1/context", requires=PERM_CONTEXT_READ)
+def _context(service: ContextService, request: Request) -> tuple[int, dict[str, Any]]:
+    return 200, service.build_context(request.caller)
+
+
+@route("GET", "/v1/notes", requires=PERM_CONTEXT_READ)
+def _notes(service: ContextService, request: Request) -> tuple[int, dict[str, Any]]:
+    """Visible notes, by exactly the native rules.
+
+    `task` may name a sibling task in the caller's workspace, as `amux notes
+    --task` does; agent-scoped notes stay pinned to the caller's own pane on
+    every route, so widening the task cannot widen what is private.
+    """
+    caller = request.caller
+    require_scope(
+        caller, workspace=_one(request, "workspace"), repo=_one(request, "repo")
+    )
+    limit = _int_param(
+        request,
+        "limit",
+        service.config.default_results,
+        1,
+        service.config.max_results,
+    )
+    after = _cursor_param(request, "after")
+    scope = _choice(request, "scope", store.NOTE_SCOPES)
+    kind = _choice(request, "kind", store.NOTE_KINDS)
+    task = _one(request, "task") or caller.task
+
+    def fetch(count: int) -> list[dict[str, Any]]:
+        if scope is None:
+            return store.visible_notes(
+                workspace=caller.workspace,
+                task=task,
+                pane=caller.pane,
+                kind=kind,
+                repo=caller.repo,
+                limit=count,
+                db_path=service.db_path,
+            )
+        return store.query_notes(
+            workspace=caller.workspace,
+            task=task,
+            scope=scope,
+            kind=kind,
+            # Narrow to this pane, never widen: an agent-scoped query from
+            # anyone else must not return this agent's private notes.
+            pane=caller.pane if scope == "agent" else None,
+            repo=caller.repo,
+            limit=count,
+            db_path=service.db_path,
+        )
+
+    if after is None:
+        return 200, {"notes": (rows := fetch(limit)), "cursor": _cursor(rows, after)}
+
+    # Resuming from a cursor. The store's limit takes the *newest* rows, while a
+    # walk needs the oldest ones past the cursor, so over-fetch and slice here:
+    # ascending ids mean a burst larger than one page is caught up over
+    # successive reads instead of leaving a hole behind the cursor. The
+    # over-fetch is itself bounded, so a burst larger than `max_results` between
+    # two polls can still hide rows — that is logged, not quietly served as a
+    # complete page. A store-level `after` would remove the bound entirely.
+    window = fetch(service.config.max_results)
+    fresh = sorted((n for n in window if int(n["id"]) > after), key=lambda n: n["id"])
+    if len(window) >= service.config.max_results and len(fresh) == len(window):
+        service.log.warning(
+            "note cursor %d for wt%d fell behind a full %d-row window; older"
+            " visible notes past that cursor were not returned",
+            after,
+            caller.worktree_id,
+            service.config.max_results,
+        )
+    notes = fresh[:limit]
+    return 200, {"notes": notes, "cursor": _cursor(notes, after)}
+
+
+@route("POST", "/v1/notes", requires=PERM_NOTES_WRITE)
+def _add_note(service: ContextService, request: Request) -> tuple[int, dict[str, Any]]:
+    """Publish a note as the caller.
+
+    Scope here is a visibility level, not a target: workspace, task, pane and
+    agent all come from the capability, so there is no scope outside the
+    caller's own for a note to land in.
+    """
+    caller = request.caller
+    text = _text_field(request.body, "text", service.config.max_text_chars)
+    scope = _choice_field(request.body, "scope", store.NOTE_SCOPES, "task")
+    kind = _choice_field(request.body, "kind", store.NOTE_KINDS, "note")
+    ts = time.time()
+    note_id = store.add_note(
+        workspace=caller.workspace,
+        task=caller.task,
+        pane=caller.pane,
+        text=text,
+        scope=scope,
+        kind=kind,
+        agent=caller.agent,
+        worktree_id=caller.worktree_id,
+        repo=caller.repo,
+        ts=ts,
+        db_path=service.db_path,
+    )
+    row = {
+        "id": note_id,
+        "ts": ts,
+        "worktree_id": caller.worktree_id,
+        "repo": caller.repo,
+        "workspace": caller.workspace,
+        "task": caller.task,
+        "pane": caller.pane,
+        "agent": caller.agent,
+        "scope": scope,
+        "kind": kind,
+        "text": text,
+    }
+    # `name` is not a notes column — it is the execution's stable name, which
+    # the client prints in its receipt line.
+    return 200, {"note": {**row, "name": caller.name}}
 
 
 # --- HTTP plumbing ---
@@ -879,10 +1167,13 @@ def start_service(
     config: ServiceConfig | None = None,
     *,
     authenticator: Authenticator | None = None,
+    server_factory: Callable[[str], Any] | None = None,
     log_stream: Any | None = None,
 ) -> ServiceHandle:
     """Start the service on a background thread and return a handle to it."""
-    service = ContextService(config, authenticator=authenticator)
+    service = ContextService(
+        config, authenticator=authenticator, server_factory=server_factory
+    )
     configure_logging(service.config, stream=log_stream)
     server = build_server(service)
     service.config = replace(service.config, port=int(server.server_address[1]))
