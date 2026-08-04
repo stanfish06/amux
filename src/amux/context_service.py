@@ -32,8 +32,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from amux import store
-from amux.shared import DEFAULT_SOCKET, STATE_DIR
+from amux import shared, store
+from amux.shared import DEFAULT_SOCKET
 
 SERVICE_NAME = "amux-context"
 API_VERSION = "v1"
@@ -187,8 +187,8 @@ class ServiceConfig:
     port: int = DEFAULT_PORT
     db_path: Path | None = None  # None -> store.DB_PATH
     socket: str = DEFAULT_SOCKET  # tmux server whose pane options we update
-    state_dir: Path = STATE_DIR
-    log_path: Path | None = None  # None -> state_dir/LOG_NAME
+    state_dir: Path | None = None  # None -> shared.STATE_DIR, resolved late
+    log_path: Path | None = None  # None -> state_home/LOG_NAME
     max_body_bytes: int = 64 * 1024
     max_text_chars: int = 4000
     max_detail_chars: int = 2000
@@ -248,46 +248,167 @@ class ServiceConfig:
         return self.db_path or store.DB_PATH
 
     @property
+    def state_home(self) -> Path:
+        """The amux state directory, resolved on use rather than captured.
+
+        A dataclass default is evaluated once, at class-definition time, so a
+        field defaulting to `shared.STATE_DIR` would keep pointing at the real
+        one even after a test redirected it — and this is where 2.5 puts the
+        PID file and the log.
+        """
+        return self.state_dir or shared.STATE_DIR
+
+    @property
     def log_file(self) -> Path:
         """Redacted service log, under the amux state directory by default."""
-        return self.log_path or self.state_dir / LOG_NAME
+        return self.log_path or self.state_home / LOG_NAME
 
 
-# --- identity ---
+# --- identity and capabilities ---
+
+# What a capability may do. A token carries a subset; a route names the one it
+# needs. Read is not implied by write: a hook-only capability that may post
+# events has no business reading the roster.
+PERM_CONTEXT_READ = "context:read"
+PERM_NOTES_WRITE = "notes:write"
+PERM_EVENTS_WRITE = "events:write"
+
+# What amux mints for a sandboxed agent: the context command subset, nothing
+# more. Host control is not expressible here at all.
+AGENT_PERMISSIONS = (PERM_CONTEXT_READ, PERM_NOTES_WRITE, PERM_EVENTS_WRITE)
 
 
 @dataclass(frozen=True)
 class Identity:
     """Who the *host* says a caller is.
 
-    Derived from the token record and the execution row it names — never from
-    the request. A body field called `agent` or `workspace` is data, not
-    identity, and the handlers must not read it as one.
+    Every field is read from the capability's execution row, never from the
+    request. A body field called `agent` or `workspace` is data, not identity,
+    and no handler may read it as one. These fields are also the whole of the
+    caller's visibility: workspace, task, pane, and repo are exactly what the
+    native note rules filter on.
     """
 
     worktree_id: int
+    token_id: int = 0
     pane: str = ""
     workspace: str = ""
     task: str = ""
     repo: str = ""
     agent: str = ""
     name: str = ""
+    branch: str = ""
     runtime: str = "docker-sandbox"
+    runtime_status: str = ""
+    sandbox_name: str = ""
+    sandbox_id: str = ""
+    status: str = "active"
     socket: str = DEFAULT_SOCKET
     permissions: frozenset[str] = frozenset()
+
+    @property
+    def scope(self) -> str:
+        """`workspace/task`, for a refusal an agent has to act on."""
+        return f"{self.workspace}/{self.task}"
+
+
+def identity_from_record(
+    record: Mapping[str, Any], default_socket: str = DEFAULT_SOCKET
+) -> Identity:
+    """Build an `Identity` from `store.context_token_record`'s row."""
+    return Identity(
+        worktree_id=int(record["worktree_id"]),
+        token_id=int(record["id"]),
+        pane=record["pane"] or "",
+        workspace=record["workspace"] or "",
+        task=record["task"] or "",
+        repo=record["repo"] or "",
+        agent=record["agent"] or "",
+        name=record["name"] or "",
+        branch=record["branch"] or "",
+        runtime=record["runtime"] or "host",
+        runtime_status=record["runtime_status"] or "",
+        sandbox_name=record["sandbox_name"] or "",
+        sandbox_id=record["sandbox_id"] or "",
+        status=record["status"] or "active",
+        # A row that names its tmux server wins; the service's own socket is
+        # only a fallback for rows registered before that column existed.
+        socket=record["socket_name"] or default_socket,
+        permissions=frozenset(record["permissions"]),
+    )
 
 
 # `authenticator(service, token) -> Identity`, raising ServiceError to refuse.
 Authenticator = Callable[["ContextService", str], Identity]
 
+_UNAUTHORIZED = "invalid or expired capability token"
+
+
+def store_authenticator(service: ContextService, token: str) -> Identity:
+    """Resolve a presented token through the host store.
+
+    `store.context_token_record` answers None for unknown, expired, and revoked
+    alike and compares the hash in constant time, so this cannot be used to
+    narrow a guess.
+    """
+    record = store.context_token_record(token, db_path=service.db_path)
+    if record is None:
+        raise ServiceError("unauthorized", _UNAUTHORIZED)
+    if record["status"] == "removed":
+        # Removal revokes tokens; reaching here means that failed, so refuse
+        # anyway rather than serve a retired execution.
+        raise ServiceError(
+            "unauthorized", "this execution has been removed from the registry"
+        )
+    return identity_from_record(record, default_socket=service.config.socket)
+
 
 def reject_all_tokens(service: ContextService, token: str) -> Identity:
-    """The default authenticator: nothing is a valid token.
+    """An authenticator for a service that should have no callers at all."""
+    raise ServiceError("unauthorized", _UNAUTHORIZED)
 
-    Until the capability store is wired in, a service with no authenticator is
-    a service with no callers — which is the correct failure direction.
+
+# --- scope ---
+
+
+def _quote(value: str, limit: int = 64) -> str:
+    """A caller-supplied value, made safe to put in a message.
+
+    Refusals name what was asked for — "pane %99 is not in proj/fix" is
+    actionable where "forbidden" is not — but the value came from the wire, so
+    it is truncated and stripped of anything that could forge a log line.
     """
-    raise ServiceError("unauthorized", "invalid or expired capability token")
+    cleaned = "".join(c for c in value[:limit] if c.isprintable() and c not in "\"'")
+    return cleaned + ("…" if len(value) > limit else "")
+
+
+def deny(what: str, value: str, identity: Identity) -> ServiceError:
+    return ServiceError(
+        "forbidden", f"{what} {_quote(value)} is not in {identity.scope}"
+    )
+
+
+def require_scope(
+    identity: Identity,
+    *,
+    workspace: str | None = None,
+    repo: str | None = None,
+) -> None:
+    """Refuse a request that names a workspace or repository other than the
+    caller's. Task is deliberately absent: a sibling task in the same workspace
+    is readable to exactly the extent the native note rules allow, so handlers
+    pass the task through and let visibility decide."""
+    if workspace is not None and workspace != identity.workspace:
+        raise deny("workspace", workspace, identity)
+    if repo is not None and repo != identity.repo:
+        raise deny("repository", repo, identity)
+
+
+def require_permission(identity: Identity, permission: str) -> None:
+    if permission not in identity.permissions:
+        raise ServiceError(
+            "forbidden", f"this capability does not grant '{permission}'"
+        )
 
 
 # --- schema compatibility ---
@@ -310,22 +431,19 @@ class SchemaInfo:
 
 
 def schema_info(db_path: Path) -> SchemaInfo:
-    """The store's schema version, after letting `store` migrate it forward.
+    """The store's schema version, as `store` reports it after opening.
 
-    Going through `store._connect` rather than reading the pragma directly
-    matters: an unmigrated database is one native amux call away from being
-    current, and reporting it as incompatible would be a false alarm.
+    The store and the service judge a version differently, on purpose. The
+    store is a library and stays permissive: opening migrates a database this
+    build is ahead of, and one written by a *newer* amux is left alone, because
+    the migration is additive and an old binary can still read it. The service
+    is a trust boundary and fails closed: it refuses to serve a version it does
+    not expect rather than guess that the difference is additive.
     """
     try:
-        conn = store._connect(db_path)
+        version = store.schema_version(db_path)
     except sqlite3.Error:
         return SchemaInfo(version=None, expected=store.SCHEMA_VERSION)
-    try:
-        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-    except sqlite3.Error:
-        return SchemaInfo(version=None, expected=store.SCHEMA_VERSION)
-    finally:
-        conn.close()
     return SchemaInfo(version=version, expected=store.SCHEMA_VERSION)
 
 
@@ -341,6 +459,14 @@ class Request:
     authorization: str = ""
     identity: Identity | None = None
 
+    @property
+    def caller(self) -> Identity:
+        """The authenticated caller. Handlers use this and never `body`, for
+        anything that decides attribution or scope."""
+        if self.identity is None:
+            raise ServiceError("unauthorized", _UNAUTHORIZED)
+        return self.identity
+
 
 Handler = Callable[["ContextService", Request], "tuple[int, dict[str, Any]]"]
 
@@ -349,14 +475,19 @@ Handler = Callable[["ContextService", Request], "tuple[int, dict[str, Any]]"]
 class Route:
     handler: Handler
     public: bool = False
+    requires: str = ""  # capability this operation needs
 
 
 _ROUTES: dict[tuple[str, str], Route] = {}
 
 
-def route(method: str, path: str, *, public: bool = False) -> Callable[[Handler], Handler]:
+def route(
+    method: str, path: str, *, public: bool = False, requires: str = ""
+) -> Callable[[Handler], Handler]:
     def register(handler: Handler) -> Handler:
-        _ROUTES[(method, path)] = Route(handler=handler, public=public)
+        _ROUTES[(method, path)] = Route(
+            handler=handler, public=public, requires=requires
+        )
         return handler
 
     return register
@@ -401,7 +532,7 @@ class ContextService:
         authenticator: Authenticator | None = None,
     ) -> None:
         self.config = config or ServiceConfig()
-        self.authenticator: Authenticator = authenticator or reject_all_tokens
+        self.authenticator: Authenticator = authenticator or store_authenticator
         self.log = get_logger()
 
     @property
@@ -434,6 +565,8 @@ class ContextService:
             request.identity = self.authenticate(request)
         matched = _ROUTES.get((request.method, request.path))
         if matched is not None:
+            if matched.requires:
+                require_permission(request.caller, matched.requires)
             return matched
         if methods:
             raise ServiceError(
@@ -609,6 +742,7 @@ class _Handler(BaseHTTPRequestHandler):
         started = time.monotonic()
         path, status, code = "-", 500, "internal_error"
         drained = method != "POST"
+        request: Request | None = None
 
         def read_body() -> dict[str, Any]:
             nonlocal drained
@@ -644,12 +778,15 @@ class _Handler(BaseHTTPRequestHandler):
             status, code = error.status, error.code
             self._refuse(error)
         finally:
+            # Who, by durable id — never the token, and never the body.
+            caller = request.identity if request else None
             self.service.log.info(
-                "%s %s -> %s %s %.1fms",
+                "%s %s -> %s %s %s %.1fms",
                 method,
                 redact(path),
                 status,
                 code,
+                f"wt{caller.worktree_id}/cap{caller.token_id}" if caller else "-",
                 (time.monotonic() - started) * 1000,
             )
 

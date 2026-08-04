@@ -634,7 +634,19 @@ def test_the_log_file_is_written_through_the_redacting_formatter(tmp_path):
 def test_the_log_lands_under_the_state_directory(tmp_path):
     config = _config(tmp_path)
     assert config.log_file == tmp_path / "state" / cs.LOG_NAME
-    assert cs.ServiceConfig().log_file.parent == cs.STATE_DIR
+
+
+def test_the_state_directory_is_resolved_late_not_captured(monkeypatch, tmp_path):
+    """A dataclass default would freeze the real state directory at import time,
+    and 2.5 writes a PID file and a log into it."""
+    from amux import shared
+
+    monkeypatch.setattr(shared, "STATE_DIR", tmp_path / "redirected")
+    config = cs.ServiceConfig()
+    assert config.state_home == tmp_path / "redirected"
+    assert config.log_file == tmp_path / "redirected" / cs.LOG_NAME
+    monkeypatch.setattr(shared, "STATE_DIR", tmp_path / "moved")
+    assert cs.ServiceConfig().state_home == tmp_path / "moved"
 
 
 def test_the_service_log_does_not_propagate_to_the_root_logger(tmp_path):
