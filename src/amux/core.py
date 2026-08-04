@@ -7,12 +7,8 @@ from libtmux import Pane, Server, Session, Window
 from libtmux.constants import PaneDirection
 
 from amux import events, store, worktree
+from amux.runtime import AGENT_COMMANDS, HostRuntime, PaneSpec, Runtime
 from amux.shared import ALIAS, DEFAULT_SOCKET
-
-AGENT_COMMANDS = {
-    "claude": "claude --dangerously-skip-permissions",
-    "codex": "codex --dangerously-bypass-approvals-and-sandbox",
-}
 
 AGENT_OPTION = "@amux_agent"
 LABEL_OPTION = "@amux_label"
@@ -285,9 +281,11 @@ def _build_grid(
     cwd: str | None,
     workspace: str | None = None,
     task: str | None = None,
+    runtime: Runtime | None = None,
 ) -> AgentGrid:
     if len(agents) != nrows * ncols:
         raise ValueError(f"{len(agents)} agents do not fit a {nrows}x{ncols} grid")
+    runtime = runtime or HostRuntime()
     taken = _taken_names(window.session)
     rows = _split_evenly(window.panes[0], nrows, PaneDirection.Below, cwd)
     agent_panes = []
@@ -311,31 +309,24 @@ def _build_grid(
             )
             panes_info.append((pane, agent, name))
 
-    # Per-agent git worktrees when the target dir is a repo. Fail soft: a
-    # non-repo target keeps today's shared-directory behavior.
-    worktree_paths: dict[str, str] = {}
-    if workspace and task and cwd:
-        repo = worktree.repo_root(cwd)
-        if repo:
-            try:
-                worktree_paths = worktree.setup_task(
-                    repo,
-                    workspace,
-                    task,
-                    [(p.id or "", agent, name) for p, agent, name in panes_info],
-                )
-            except worktree.WorktreeError as exc:
-                print(f"amux: worktree isolation unavailable: {exc}")
+    # The runtime decides where each pane works and what it runs; everything
+    # tmux-facing stays here so pane metadata and events are runtime-agnostic.
+    launches = {
+        launch.pane: launch
+        for launch in runtime.prepare(
+            [PaneSpec(p.id or "", agent, name) for p, agent, name in panes_info],
+            workspace=workspace,
+            task=task,
+            cwd=cwd,
+        )
+    }
 
     socket = _socket_name(window)
     for pane, agent, name in panes_info:
-        command = AGENT_COMMANDS.get(agent, agent)
-        wt = worktree_paths.get(pane.id or "")
-        pane_cwd = wt or cwd or pane.pane_current_path or ""
-        if wt:
-            pane.send_keys(worktree.shell_cd(wt))
-        if command:
-            pane.send_keys(command)
+        launch = launches[pane.id or ""]
+        pane_cwd = launch.cwd or pane.pane_current_path or ""
+        for keys in launch.keys:
+            pane.send_keys(keys)
         events.emit("spawn", pane=pane.id, agent=agent, socket=socket)
         agent_panes.append(
             AgentPane(
@@ -366,6 +357,7 @@ def spawn_agent_space(
     init_grid_ncols: int = 1,
     init_grid_agents: list[str] | None = None,
     init_task_name: str = "task0",
+    runtime: Runtime | None = None,
 ) -> AgentSpace:
     if server.has_session(session_name):
         raise ValueError(f"{ALIAS['session']} '{session_name}' already exists")
@@ -397,6 +389,7 @@ def spawn_agent_space(
         session_path,
         workspace=session_name,
         task=init_task_name,
+        runtime=runtime,
     )
     return AgentSpace(
         session=session,
@@ -413,6 +406,7 @@ def spawn_agent_grid(
     ncols: int,
     agents: list[str] | None = None,
     cwd: str | None = None,
+    runtime: Runtime | None = None,
 ) -> AgentGrid:
     window = session.new_window(
         window_name=window_name, start_directory=cwd, attach=False
@@ -425,6 +419,7 @@ def spawn_agent_grid(
         cwd,
         workspace=session.name or "",
         task=window_name,
+        runtime=runtime,
     )
 
 
