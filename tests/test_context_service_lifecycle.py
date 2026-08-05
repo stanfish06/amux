@@ -71,13 +71,23 @@ def _await(predicate, timeout: float = 15.0, what: str = "condition"):
     raise AssertionError(f"{what} did not happen within {timeout}s")
 
 
-def _run(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+def _run(
+    *args: str, env: dict[str, str] | None = None, timeout: float = 20.0
+) -> subprocess.CompletedProcess:
+    """Run one lifecycle command to completion.
+
+    Every caller here expects the command to finish in well under a second —
+    refusing, or reporting. The timeout is short on purpose: a command that
+    serves instead of refusing is a real failure, and a 60-second wait turns it
+    into an unexplained slow run rather than a legible one. `TimeoutExpired`
+    carries the child's captured output, which is the evidence.
+    """
     return subprocess.run(
         [*SERVE, *args],
         env={**os.environ, **(env or {})},
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=timeout,
     )
 
 
