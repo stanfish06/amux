@@ -162,9 +162,14 @@ def _cmd_spg(server, args) -> int:
 
 def _cmd_kw(server, args) -> int:
     session = _get_session(server, args.workspace)
-    if args.clean:
-        for window in session.windows:
-            worktree.remove_task(args.workspace, window.name or "")
+    for window in session.windows:
+        task = window.name or ""
+        if args.clean:
+            worktree.remove_task(args.workspace, task)
+        else:
+            # Stop, do not destroy: a sandbox keeps its disk and its provider
+            # session so a later spawn can resume it as itself.
+            runtime.stop_task(args.workspace, task)
     core.load_agent_space(session).terminate()
     print(f"killed {ALIAS['session']} '{args.workspace}'")
     return 0
@@ -175,6 +180,8 @@ def _cmd_kg(server, args) -> int:
     window = _get_window(session, args.task)
     if args.clean:
         worktree.remove_task(args.workspace, args.task)
+    else:
+        runtime.stop_task(args.workspace, args.task)  # see `_cmd_kw`
     core.load_agent_grid(window).terminate()
     print(f"killed {ALIAS['window']} '{args.task}' in '{args.workspace}'")
     return 0

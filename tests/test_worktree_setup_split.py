@@ -174,3 +174,34 @@ def test_setup_task_matches_the_split_halves(repo):
         assert git(repo, "rev-parse", f"amux/ws/t0/{name}") == git(
             repo, "rev-parse", "amux/ws/t0/integration"
         )
+
+
+def test_integration_setup_adopts_an_existing_worktree(repo):
+    """`kg` without `--clean` leaves the integration worktree in place, so
+    respawning that task has to find it rather than fail on `worktree add`.
+    This affects host agents too, not only sandboxes."""
+    first = worktree.setup_task_integration(str(repo), "ws", "t0")
+    (Path(first.path) / "carried-over.txt").write_text("still here\n")
+
+    second = worktree.setup_task_integration(str(repo), "ws", "t0")
+
+    assert second.path == first.path
+    assert second.branch == first.branch
+    # Adopted, not recreated: whatever was in it survives.
+    assert (Path(second.path) / "carried-over.txt").read_text() == "still here\n"
+    # And git still knows about exactly one integration worktree.
+    assert Path(second.path).resolve() in {
+        Path(p) for p in worktree.registered_worktrees(str(repo))
+    }
+
+
+def test_a_task_can_be_respawned_after_a_kill_without_clean(repo):
+    """The whole host path, twice, as `spg` -> `kg` -> `spg` would drive it."""
+    worktree.setup_task(str(repo), "ws", "t0", [("%1", "claude", "alpha")])
+    # `kg` without --clean removes nothing, so the second spawn meets the
+    # leftovers of the first.
+    paths = worktree.setup_task(str(repo), "ws", "t0", [("%2", "claude", "beta")])
+
+    assert set(paths) == {"%2"}
+    assert Path(paths["%2"]).is_dir()
+    assert sorted(statuses()) == ["active", "active"]

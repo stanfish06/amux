@@ -200,6 +200,37 @@ def _context_service():
     return context_service
 
 
+def stop_task(workspace: str, task: str) -> list[str]:
+    """Stop every sandbox backing a task without destroying anything.
+
+    This is `kg`/`kw` *without* `--clean`: the microVM keeps its disk, its
+    working tree and whatever provider session the agent signed into, and its
+    capability is deliberately NOT revoked -- a stopped sandbox must be able to
+    resume as itself rather than be rebuilt. Cleanup is a separate, explicit
+    act.
+
+    Failures are reported and skipped rather than raised: killing a task must
+    not be blocked by one stubborn sandbox.
+    """
+    stopped: list[str] = []
+    for row in store.worktrees_for(workspace, task):
+        if row["status"] != "active" or row["runtime"] != DOCKER_SANDBOX:
+            continue
+        name = row["sandbox_name"]
+        if not name:
+            continue
+        try:
+            sandbox.stop(name)
+        except sandbox.SandboxError as exc:
+            print(f"amux: could not stop sandbox {name}: {exc}")
+            continue
+        # Only after a successful stop: a row marked stopped while its VM is
+        # still running would misreport the installation.
+        store.set_worktree_runtime(row["id"], runtime_status="stopped")
+        stopped.append(name)
+    return stopped
+
+
 @dataclass(frozen=True)
 class SandboxConfig:
     """Everything `--runtime docker-sandbox` needs beyond the grid itself."""
@@ -242,6 +273,9 @@ class _Acquired:
     token_id: int | None = None
     handle: sandbox.Sandbox | None = None
     hooks: sandbox_bootstrap.HooksInstalled | None = None
+    #: True when this pane resumed an existing sandbox rather than creating one.
+    #: Rollback must not destroy a VM this run did not build.
+    reattached: bool = False
 
 
 class SandboxRuntime:
@@ -341,8 +375,36 @@ class SandboxRuntime:
         acquired = _Acquired(spec=spec, sandbox_name=name, repo=repo)
         self._acquired.append(acquired)
 
-        handle = sandbox.create(name, spec.agent, repo, self.config.resources)
+        # Reattachment is decided from amux's own record, not from the name.
+        # A prior row is what says "this agent already had a sandbox"; `sbx ls`
+        # only confirms the VM is still there. Deriving it from the name alone
+        # would adopt any sandbox that happened to match, and would be unable
+        # to tell "stopped" from "the user removed it behind our back".
+        prior = self._prior_row(workspace, task, spec.name)
+        existing = sandbox.find(name) if prior else None
+        if existing is not None:
+            handle = sandbox.Sandbox(
+                name=name, id=str(existing.get("id") or ""), entry=existing
+            )
+            acquired.reattached = True
+        else:
+            if prior:
+                # Recorded but gone: the sandbox was removed outside amux. Say
+                # so rather than silently building a replacement that has none
+                # of the agent's previous work in it.
+                print(
+                    f"amux: sandbox {name} was recorded but no longer exists; "
+                    "creating a new one (its previous contents are not recoverable)"
+                )
+            handle = sandbox.create(name, spec.agent, repo, self.config.resources)
         acquired.handle = handle
+
+        # A prior row belongs to a pane that no longer exists. Supersede it
+        # rather than leaving two active rows for one sandbox, which would make
+        # `integrate` merge the same branch twice and leave a stale capability
+        # valid. This applies whether the VM was resumed or rebuilt.
+        if prior:
+            self._supersede(workspace, task, name)
 
         # The row is the durable identity notes and events hang off, so it
         # exists before anything is delivered into the sandbox. `path` is empty
@@ -366,8 +428,14 @@ class SandboxRuntime:
         )
 
         # The agent works on its own named branch, cut from the task base so
-        # `integrate` has a common ancestor to merge from.
-        handle.exec(["git", "checkout", "-b", branch])
+        # `integrate` has a common ancestor to merge from. On a resumed sandbox
+        # the branch is already there with the agent's commits on it, so it is
+        # checked out rather than created -- `-b` would fail and, worse, would
+        # be the wrong request.
+        if acquired.reattached:
+            handle.exec(["git", "checkout", branch])
+        else:
+            handle.exec(["git", "checkout", "-b", branch])
 
         # The service's own vocabulary, never a hand-rolled list: a drift
         # between what is minted and what the routes require surfaces as a 403
@@ -405,6 +473,39 @@ class SandboxRuntime:
             keys=(sandbox.attach_command(name),),
         )
 
+    @staticmethod
+    def _prior_row(workspace: str, task: str, agent_name: str) -> dict | None:
+        """The active sandbox row a previous pane left for this agent, if any.
+
+        This is amux's record that the agent already has a VM. `kg` without
+        `--clean` leaves exactly this behind, which is what makes a later
+        spawn a resume rather than a rebuild.
+        """
+        for row in store.worktrees_for(workspace, task):
+            if (
+                row["name"] == agent_name
+                and row["status"] == "active"
+                and row["runtime"] == DOCKER_SANDBOX
+                and row["sandbox_name"]
+            ):
+                return dict(row)
+        return None
+
+    @staticmethod
+    def _supersede(workspace: str, task: str, sandbox_name: str) -> None:
+        """Retire the rows a previous pane left behind for this sandbox.
+
+        The registry is append-only, so the old row is marked rather than
+        deleted -- notes and events already point at it and must stay
+        resolvable. Its capability is revoked because the new pane mints its
+        own, and a token whose pane is gone should not keep working.
+        """
+        for row in store.worktrees_for(workspace, task):
+            if row["sandbox_name"] != sandbox_name or row["status"] != "active":
+                continue
+            store.revoke_context_tokens_for_worktree(row["id"])
+            store.set_worktree_status(row["id"], "removed")
+
     # --- rollback ---
 
     def rollback(self) -> list[str]:
@@ -433,7 +534,10 @@ class SandboxRuntime:
                 store.revoke_context_token(acquired.token_id)
             except Exception as exc:  # noqa: BLE001
                 problems.append(f"{acquired.sandbox_name}: revoke token: {exc}")
-        if acquired.handle is not None:
+        if acquired.handle is not None and not acquired.reattached:
+            # Only a sandbox this run created. Destroying one we merely resumed
+            # would turn a failed respawn into data loss for work that predates
+            # this command entirely.
             try:
                 sandbox.remove(acquired.sandbox_name, force=True)
             except Exception as exc:  # noqa: BLE001

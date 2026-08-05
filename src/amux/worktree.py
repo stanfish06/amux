@@ -12,6 +12,7 @@ line is left to the human.
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 from dataclasses import dataclass
@@ -108,8 +109,25 @@ class TaskIntegration:
     path: str
 
 
+def registered_worktrees(repo: str) -> set[str]:
+    """Paths git currently considers worktrees of `repo`."""
+    out = _git(repo, "worktree", "list", "--porcelain", check=False).stdout
+    return {
+        os.path.realpath(line.split(" ", 1)[1])
+        for line in out.splitlines()
+        if line.startswith("worktree ")
+    }
+
+
 def setup_task_integration(repo: str, workspace: str, task: str) -> TaskIntegration:
-    """Create the task's integration branch and worktree. Runtime-agnostic."""
+    """Create the task's integration branch and worktree, or adopt the existing
+    one.
+
+    Idempotent on purpose. `kg`/`kw` without `--clean` deliberately leave the
+    integration worktree in place, so respawning that task must find it rather
+    than fail on `worktree add` -- which is what made a resumed task
+    unrecoverable without `--clean`.
+    """
     if not has_commits(repo):
         raise WorktreeError("repo has no commits yet")
     base = head_ref(repo)
@@ -118,7 +136,8 @@ def setup_task_integration(repo: str, workspace: str, task: str) -> TaskIntegrat
 
     if not _branch_exists(repo, branch):
         _git(repo, "branch", branch, base)
-    _git(repo, "worktree", "add", path, branch)
+    if os.path.realpath(path) not in registered_worktrees(repo):
+        _git(repo, "worktree", "add", path, branch)
     return TaskIntegration(
         repo=repo,
         workspace=workspace,
