@@ -617,11 +617,14 @@ def test_hook_files_are_delivered_as_files_not_as_shell_arguments(tmp_path, inst
     # the document really was delivered, and as a file
     assert "claude-opus" in written(ops, result.settings_path)
     assert ops.execs
+    # Naming the path is fine — reading it back, chowning and chmoding all do.
+    # Carrying the document is not, and that is what a heredoc would do.
     for argv in ops.execs:
-        joined = " ".join(argv)
-        assert "claude-opus" not in joined  # never the contents
-        if "settings.json" in joined:  # naming it is only OK for the read-back
-            assert argv[:2] == ["sh", "-lc"] and argv[2].startswith("cat ")
+        assert "claude-opus" not in " ".join(argv)
+        assert not any(">" in arg or "<<" in arg for arg in argv[3:])
+    readers = [a for a in ops.execs if a[:2] == ["sh", "-lc"] and a[2].startswith("cat ")]
+    assert len(readers) == 1  # the only command that touches the file's contents
+    assert result.settings_path in readers[0][2]
 
 
 def test_no_hook_staging_file_is_left_on_the_host(tmp_path, installed):
