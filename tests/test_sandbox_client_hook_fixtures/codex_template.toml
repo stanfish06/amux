@@ -1,6 +1,6 @@
-model = "gpt-5.6"
+# Codex configuration for Docker sandbox
+# This configuration enables "yolo mode" - no approvals, full access
+
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
-
-[projects."/work/repo"]
-trust_level = "trusted"
+mcp_oauth_credentials_store = "file"

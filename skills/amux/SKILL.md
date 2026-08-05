@@ -1,6 +1,6 @@
 ---
 name: amux
-description: Use when orchestrating AI agents in tmux with the amux CLI — spawning or killing agent grids (`amux spw`/`spg`/`kw`/`kg`), listing them (`lsw`/`lsg`), mixed claude+codex grids, the `amux-root` tmux socket, agent state events (`amux event emit`/`state`/`tail`/`wait`), per-agent git worktrees and task integration branches (`amux integrate`), scoped context notes (`amux note`/`notes`), sending messages from one agent pane to another, when an agent needs to discover which workspace, task, and pane it is running in (`amux ctx`), or when an agent needs to start work elsewhere — a task whose context no longer fits the current window, or a change that belongs to another repo.
+description: Use when orchestrating AI agents in tmux with the amux CLI — spawning or killing agent grids (`amux spw`/`spg`/`kw`/`kg`), listing them (`lsw`/`lsg`), mixed claude+codex grids, the `amux-root` tmux socket, agent state events (`amux event emit`/`state`/`tail`/`wait`), per-agent git worktrees and task integration branches (`amux integrate`), scoped context notes (`amux note`/`notes`), sending messages from one agent pane to another, when an agent needs to discover which workspace, task, and pane it is running in (`amux ctx`), when an agent needs to start work elsewhere — a task whose context no longer fits the current window, or a change that belongs to another repo — or when an agent runs inside a Docker Sandbox microVM (`--runtime docker-sandbox`, `sbx`) and needs to know which commands cross the host boundary, why a context command fails, or how its committed branch reaches the host.
 ---
 
 # amux
@@ -41,6 +41,10 @@ commands use the left.
 
 `-p` defaults to `$PWD` for `spw`, to the workspace dir for `spg`. `-t` defaults
 to `task0`. Global `-L/--socket-name` must come **before** the subcommand.
+
+Every command above runs on the host. Inside a Docker Sandbox agent only `ctx`,
+`notes`, `note` and `event emit|state|wait` are available — the rest refuse
+locally. See *Sandboxed agents* for why, and for `--runtime docker-sandbox`.
 
 ## Agent specs and grid shape
 
@@ -215,6 +219,141 @@ note ("merged brave-hawk — 3 commit(s), +120/−40"), and marks your worktree
 `merged`. A conflict aborts the merge and records a `blocker` note instead.
 Merging the integration branch back to the repo's main line is a human act.
 
+## Sandboxed agents (the `docker-sandbox` runtime)
+
+Agents normally run on the host. A grid may instead be spawned with
+`--runtime docker-sandbox`, which puts each agent inside its own Docker
+Sandboxes microVM. amux keeps every coordination concern on the host — workspace,
+task, roster, notes, events, integration — and the agent gets a boundary it
+cannot reach across.
+
+> **Status: opt-in prototype, not yet wired to the CLI.** The adapter, preflight,
+> host context service, in-VM client and hook bootstrap are implemented; grid
+> creation lands with task 4.5 and the `--runtime` / `--cpus` / `--memory` /
+> doctor flags with 5.5. Items below marked **(pending)** do not exist yet.
+> `docs/sandbox-smoke-test.md` is the procedure that verifies it on a real host.
+
+### Am I in a sandbox?
+
+Check, don't assume — it changes what you can run and how you share work:
+
+```sh
+amux ctx
+# you: brave-hawk  claude @r0c1 %7  task:fix  workspace:myproj  busy  ...
+# runtime: docker-sandbox running amux-myproj-fix-brave-hawk-ab12cd
+```
+
+A `runtime:` line appears immediately after your identity line **only** when you
+are not on the host. Host agents never see it, so its absence means host. In
+`--json`, `self` carries `runtime`, `runtime_status`, `sandbox_name` and
+`sandbox_id`.
+
+### What works, and what refuses
+
+Inside a sandbox, `amux` is a small standalone client that talks to a host
+service over HTTP. It supports exactly the context subset:
+
+| Works in a sandbox | Refuses locally |
+|---|---|
+| `ctx`, `notes`, `note` | `spw`, `spg`, `kg`, `kw` |
+| `event emit`, `event state`, `event wait` | `integrate`, `monitor`, `lsw`, `lsg`, `event tail` |
+
+A refusal is immediate, exits 2, and names the command — it is not a transient
+error to retry, and there is no flag that unlocks it. **Host control is not
+expressible in the sandbox's capability vocabulary at all**, so nothing you can
+do from inside escalates into it. If you need one of those, say so in a note or
+message a host agent; do not try to work around it.
+
+Two flags are also refused, because your identity is fixed by your credential
+rather than by an argument: `--pane` (on `ctx`, `notes`, `note`) and
+`--workspace` / `--repo` (on `notes`). You can still *wait on* a teammate —
+`amux event wait %9` is fine for a pane in your own workspace and task.
+
+### Sharing work: commit, or it does not exist
+
+You are on a private clone, not a shared worktree. Docker mounts the repository
+read-only and gives you your own copy, which is why ordinary git works and why
+nothing you do can touch the human's checkout. It also means:
+
+- **Uncommitted work is invisible to everyone.** `amux integrate` fetches your
+  *committed* branch through a host-side `sandbox-<name>` git remote and never
+  imports a dirty working tree. An uncommitted change is not "not yet reviewed",
+  it is not there.
+- **A teammate's files are not at your paths.** They are in a different VM. Read
+  their work by integrating, or ask them to commit and say so in a note.
+- **Cleanup refuses to remove a dirty sandbox** without an explicit force flag,
+  and preserves your committed branch tip first (pending). That protects you, but
+  only for work you committed.
+
+So commit early and often, and leave a note when a branch is ready:
+
+```sh
+git add -A && git commit -m "auth: retry on 429"
+amux note "auth retry ready on my branch, 3 commits" --kind finding
+```
+
+### The trust model, as it actually is
+
+Worth understanding, because the honest version is narrower than it sounds.
+
+Your credential is a high-entropy capability token delivered to your VM in a
+mode-`0600` file. The host stores only its SHA-256 hash, compares in constant
+time, binds it to exactly one execution record, and revokes it when your sandbox
+is removed. The host derives your workspace, task, repository, pane, agent and
+name from that record — identity fields in a request body are rejected, not
+trusted, so you cannot post as a teammate even by accident.
+
+The vocabulary has three permissions: `context:read`, `notes:write`,
+`events:write`. **Every agent token is currently minted with all three, so this
+is not least privilege today** and should not be described as if it were. Two
+things about it are true and load-bearing:
+
+- **Host control is inexpressible.** Spawning, killing, integrating, cleaning and
+  monitoring have no permission that could grant them, so no token — leaked,
+  stolen, or misused — can be escalated into them.
+- **The per-route `requires=` field is the seam** that makes narrowing possible
+  later without touching handlers.
+
+The service binds to `127.0.0.1` only, with no configurable bind address, and
+every request is size-, count- and time-bounded.
+
+### The context database never leaves the host
+
+amux does not mount, copy, or synchronise `context.db`, its WAL/shm files, the
+amux state directory, or the tmux socket into a sandbox — not read-only, not
+ever. The HTTP service is the only context path.
+
+This is why a service outage is a hard failure. If `amux ctx` reports that it
+cannot reach the context service, that is the designed behaviour: there is no
+fallback to a mounted database, a local shadow copy, or an unauthenticated
+write, and you should not build one. Wait, retry, or report it.
+
+### Troubleshooting from inside a sandbox
+
+| Symptom | Cause and fix |
+|---|---|
+| `cannot reach the amux context service at ...` | The host service is down or network policy blocks it. Not yours to fix — report it. Nothing you write is being recorded meanwhile. |
+| `the amux context service refused the request: unauthorized: ...` | Your token expired or your sandbox was removed. Report it; do not look for another credential. |
+| `... forbidden: pane %99 is not in myproj/fix` | You named a pane outside your own workspace and task. Get pane ids from `amux ctx` or `amux event state`. |
+| `'integrate' runs only on the amux host` | Working as intended. Ask a host agent, or leave a note. |
+| `--pane is host-only` | Your identity is your token. Drop the flag. |
+| `no sandbox context configuration at ...` | Bootstrap did not finish. This is a host-side failure; report it rather than writing the file yourself. |
+| Teammate stuck at `idle` while clearly working | Their agent's hooks may not be reporting. For Codex specifically this is a known open question (hook trust); treat their state as unreliable rather than concluding they are done. |
+
+### For the human on the host
+
+```sh
+amux doctor --runtime docker-sandbox -p ~/Git/myproj   # read-only preflight  (pending)
+sbx ls --json                                          # the VMs themselves
+sbx policy init balanced                               # one-time, host-wide
+sbx policy allow network localhost:47317               # only if preflight says so
+```
+
+`sbx` is optional and external: amux detects it, reports its version, and never
+installs it, signs you in, or widens Docker policy for you. Resource caps default
+to 2 CPUs and 4 GiB per agent because `sbx`'s own defaults are not caps —
+`--cpus 0` means every host CPU.
+
 ## Context notes
 
 Share status without pinging a teammate. Notes live in a per-scope store and
@@ -359,6 +498,18 @@ tmux -L amux-root ls                    # raw view of the amux server
 - **Cramming unrelated work into your current task.** You may spawn. A new unit
   of work that would only be diluted by your history wants `spg`; a change in
   another repo wants `spw` — see *Spawning work yourself*.
+- **Assuming you are on the host.** Check `amux ctx` for a `runtime:` line. In a
+  sandbox, half the commands refuse, your teammates' files are in other VMs, and
+  uncommitted work is invisible to everyone.
+- **Trying to route around a sandbox boundary refusal.** It is not a transient
+  error and no flag unlocks it — host control has no permission that could grant
+  it. Leave a note or message a host agent instead.
+- **Leaving work uncommitted in a sandbox.** `integrate` fetches committed
+  branches only, and cleanup can discard the VM. Uncommitted is not "in review",
+  it is gone.
+- **Treating a context-service outage as something to work around.** There is no
+  fallback path by design — no mounted database, no local copy, no unauthenticated
+  write. Report it; do not invent one.
 - **Spawning and walking away.** New agents start cold, and notes do not cross
   workspaces. Say why in a note before you spawn, then message the new agent its
   task, or it will sit idle.

@@ -29,15 +29,26 @@ TOKEN = "zzz-capability-secret-zzz"
 class FakeOps:
     """Records what the bootstrap asked the sandbox to do."""
 
-    def __init__(self, name: str = "amux-myproj-fix-brave-hawk-ab12cd", home: str = "/root"):
+    def __init__(
+        self,
+        name: str = "amux-myproj-fix-brave-hawk-ab12cd",
+        home: str = "/root",
+        whoami: str = "agent:agent",
+    ):
         self.name = name
         self.home = home
+        #: The user `exec` runs as, as `id -un`:`id -gn` reports it.
+        self.whoami = whoami
         #: What the image already ships, keyed by absolute in-VM path.
         self.files: dict[str, str] = {}
         #: What `<binary> --version` reports inside the image.
         self.versions: dict[str, str] = {}
+        #: Owner of each in-VM path, as `user:group`.
+        self.owners: dict[str, str] = {}
         self.copies: list[tuple[Path, str]] = []
         self.execs: list[list[str]] = []
+        #: The `user=` each exec ran as, parallel to `execs`.
+        self.users: list[str | None] = []
         self.copied: dict[str, bytes] = {}
         self.fail_on: str | None = None
         self.fail_copy: str | None = None
@@ -49,10 +60,21 @@ class FakeOps:
             )
         self.copies.append((Path(source), destination))
         self.copied[destination] = Path(source).read_bytes()
+        # `sbx cp` preserves the source mode but sets the owner to the HOST uid,
+        # which does not exist in the container. Modelled, because it is the whole
+        # reason the chown exists.
+        self.owners[destination] = "501:root"
 
-    def exec(self, argv):
+    def exec(self, argv, *, user: str | None = None):
         argv = list(argv)
         self.execs.append(argv)
+        self.users.append(user)
+        if argv[:1] == ["chown"] and user == "root":
+            self.owners[argv[-1]] = argv[1]
+        if argv[:1] == ["chmod"] and self.owners.get(argv[-1]) not in (None, self.whoami):
+            raise sb.BootstrapError(
+                f"chmod: Operation not permitted (os error 1)"
+            )  # as the real agent user gets on a 501-owned file
         if self.fail_on and self.fail_on in " ".join(argv):
             raise sb.BootstrapError(f"sbx exec {self.name} {' '.join(argv)} failed: rc 1")
         if argv[:2] == ["sh", "-lc"]:
@@ -63,8 +85,26 @@ class FakeOps:
                 return self.files.get(path, "")
             if "--version" in script:
                 return self.versions.get(shlex.split(script)[0], "")
+            if "id -un" in script:  # the identity probe: HOME, user, group
+                user, group = self.whoami.split(":")
+                return f"{self.home}\n{user}\n{group}"
             return self.home
         return ""
+
+    # -- what the sandbox ended up with ------------------------------------
+
+    def user_for(self, *prefix: str) -> str | None:
+        """The `user=` the first exec matching `prefix` ran as."""
+        for argv, user in zip(self.execs, self.users):
+            if argv[: len(prefix)] == list(prefix):
+                return user
+        raise AssertionError(f"no exec starting {prefix}")
+
+    def index_of(self, *prefix: str) -> int:
+        for i, argv in enumerate(self.execs):
+            if argv[: len(prefix)] == list(prefix):
+                return i
+        raise AssertionError(f"no exec starting {prefix}")
 
     # -- assertions helpers ------------------------------------------------
 
@@ -172,12 +212,105 @@ def test_install_creates_the_config_directory_before_copying_into_it(staging):
     assert mkdir_index < chmod_index
 
 
+# --- the shim must exist in a PACKAGED build too ------------------------------
+#
+# A PyInstaller build ships no .py on disk, so `sandbox_client.__file__` named a
+# path that did not exist and every sandbox spawn from a packaged amux died at
+# shim installation. The fix is packaging-only: once the file ships as data at
+# destination `amux`, `__file__` resolves and the resolver needs no frozen branch.
+# No test can run against a frozen bundle — but one CAN assert the build ships the
+# file, and that is the assertion that would have caught this.
+
+
+def test_an_unfrozen_build_still_resolves_from_the_source_tree():
+    assert sb.client_source() == Path(sc.__file__ or "")
+
+
+def test_the_build_ships_the_shim_as_data():
+    """The half a frozen-bundle test cannot reach. This is the assertion that
+    would have caught the original bug: the Makefile simply did not ship it.
+
+    It insists on the *absolute* form. `--add-data` resolves a relative source
+    against `--specpath`, which the build sets to `build/`, so the relative
+    spelling does not merely fail at run time — it fails the build with
+    "Unable to find build/src/amux/sandbox_client.py". An earlier version of this
+    test asserted the relative string and would have pinned that breakage in
+    place.
+    """
+    makefile = Path(__file__).resolve().parents[1] / "Makefile"
+    build = makefile.read_text()
+    assert f"--add-data $(CURDIR)/src/amux/{sb.CLIENT_MODULE}:amux" in build
+    assert f"--add-data src/amux/{sb.CLIENT_MODULE}" not in build
+    # one invocation serves both --onefile and --onedir via PYINSTALLER_MODE,
+    # so a single occurrence covers every packaged build
+    assert build.count("pyinstaller") == 1
+    assert "--specpath build" in build  # the reason $(CURDIR) is load-bearing
+
+
+# --- ownership: sbx cp lands files as the HOST uid ---------------------------
+#
+# Verified against a live image: `sbx cp` preserves the source mode but sets the
+# owner to the host uid (501), which does not exist in the container. So a 0600
+# capability is unreadable by the agent that needs it, and the agent cannot chmod
+# anything it did not create. Every copy must be chowned to the exec user.
+
+
+def test_every_copied_file_is_chowned_to_the_agent(staging, installed=None):
+    ops = FakeOps()
+    result = sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    for _, destination in ops.copies:
+        assert ops.owners[destination] == "agent:agent", f"{destination} not chowned"
+    assert result.config_path in ops.owners
+
+
+def test_the_chown_runs_as_root_because_the_agent_cannot_do_it(staging):
+    ops = FakeOps()
+    sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    assert ops.user_for("chown") == "root"
+
+
+def test_nothing_but_the_chown_needs_root(staging):
+    """Least privilege on the exec side: only the ownership fix is escalated."""
+    ops = FakeOps()
+    sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    for argv, user in zip(ops.execs, ops.users):
+        assert (user == "root") == (argv[:1] == ["chown"]), argv
+
+
+def test_the_chown_precedes_the_chmod_or_the_chmod_cannot_succeed(staging):
+    ops = FakeOps()
+    result = sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    assert ops.index_of("chown") < ops.index_of("chmod", "600", result.config_path)
+
+
+def test_the_owner_is_discovered_from_the_image_not_hardcoded(staging):
+    """The Claude and Codex images need not run as the same user."""
+    ops = FakeOps(home="/home/dev", whoami="dev:staff")
+    result = sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    assert result.config_path == "/home/dev/.config/amux/context.json"
+    assert ops.owners[result.config_path] == "dev:staff"
+
+
+def test_the_capability_ends_up_readable_only_by_the_agent(staging):
+    """The whole point: agent-owned AND still 0600. Either alone is a failure —
+    501-owned 0600 is unreadable, agent-owned 0644 leaks the token."""
+    ops = FakeOps()
+    result = sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    assert ops.owners[result.config_path] == "agent:agent"
+    assert ops.mode_set_for(result.config_path) == "600"
+
+
 # --- the token must not leak --------------------------------------------------
 
 
 def test_the_token_never_appears_in_an_argument_or_a_destination_path(staging):
     ops = FakeOps()
     sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    # An install that did nothing would satisfy every `not in` below, so prove
+    # the work happened AND that the token really did travel — as file contents.
+    assert len(ops.copies) == 2 and ops.execs
+    assert TOKEN in ops.copied[f"{ops.home}/.config/amux/context.json"].decode()
+
     assert TOKEN not in ops.argv_text
     assert not any(TOKEN in dest for _, dest in ops.copies)
     assert not any(TOKEN in str(src) for src, _ in ops.copies)
@@ -246,7 +379,11 @@ def test_install_never_writes_the_capability_into_the_sandbox_environment(stagin
     """An env var is visible to every process in the VM and to `sbx` inspection;
     the token belongs in one 0600 file the shim opens."""
     ops = FakeOps()
-    sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    result = sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    # Guard on the install's own commands, not merely on `execs` being non-empty:
+    # the $HOME probe alone would satisfy that while the install did nothing.
+    assert ops.mode_set_for(result.config_path) == "600"
+    assert ops.mode_set_for(sb.SHIM_PATH) == "755"
     for argv in ops.execs:
         assert not any(arg.startswith("AMUX_CONTEXT_TOKEN") for arg in argv)
         assert "export" not in " ".join(argv)
@@ -258,8 +395,10 @@ def test_install_never_writes_the_capability_into_the_sandbox_environment(stagin
 def test_nothing_the_bootstrap_copies_comes_from_the_host_state_directory(staging):
     ops = FakeOps()
     sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    assert ops.copies and ops.execs, "nothing was copied or run to inspect"
     for source, _ in ops.copies:
         text = str(source)
+        assert source.name in ("context.json", "sandbox_client.py")  # only these two
         assert "context.db" not in text
         assert not text.endswith(".db")
     assert not any("context.db" in " ".join(a) for a in ops.execs)

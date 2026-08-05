@@ -101,7 +101,7 @@ PANE_STATES = {
 
 
 @pytest.fixture
-def config(tmp_path, monkeypatch):
+def sandbox_config(tmp_path, monkeypatch):
     """Point the shim at a config file whose endpoint a test fills in."""
 
     path = tmp_path / "context.json"
@@ -118,12 +118,12 @@ def config(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def run(config):
+def run(sandbox_config):
     """`run(routes, "ctx", "--json")` -> (rc, stdout, stderr, service)."""
 
     def _run(routes, *argv, **kwargs):
         with FakeContextService(routes) as service:
-            config(service.endpoint, **kwargs)
+            sandbox_config(service.endpoint, **kwargs)
             rc = sc.main(list(argv))
             return rc, service
 
@@ -205,8 +205,13 @@ def test_a_host_agents_ctx_output_is_byte_identical_to_the_native_render(run, ca
         "team": [{"task": "fix", "agents": [{**host_self, "runtime": "host"}, TEAMMATE]}],
         "notes": [NOTE],
     }
-    run({("GET", "/v1/context"): document}, "ctx")
-    assert not any(ln.startswith("runtime:") for ln in out(capsys).splitlines())
+    rc, _ = run({("GET", "/v1/context"): document}, "ctx")
+    assert rc == 0
+    lines = out(capsys).splitlines()
+    # positive first: without it, a render that printed nothing would pass
+    assert lines[0].startswith("you: brave-hawk  claude @r0c1 %7")
+    assert lines[1] == "team @ myproj"
+    assert not any(ln.startswith("runtime:") for ln in lines)
 
 
 def test_ctx_refuses_to_inspect_another_pane(run, capsys):
@@ -277,7 +282,10 @@ def test_ctx_treats_an_empty_last_commit_as_none(run, capsys):
     rc, _ = run({("GET", "/v1/context"): document}, "ctx")
     assert rc == 0
     owl = next(ln for ln in out(capsys).splitlines() if "golden-owl" in ln)
-    assert '""' not in owl and "  \n" not in owl
+    # the row still renders its real fields, so this is not passing on an empty line
+    assert "codex" in owl and "idle" in owl
+    assert owl.rstrip() == owl  # no trailing gap where the commit subject would go
+    assert '""' not in owl  # and no empty quoted subject
 
 
 def test_notes_rejects_an_unknown_scope_before_calling_the_service(run, capsys):
@@ -326,6 +334,8 @@ def test_note_never_claims_an_identity_the_token_does_not_grant(run):
     created = {**NOTE, "name": "brave-hawk"}
     _, service = run({("POST", "/v1/notes"): (201, {"note": created})}, "note", "hi")
     body = service.body_of("POST", "/v1/notes")
+    # positive first: an empty body would satisfy every `not in` below
+    assert body == {"text": "hi", "scope": "task", "kind": "note"}
     for field in ("pane", "agent", "workspace", "task", "repo", "worktree_id", "name"):
         assert field not in body
 
@@ -373,9 +383,9 @@ def test_event_emit_takes_its_detail_from_hook_json_on_stdin(run, monkeypatch):
 
 
 def test_event_emit_is_silent_and_succeeds_when_the_service_is_unreachable(
-    config, capsys
+    sandbox_config, capsys
 ):
-    config("http://127.0.0.1:9")  # discard port: nothing listens
+    sandbox_config("http://127.0.0.1:9")  # discard port: nothing listens
     assert sc.main(["event", "emit", "stop"]) == 0
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -639,8 +649,8 @@ def test_a_malformed_config_is_a_clear_failure(tmp_path, monkeypatch, capsys):
     assert "context.json" in capsys.readouterr().err
 
 
-def test_an_unreachable_service_is_a_transient_failure_with_no_fallback(config, capsys):
-    config("http://127.0.0.1:9")
+def test_an_unreachable_service_is_a_transient_failure_with_no_fallback(sandbox_config, capsys):
+    sandbox_config("http://127.0.0.1:9")
     assert sc.main(["ctx"]) == 1
     err = capsys.readouterr().err
     assert "context service" in err.lower()
@@ -680,24 +690,46 @@ def test_no_diagnostic_ever_prints_the_capability_token(run, capsys):
     # the service echoing the token back is still not ours to print
     assert TOKEN not in captured.err
     assert TOKEN not in captured.out
+    assert "***" in captured.err  # replaced, not merely absent
+    assert len(TOKEN) >= sc.MIN_REDACTABLE_TOKEN  # or this proves nothing
 
 
-def test_the_token_never_reaches_the_url_or_the_process_table(run):
+def test_redaction_does_not_shred_a_message_for_a_too_short_token(sandbox_config, capsys):
+    """A one-character "token" is not a capability, and replacing every 't' would
+    turn "cannot reach the service" into "canno*** reach ***he service"."""
+    sandbox_config("http://127.0.0.1:9", token="t")
+    assert sc.main(["ctx"]) == 1
+    err = capsys.readouterr().err
+    assert "cannot reach the amux context service" in err
+    assert "***" not in err
+
+
+def test_the_token_travels_only_in_the_authorization_header(run):
+    """The Authorization header is the one place it may appear — not the path, the
+    query, or any other header.
+
+    The process table is not checked here: this client never spawns a subprocess
+    at all, which `test_a_sandbox_client_reaches_the_store_only_through_the_service`
+    asserts over the import graph. Scanning this process's `sys.argv` would only
+    have inspected pytest's own command line, and could never have failed.
+    """
     _, service = run({("GET", "/v1/context"): CONTEXT}, "ctx")
     request = service.only("GET", "/v1/context")
+    assert TOKEN in request.authorization
     assert TOKEN not in request.path
     assert not request.query
-    assert TOKEN in request.authorization
-    assert not any(TOKEN in arg for arg in sys.argv)
+    others = {k: v for k, v in request.headers.items() if k.lower() != "authorization"}
+    assert others, "no other headers were sent, so scanning them proves nothing"
+    assert not any(TOKEN in value for value in others.values())
 
 
-def test_a_non_json_service_response_is_a_clear_failure(config, capsys, tmp_path):
+def test_a_non_json_service_response_is_a_clear_failure(sandbox_config, capsys, tmp_path):
     class Raw(FakeContextService):
         def respond(self, record):
             return 200, "not-a-document"
 
     with Raw({("GET", "/v1/context"): {}}) as service:
-        config(service.endpoint)
+        sandbox_config(service.endpoint)
         assert sc.main(["ctx"]) == 1
     assert "context service" in capsys.readouterr().err.lower()
 
@@ -706,14 +738,19 @@ def test_a_non_json_service_response_is_a_clear_failure(config, capsys, tmp_path
 
 
 def test_the_client_imports_only_the_standard_library():
-    source = (sc.__file__ or "")
+    """A text scan, so it must first prove it read the real file — an empty read
+    would satisfy both `not in` checks. The authoritative version of this check
+    walks the import graph in
+    `test_a_sandbox_client_reaches_the_store_only_through_the_service`."""
+    source = sc.__file__ or ""
     assert source.endswith("sandbox_client.py")
     text = open(source).read()
+    assert "def main(" in text and "class ContextClient" in text
     assert "import amux" not in text
     assert "from amux" not in text
 
 
-def test_the_module_runs_as_a_copied_single_file_shim(tmp_path, config, monkeypatch):
+def test_the_module_runs_as_a_copied_single_file_shim(tmp_path, sandbox_config, monkeypatch):
     """The shim is installed as a lone executable `amux`, outside any package."""
     import shutil
     import subprocess
@@ -724,7 +761,7 @@ def test_the_module_runs_as_a_copied_single_file_shim(tmp_path, config, monkeypa
     shim.chmod(shim.stat().st_mode | stat.S_IXUSR)
 
     with FakeContextService({("GET", "/v1/context"): CONTEXT}) as service:
-        cfg = config(service.endpoint)
+        cfg = sandbox_config(service.endpoint)
         result = subprocess.run(
             [sys.executable, str(shim), "ctx", "--json"],
             capture_output=True,

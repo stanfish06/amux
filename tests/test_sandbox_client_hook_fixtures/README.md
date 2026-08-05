@@ -4,68 +4,82 @@ Each file stands in for the agent configuration a Docker Sandbox image ships
 with. The merge logic in `src/amux/sandbox_hooks.py` is tested entirely against
 these, so it needs no live sandbox.
 
-## What is verified and what is not
+Two kinds of file, distinguished by name:
 
-The **formats are verified**, taken from real working configuration on the
-development host — the files amux relies on today:
+- `*_template.*` — **recorded** verbatim from a real image.
+- `*_synthetic_*` — **invented**, for edge cases the real images do not exhibit.
+  They are not stale recordings and should not be "corrected" to match an image.
 
-| Fixture | Reference | Verified against |
+## Recorded, and what was observed
+
+Verified 2026-08-05 against `docker/sandbox-templates`, so
+`AgentHooks.paths_are_assumed` is now `False` for both agents and
+`HooksInstalled.location_verified` is `True`.
+
+| | Claude | Codex |
 |---|---|---|
-| `claude_template*.json` | `~/.claude/settings.json` | Claude Code, live host config |
-| `codex_hooks_template*.json` | `~/.codex/hooks.json` | codex-cli 0.146.0 |
-| `codex_config_hooks_*.toml` | `~/.codex/config.toml` `[features]` | codex-cli 0.146.0 |
-| `codex_template*.toml` | `~/.codex/config.toml` `notify` | the older, superseded slot |
+| image | `claude-code-docker` | `codex-docker` |
+| version | Claude Code 2.1.221 | codex-cli 0.146.0 |
+| `HOME` / user | `/home/agent`, `agent:agent` | `/home/agent`, `agent:agent` |
+| hook document | `~/.claude/settings.json` **ships**, 4 UI keys, no `hooks` | `~/.codex/hooks.json` **absent** — amux creates it |
+| feature switch | n/a | `~/.codex/config.toml` ships, `[features]` absent |
+| fixture | `claude_template.json` | `codex_template.toml` |
 
-The **file locations inside Docker's agent images are ASSUMED, not recorded.**
-When these were written, `sbx policy init` had not been run on the host, so no
-sandbox could be created and no image could be inspected.
-`AgentHooks.paths_are_assumed` is `True` and `HooksInstalled.location_verified`
-is `False` to carry that, so preflight can say "installed, location unverified"
-instead of implying it checked.
+Neither image runs as `root`, which is why `install_client` resolves `$HOME`,
+`id -un` and `id -gn` at run time rather than assuming.
 
-The **image's Codex version is also unverified**, which is why the adapter
-detects it rather than assuming. A Codex with `hooks.json` reaches full parity
-with Claude; one old enough to have only the single `notify` slot reports `stop`
-alone, and `HooksInstalled.missing_kinds` says which kinds are absent.
+## Findings from the live probe that shaped the code
 
-## Codex specifics worth knowing before you touch this
-
-- `hooks.json` is **inert** unless `config.toml` carries `hooks = true` under
-  `[features]`. It is not a top-level key.
-- Codex has no `Notification` event. Its equivalent is `PermissionRequest`.
-- `config.toml` also grows a `[hooks.state]` table where Codex records a
-  `trusted_hash = "sha256:..."` per hook entry, keyed
-  `<hooks.json path>:<event_snake_case>:<group>:<index>`. amux does **not** write
-  those — what is hashed is undocumented, and a wrong hash is worse than an
-  absent one. **Open question for the live smoke test:** whether an untrusted
-  hook fires, prompts, or is skipped. A headless sandbox cannot answer a prompt,
-  so if approval is required, Codex sandbox state is degraded in practice
-  regardless of version.
+- **An untrusted Codex hook is silently skipped** — it does not fire and does not
+  prompt. Codex reads and validates `hooks.json` (it warns about timeouts) and
+  then runs nothing, saying nothing about trust. The only supported way through
+  is `codex --dangerously-bypass-hook-trust`, documented as "intended only for
+  automation that already vets hook sources", which amux is. **Without that flag
+  on the attach command, a sandboxed Codex reports no state at all.** Codex
+  writes no `trusted_hash` of its own, so waiting for self-trust is not an
+  option.
+- **Codex caps `SessionEnd` at 3s** and warns on every run when asked for more
+  ("clamping SessionEnd hook timeout to 3s"), hence
+  `HOOK_TIMEOUT_OVERRIDES`. Verified live: asking for 3 removes the warning while
+  hooks still fire.
+- **`sbx cp` sets the owner to the host uid**, so every copied file must be
+  chowned to the agent — see `sandbox_bootstrap._deliver`.
+- **A fresh sandbox is logged out** unless the host ran
+  `sbx secret set -g openai` / `claude` equivalents first. Hook dispatch does not
+  depend on it: `UserPromptSubmit` fires before the model call, which is what
+  made the trust probe possible at all with no credentials.
+- `codex features list` is a usable oracle — it reported `hooks stable true` from
+  the `config.toml` edit, confirming `enable_codex_hooks` works on the real
+  image. `codex features enable hooks` would let codex write that itself and is a
+  strictly more robust follow-up than editing TOML.
 
 ## Re-recording against a real image
 
     sbx create --name probe-claude claude /tmp/disposable-repo
+    sbx exec probe-claude sh -lc 'echo $HOME; id -un; id -gn; claude --version'
     sbx exec probe-claude sh -lc 'cat "$HOME/.claude/settings.json"'
-    sbx exec probe-claude sh -lc 'ls -la "$HOME"'
     sbx rm -f probe-claude
 
     sbx create --name probe-codex codex /tmp/disposable-repo
-    sbx exec probe-codex sh -lc 'codex --version; cat "$HOME/.codex/hooks.json"'
-    sbx exec probe-codex sh -lc 'cat "$HOME/.codex/config.toml"'
+    sbx exec probe-codex sh -lc 'echo $HOME; id -un; id -gn; codex --version'
+    sbx exec probe-codex sh -lc 'cat "$HOME/.codex/config.toml"; ls ~/.codex'
     sbx rm -f probe-codex
 
-Use a disposable repository, never a real checkout.
+Use a disposable repository, never a real checkout. Requires
+`sbx policy init <profile>` to have been run once on the host.
 
-Then, for each agent:
+Then:
 
-1. Overwrite the `*_template*` file with what the image actually ships.
-2. Correct `settings_relpath` / `enable_relpath` on `CLAUDE` / `CODEX` in
-   `sandbox_hooks.py` if a location differs, and set `paths_are_assumed=False`.
+1. Overwrite the `*_template.*` files with what the image actually ships. Leave
+   the `*_synthetic_*` ones alone.
+2. Correct `settings_relpath` / `enable_relpath` on `CLAUDE` / `CODEX` if a
+   location moved, and keep `paths_are_assumed=False` accurate.
 3. If the probed `codex --version` is older than `CODEX_HOOKS_MIN_VERSION` but
    still ships `hooks.json`, lower that constant to the probed version — it is
-   deliberately conservative, set to the earliest version actually verified.
-4. Re-run `pytest tests/test_sandbox_client_hooks.py`. Failures are real findings
+   set to the earliest version actually verified.
+4. Re-run `pytest tests/test_sandbox_client_hooks.py`. Failures are findings
    about the image, not test breakage.
 
-The remaining fixtures here are deliberate edge cases and stay as they are: they
-exist to prove the merge preserves settings it did not write.
+To re-test a hook change in a *live* sandbox, delete the installed hook document
+first: the merge is idempotent and will otherwise leave the existing amux entry
+in place, including its old command and timeout.

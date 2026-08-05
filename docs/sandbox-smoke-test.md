@@ -88,7 +88,31 @@ every step.
 > If `sbx policy ls` already succeeds, policy was initialized earlier. Record
 > which profile is active — it changes what step 7 should show.
 
-### 0d. Record the baseline
+### 0d. If you are testing a packaged amux, check the shim shipped
+
+Skip if you are running from a source checkout. Otherwise do this **before**
+anything else, because it is invisible to the automated suite by construction.
+
+A packaged amux is a PyInstaller bundle, which compiles amux's modules into the
+executable and ships no `.py` files. But spawning a sandbox copies
+`sandbox_client.py` into the microVM *as a file*, so the build has to ship that
+one as data (`--add-data src/amux/sandbox_client.py:amux`). Without it every
+sandbox spawn dies at shim installation.
+
+```sh
+# onedir (macOS default): the shim must be there as a real file
+ls -l dist/amux/_internal/amux/sandbox_client.py
+
+# either layout: ask amux itself, which resolves it the same way spawning does
+python3 -c 'from amux import sandbox_bootstrap as sb; print(sb.client_source())'
+```
+
+A `BootstrapError` naming `--add-data` means the build is mis-packaged, not that
+the sandbox runtime is broken. Two automated tests cover the halves of this — the
+resolver's frozen branch, and the Makefile carrying the flag — but neither can
+prove a *built* binary works, which is why it is a step here.
+
+### 0e. Record the baseline
 
 You cannot measure growth without a before. Take these **now**, with no
 sandboxes running:
