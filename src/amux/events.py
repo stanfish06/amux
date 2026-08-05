@@ -14,7 +14,10 @@ from amux.shared import DEFAULT_SOCKET, STATE_DIR  # noqa: F401  (re-export)
 STATE_OPTION = "@amux_state"
 
 EventKind = Literal["spawn", "busy", "stop", "notify", "exit"]
-AgentState = Literal["starting", "busy", "idle", "needs-input", "dead"]
+# `stopped` has no event kind: nothing an agent does produces it. It comes from
+# the execution row, when a sandbox has been stopped but not cleaned up, and it
+# is one of the six states the spec enumerates rather than a new invention.
+AgentState = Literal["starting", "busy", "idle", "needs-input", "stopped", "dead"]
 PaneKind = Literal["amux", "other"]
 
 STATE_BY_KIND: dict[EventKind, AgentState] = {
@@ -400,6 +403,9 @@ def pane_states(socket: str | None = None) -> list[dict]:
     for row in store.events_for_panes(list(facts_by_pane), since=floor):
         newest_by_pane[row["pane"]] = Event.from_row(row)  # rows arrive oldest first
 
+    # One query, not one per pane: this is the monitor's per-refresh view.
+    rows = store.worktrees_for_panes(list(facts_by_pane), since=floor)
+
     out = []
     for pane, facts in facts_by_pane.items():
         latest = in_incarnation(newest_by_pane.get(pane), facts.boundary)
@@ -413,7 +419,12 @@ def pane_states(socket: str | None = None) -> list[dict]:
                 "name": facts.name,
                 "label": facts.label,
                 "state": (
-                    resolve_state(alive=True, option=facts.state_option, latest=latest)
+                    runtime_aware_state(
+                        resolve_state(
+                            alive=True, option=facts.state_option, latest=latest
+                        ),
+                        rows.get(pane),
+                    )
                     if facts.kind == "amux"
                     else None
                 ),
@@ -422,9 +433,46 @@ def pane_states(socket: str | None = None) -> list[dict]:
                     if latest
                     else None
                 ),
+                **runtime_identity(rows.get(pane)),
             }
         )
     return out
+
+
+def runtime_identity(row) -> dict:
+    """Runtime fields for a monitor row, or {} for a host agent.
+
+    The monitor and `GET /v1/events/state` both read `pane_states`, so this is
+    what makes a sandboxed agent distinguishable from a host one in the views
+    that show every pane at once. Omitted entirely for host agents, so their
+    monitor rows are unchanged.
+    """
+    if row is None:
+        return {}
+    from amux import core
+
+    return core.runtime_fields(row)
+
+
+def runtime_aware_state(state: AgentState | None, row) -> AgentState | None:
+    """Fold the execution's runtime lifecycle into its resolved pane state.
+
+    A stopped sandbox's pane still holds whatever state its last event implied,
+    which would show a VM that is not running as `idle` -- indistinguishable
+    from one that is running and waiting. The row knows better, so it wins.
+    """
+    if row is None or state is None:
+        return state
+    keys = row.keys() if hasattr(row, "keys") else row
+    if "runtime" not in keys or "runtime_status" not in keys:
+        return state
+    # Gated on the runtime, not just the status: `stopped` describes a VM, and
+    # a host agent has none. A host row carrying that status is malformed, and
+    # reporting it as stopped would invent a state the host runtime cannot be
+    # in.
+    if row["runtime"] != "host" and row["runtime_status"] == "stopped":
+        return "stopped"
+    return state
 
 
 def wait(
