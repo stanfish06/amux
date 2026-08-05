@@ -179,10 +179,38 @@ what guards host output from gaining fields, and it should stay for that. It is
 an argument for pinning deliberately, at the boundary you actually mean to
 freeze, rather than by default.
 
-A related detail: `assert set(DEFAULT_WAIT_STATES) <= set(AGENT_STATES)` stays
-true when `stopped` is added to the state vocabulary, where an equality would
-not have. That one was subset-shaped by luck rather than by design, and is
-being left subset-shaped now that the reason is known.
+Two more from the same suite, which together make the rule concrete rather than
+a slogan.
+
+**An equality can be an equivalence.** The note-receipt test asserts
+
+```python
+assert set(note) == set(stored) | {"name"}
+```
+
+That looks pinned but is not: it compares the receipt's keys to the *store
+row's* keys, so a new `notes` column moves both sides and it survives. It is the
+only pinned-looking assertion in those note tests, and it is pinned-looking for
+exactly that reason.
+
+**And deliberate pinning looks identical to accidental pinning.** Two adjacent
+lines:
+
+```python
+assert cs.DEFAULT_WAIT_STATES == ("idle", "needs-input", "dead")   # deliberate
+assert set(cs.DEFAULT_WAIT_STATES) <= set(cs.AGENT_STATES)        # accidental
+```
+
+The first pins a constant the service itself owns, so adding `stopped` to it
+*should* fail and the owner should answer for it — that is the qualification
+above, working as intended. The second stays true when `stopped` joins the state
+vocabulary, where an equality would not have; it was subset-shaped by luck, and
+is being left subset-shaped now that the reason is known.
+
+The two sit one line apart in the same test, which is a fair picture of how
+little of this was designed up front. The rule is worth having precisely because
+the shapes are indistinguishable on sight — you can only tell them apart by
+asking whose boundary is being frozen.
 
 ## What this record does not establish
 
