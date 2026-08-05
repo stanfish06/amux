@@ -11,9 +11,12 @@ quietly ignored.
 
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 
-from amux import cli, context_service, runtime, sandbox
+from amux import cli, context_service, runtime, sandbox, store
 
 
 # --- the backend is optional, and says so ---
@@ -409,3 +412,97 @@ def test_the_source_launcher_uses_the_module_form(monkeypatch):
     argv = context_service.launch_argv(context_service.ServiceConfig(port=1234))
     assert argv[1] == "-m"
     assert argv[2] == "amux.context_service"
+
+# --- spg without -p (note #78 finding 3) ---
+
+
+class _Session:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _Sessions:
+    def __init__(self, session) -> None:
+        self._session = session
+
+    def get(self, session_name=None, default=None):
+        if self._session is not None and self._session.name == session_name:
+            return self._session
+        return default
+
+
+class _Server:
+    def __init__(self, session=None) -> None:
+        self.sessions = _Sessions(session)
+
+
+@pytest.fixture
+def spawned(monkeypatch):
+    """Capture what the CLI hands `core.spawn_agent_grid`, without tmux."""
+    calls: list[dict] = []
+
+    def capture(session, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(task_name=kwargs.get("window_name", ""))
+
+    monkeypatch.setattr(cli.core, "get_server", lambda name: _Server(_Session("ws")))
+    monkeypatch.setattr(cli.core, "spawn_agent_grid", capture)
+    return calls
+
+
+def _register(repo: str, *, workspace: str = "ws", task: str = "t0", name: str = "agent"):
+    return store.register_worktree(
+        pane="%1",
+        workspace=workspace,
+        task=task,
+        agent="claude",
+        name=name,
+        path=f"/state/worktrees/{workspace}/{task}/{name}",
+        branch=f"amux/{workspace}/{task}/{name}",
+        repo=repo,
+    )
+
+
+def test_spg_without_a_path_resolves_the_workspace_directory(spawned, git_repo):
+    """`-p` is documented as defaulting to the workspace dir, and nothing used to
+    implement that: the None reached preflight, which cannot find a repository."""
+    _register(str(git_repo))
+    assert cli.main(["spg", "ws", "new-task"]) == 0
+    assert spawned[0]["cwd"] == str(git_repo)
+
+
+def test_spg_resolves_a_primary_checkout_not_an_agent_worktree(spawned, git_repo):
+    """The trap: a pane's current path is the agent's own worktree, a *secondary*
+    checkout that `sbx create --clone` refuses and whose `repo_root` is itself.
+    The registry records the primary checkout, which is what this must return."""
+    worktree_id = _register(str(git_repo))
+    row = store.worktree_by_id(worktree_id)
+    assert cli.main(["spg", "ws", "new-task"]) == 0
+    resolved = spawned[0]["cwd"]
+    assert resolved != row["path"]
+    assert (Path(resolved) / ".git").is_dir(), "must be a primary checkout"
+
+
+def test_spg_with_an_explicit_path_still_wins(spawned, git_repo, tmp_path):
+    _register(str(git_repo))
+    explicit = tmp_path / "elsewhere"
+    explicit.mkdir()
+    assert cli.main(["spg", "ws", "new-task", "-p", str(explicit)]) == 0
+    assert spawned[0]["cwd"] == str(explicit)
+
+
+def test_spg_without_a_path_or_a_registry_row_passes_none(spawned):
+    """A workspace spawned outside a repository has no recorded directory, and
+    inventing one would be worse than today's behaviour."""
+    assert cli.main(["spg", "ws", "new-task"]) == 0
+    assert spawned[0]["cwd"] is None
+
+
+def test_spg_prefers_the_most_recent_repository_for_the_workspace(spawned, git_factory):
+    """Workspace names are reusable tmux labels, so two repositories can share
+    one. The newest row is the one this workspace was last spawned from."""
+    old, new = git_factory(), git_factory()
+    _register(str(old), name="older")
+    _register(str(new), name="newer")
+    assert cli.main(["spg", "ws", "new-task"]) == 0
+    assert spawned[0]["cwd"] == str(new)
