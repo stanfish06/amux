@@ -227,6 +227,34 @@ little of this was designed up front. The rule is worth having precisely because
 the shapes are indistinguishable on sight — you can only tell them apart by
 asking whose boundary is being frozen.
 
+## The question that caught the most
+
+Three claims in this change were overstated, and the same question found all
+three. It is not "did you verify it" — everyone answers yes to that — but:
+
+> **Verified against what?**
+
+- The integration merge in this document was offered as dogfooding. It ran the
+  `amux` on `PATH`, a binary built before this work with no `doctor` subcommand
+  at all, so it exercised the pre-change host path.
+- "Integrate is one-shot, so cleanup leaves you stranded" rested on reading a
+  filter. Measured, half of it was already fixed, and the surviving half was
+  *worse* than described in a different way — see below.
+- A three-pane assertion was said to guard host output from gaining fields. It
+  guarded the *no-execution-row* case; the host-row path was never reached, and
+  a mutation passed against it.
+
+A fourth is the same question applied to a property rather than a fact: the
+spec-coverage map was reported complete because it had been built
+scenario-by-scenario. That was true, but unknown to be true until a checker
+extracted all 35 scenario titles and tested each for representation. Not "is it
+complete" but *against what did you check completeness*.
+
+The related habit worth keeping: **a test that arrives with its own fix is the
+most likely place for a test that cannot fail**, because it was written against
+already-correct code and nobody has seen it red. Every such test in this change
+was mutated before its row was marked covered.
+
 ## What this record does not establish
 
 - **Whether a real sandboxed agent works end to end.** Every check above is
