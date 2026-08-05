@@ -145,3 +145,130 @@ run it.
 `sbx ls --json` empty; smoke tmux server gone; disposable repository and isolated
 state directory removed; live `context.db` unchanged at 26 worktree rows with zero
 `sbxsmoke` rows; live tmux sessions intact.
+
+---
+
+# Re-run of 2026-08-05 — the two rows finding 1 blocked
+
+Scope: teardown-after-integrate and reattachment only. Everything else in the 16
+above stands unrepeated. Run on the integration tree containing misty-panda
+`49b222d` (select sandboxes by VM presence, not merge status) and `dc487a7`, with
+800 tests passing. Same isolation discipline: own `XDG_STATE_HOME`, own tmux
+socket, disposable repo outside every amux worktree.
+
+## Finding 1 is fixed
+
+Reproduced the exact sequence — spawn 2 agents, commit in one, `integrate` (both
+rows became `status=merged`, `runtime_status=running`), then
+`kw --clean --force`. Result: **`sbx ls --json` empty, both microVMs actually
+gone**, and the registry now reads `status=merged` with
+`runtime_status='removed'` — each axis answering its own question.
+
+Also verified in the same pass: host `sandbox-*` remotes dropped (0 remaining),
+2/2 capabilities revoked, the integration branch keeps the merged work, and the
+committed tip survives as `refs/amux/sandboxes/<box>/<branch>` after its VM is
+destroyed.
+
+`kw` a second time exits 1 with "workspace not found" — the tmux session is gone,
+so the command has nothing to address. Idempotent at the sandbox level (nothing
+left to remove), not re-runnable as a command.
+
+## Reattachment: the stop half works, the reattach half is unreachable
+
+`kg` without `--clean` now **stops** the VM and leaves it inspectable at the same
+id, with `status=active` and `runtime_status='stopped'`. That is the half that
+could not be measured at all before.
+
+The reattach itself never happens through the CLI. Sandbox identity is
+`sandbox_name(workspace, task, agent_name, repo)`, and agent names are drawn by
+`core.random_name(_taken_names(session))` — from **live tmux panes only, never the
+registry**. After `kg` the prior name is neither taken nor preferred, so a respawn
+picks randomly from ~1600 combinations:
+
+```
+before kg:   amux-...-t0-ruby-gecko-...   id ce5e6670-...  running
+after kg:    same name, same id,                          stopped
+after spw:   amux-...-t0-dusty-deer-...   id 94f1cb9f-...  running   <- NEW VM
+             amux-...-t0-ruby-gecko-...   id ce5e6670-...  stopped   <- orphaned
+```
+
+The mechanism itself is correct, and that distinction matters — driving the
+runtime's own lookups directly, `_prior_row` **and** `sandbox.find` both resolve
+for the stopped sandbox, so the reattach branch would fire if a pane were ever
+given that agent name. Nothing steers one there.
+
+## Three further findings from the same two steps
+
+**Cleanup cannot preserve the tip of a stopped sandbox.** The durable-ref fetch
+needs a running VM: a sandbox cleaned while `running` got its ref, one cleaned
+while `stopped` got none, and the failure surfaced only as a bare
+`fatal: Could not read from remote repository` with no mention of which sandbox or
+that its tip was unsaved. With `--force` that is a data-loss path. Confirmed the
+commit was intact inside the VM at the time, so it is unpreserved rather than
+lost — until the VM is removed.
+
+**Non-force cleanup protects the work but strands the VMs.** `sbx rm` without
+`-f` refuses a clone-mode sandbox, so `kw --clean` left both VMs in place and
+correctly did **not** mark the rows removed. But it printed
+`killed workspace` and exited **0**, and it killed the tmux session anyway — after
+which `kw` reports "workspace not found" and amux can no longer address those
+sandboxes at all. Only `sbx rm -f` clears them.
+
+**A refused removal restarts a stopped VM.** `purple-fox` was `stopped`; after the
+failed cleanup `sbx ls` reported it `running` while the registry still said
+`stopped`, so the two disagree until something re-syncs.
+
+## The monitor, run against a sandbox for the first time
+
+It starts and works (`tui/` needed `npm install && npm run build`; both clean).
+The tree renders workspace → task → agent, and **pane preview shows the agent's
+real terminal from inside the microVM**.
+
+Sandbox identity renders *only if the `amux` on PATH is current*. The TUI shells
+out via `execFile` to `amux`, and this host's installed binary is an older frozen
+build whose `event state --json` stops at `last_event`. With that binary the agent
+detail shows no runtime; with a current `amux` first on PATH the same panel shows
+`Runtime: docker-sandbox  Status: running  Sandbox: amux-<ws>-<task>-<agent>-<hash>`.
+So verifying TUI work from a checkout can silently measure the installed build.
+
+Two rendering observations, neither about sandboxes: labels and values collide
+without a gap (`Task: t0Workspace:sbxsmoke5`, and the runtime row wraps
+mid-word), consistent with the known Ink `Fragment`/`gap` problem. And a stopped
+sandbox is **absent** from the tree rather than badged — `kg` removes the pane, and
+the tree is built from panes, so there is no row for a stopped-state marker to
+attach to. A live pane whose VM was stopped out-of-band still renders `[IDLE ]`,
+because pane state comes from `@amux_state`, which nothing updates when the VM
+stops outside amux.
+
+## A leaked daemon of mine, and whether it touched any of this
+
+`context-service start` detaches on purpose, and this run's service (pid 4259)
+survived to the end and squatted the default port 47317, failing two of
+swift-crane's tests. My fault, same class as the orphaned `sbx exec` in run 1: a
+cleanup gap in my own procedure, not a product defect. Stopped through
+`context-service stop`, port confirmed free.
+
+It did not affect any measurement, for two independent reasons. Nothing in this
+re-run went through the service — integrate, cleanup, registry state, `sbx ls`,
+durable refs and reattachment are all host-side — and the service was only needed
+for preflight's health check to pass. And it was *my* run's service on *this*
+run's isolated database: `context-service start` reported pid 4259 itself, with
+47317 verified free beforehand, so nothing else was adopted. The run-1 resource
+figures are also unaffected: they were taken after run 1's service was stopped,
+and per-VM attribution greps `containerd-shim-nerdbox-v1`, which a Python service
+does not match.
+
+It also exposed a real test-isolation defect in swift-crane's file — two
+lifecycle tests exercised the flagless `start` path against the global default
+port — which they fixed with a private port and an unconditional teardown, and
+both now pass with the squatter still listening. Better evidence than removing it
+would have been.
+
+## Teardown
+
+`sbx ls --json` empty; policy rule `92f2c973-0138-4a79-8032-048f05582b80`
+(localhost:47317) added and removed, allow count 192 → 193 → 192 with
+`sbx policy check` back to `Denied`; context service stopped and port free; smoke
+tmux server killed; disposable repo and isolated state removed; live `context.db`
+unchanged at 26 worktree rows with zero `sbxsmoke*` rows; live tmux sessions
+intact.
