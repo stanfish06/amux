@@ -370,8 +370,22 @@ def clean_task(workspace: str, task: str, *, force: bool = False) -> list[str]:
             )
             continue
 
+        # Re-resolved AFTER waking, never taken from the row: `sbx stop` tears
+        # down both the published port and the host-side `sandbox-<name>`
+        # remote, and waking republishes on a DIFFERENT host port without
+        # restoring the remote. So a sandbox that has ever been stopped has no
+        # remote to fetch by name, while its commits sit perfectly reachable at
+        # the new port.
+        source = sandbox.git_url(name, repo)
+        if source is None:
+            give_up(
+                f"{name}: it is running but publishes no git port, so {branch} "
+                "cannot be read; it is NOT saved on the host"
+            )
+            continue
+
         try:
-            tip = worktree.sandbox_branch_tip(repo, name, branch)
+            tip = worktree.sandbox_branch_tip(repo, name, branch, source=source)
         except worktree.WorktreeError as exc:
             # Unreachable, so whether it holds commits is unknown. `--force`
             # authorises losing *uncommitted* work; it does not authorise
@@ -386,7 +400,7 @@ def clean_task(workspace: str, task: str, *, force: bool = False) -> list[str]:
             print(f"amux: {name}: nothing committed on {branch} to preserve")
         else:
             try:
-                worktree.fetch_sandbox_branch(repo, name, branch)
+                worktree.fetch_sandbox_branch(repo, name, branch, source=source)
             except worktree.WorktreeError as exc:
                 give_up(
                     f"{name}: {branch} is at {tip[:12]} but could not be fetched "

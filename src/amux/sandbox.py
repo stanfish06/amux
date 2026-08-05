@@ -276,6 +276,47 @@ def exists(name: str) -> bool:
     return find(name) is not None
 
 
+#: The git daemon `sbx create --clone` runs inside the VM. The sandbox-side port
+#: is stable; the HOST port it is published on is reassigned on every restart,
+#: which is why a remote recorded at create time cannot be trusted later.
+GIT_DAEMON_PORT = 9418
+
+
+def published_ports(entry: dict[str, Any]) -> list[dict[str, Any]]:
+    """Ports from an `sbx ls --json` entry.
+
+    `.get` rather than `[...]`: while a sandbox is stopped the `ports` key is
+    absent entirely rather than present-and-empty, so indexing it raises for
+    exactly the sandboxes cleanup cares about most.
+    """
+    ports = entry.get("ports") or []
+    return [p for p in ports if isinstance(p, dict)]
+
+
+def git_url(name: str, repo: str) -> str | None:
+    """The git URL the sandbox is currently serving its clone on, or None.
+
+    Read fresh from `sbx ls --json` every time, never remembered: `sbx stop`
+    tears down both the published port and the host-side `sandbox-<name>`
+    remote, and waking the sandbox republishes on a DIFFERENT host port without
+    restoring the remote. Fetching by the recorded remote name therefore fails
+    on any sandbox that has ever been stopped -- while the commits are perfectly
+    reachable at the new port.
+    """
+    entry = find(name)
+    if entry is None:
+        return None
+    for port in published_ports(entry):
+        if port.get("sandbox_port") != GIT_DAEMON_PORT:
+            continue
+        host = port.get("host_ip") or "127.0.0.1"
+        published = port.get("host_port")
+        if not published:
+            continue
+        return f"git://{host}:{published}/{os.path.basename(repo.rstrip('/'))}"
+    return None
+
+
 def diagnose() -> dict[str, Any]:
     """`sbx diagnose -o json`, parsed.
 

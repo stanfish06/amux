@@ -423,7 +423,9 @@ def sandbox_tracking_ref(sandbox_name: str, branch: str) -> str:
     return f"refs/amux/sandboxes/{sandbox_name}/{branch}"
 
 
-def sandbox_branch_tip(repo: str, sandbox_name: str, branch: str) -> str | None:
+def sandbox_branch_tip(
+    repo: str, sandbox_name: str, branch: str, *, source: str | None = None
+) -> str | None:
     """The commit the sandbox has on `branch`, or None if it has no such branch.
 
     Raises `WorktreeError` when the remote cannot be reached at all, which is a
@@ -435,24 +437,34 @@ def sandbox_branch_tip(repo: str, sandbox_name: str, branch: str) -> str | None:
     separates unreachable from absent, and empty output means the branch simply
     is not there.
     """
-    proc = _git(repo, "ls-remote", sandbox_remote(sandbox_name), branch, check=False)
+    proc = _git(
+        repo, "ls-remote", source or sandbox_remote(sandbox_name), branch, check=False
+    )
     if proc.returncode != 0:
         raise WorktreeError(proc.stderr.strip() or proc.stdout.strip())
     out = proc.stdout.strip()
     return out.split()[0] if out else None
 
 
-def fetch_sandbox_branch(repo: str, sandbox_name: str, branch: str) -> str:
+def fetch_sandbox_branch(
+    repo: str, sandbox_name: str, branch: str, *, source: str | None = None
+) -> str:
     """Fetch a sandbox's committed branch to a durable local ref, and return it.
 
     Raises `WorktreeError` with git's own message when the sandbox is stopped,
     already removed, or has never committed the branch -- those are different
     problems and the caller reports them rather than papering over them.
     """
-    remote = sandbox_remote(sandbox_name)
     ref = sandbox_tracking_ref(sandbox_name, branch)
+    # `source` may be a URL rather than a remote name: a sandbox that has been
+    # stopped no longer has a host-side remote, and git fetches either.
     proc = _git(
-        repo, "fetch", "--no-tags", remote, f"+{branch}:{ref}", check=False
+        repo,
+        "fetch",
+        "--no-tags",
+        source or sandbox_remote(sandbox_name),
+        f"+{branch}:{ref}",
+        check=False,
     )
     if proc.returncode != 0:
         raise WorktreeError(proc.stderr.strip() or proc.stdout.strip())

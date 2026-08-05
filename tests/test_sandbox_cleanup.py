@@ -23,6 +23,24 @@ from test_sandbox_runtime import (  # noqa: F401 - `minted` is a fixture
 
 DIRTY = " M src/thing.py\n?? notes.txt\n"
 
+#: name -> the clone standing in for that sandbox's git daemon.
+CLONES: dict[str, str] = {}
+
+
+@pytest.fixture(autouse=True)
+def local_git_url(monkeypatch):
+    """Resolve a sandbox's git source to its clone path instead of a URL.
+
+    The real `git_url` returns `git://<host>:<port>/<repo>` served by a daemon
+    inside the VM, which a test cannot run. git fetches a path or a URL
+    identically, so resolving to the clone exercises the whole cleanup path for
+    real -- while `git_url`'s own parsing is pinned separately against the
+    captured `sbx ls --json` output, which is the part that could drift.
+    """
+    CLONES.clear()
+    monkeypatch.setattr(sandbox, "git_url", lambda name, repo: CLONES.get(name))
+    return CLONES
+
 
 def rows():
     return {r["name"]: r for r in store.worktrees_for("ws", "t0")}
@@ -46,6 +64,7 @@ def wire_remote(git_repo, tmp_path, agent_name, *, commits=True):
         git(clone, "add", f"{agent_name}.txt")
         git(clone, "commit", "-qm", f"{agent_name} work")
     git(git_repo, "remote", "add", worktree.sandbox_remote(name), str(clone))
+    CLONES[name] = str(clone)
     return clone
 
 
@@ -102,9 +121,9 @@ def test_the_committed_tip_is_preserved_before_the_sandbox_is_removed(
     real_fetch = worktree.fetch_sandbox_branch
     real_remove = sandbox.remove
 
-    def fetch(repo, name, branch):
+    def fetch(repo, name, branch, **kwargs):
         order.append("fetch")
-        return real_fetch(repo, name, branch)
+        return real_fetch(repo, name, branch, **kwargs)
 
     def remove(name, force=False):
         order.append("remove")
@@ -236,9 +255,9 @@ def test_force_still_preserves_the_committed_tip(git_repo, fake_sbx, tmp_path, m
     fetched: list[str] = []
     real = worktree.fetch_sandbox_branch
 
-    def spy(repo, name, branch):
+    def spy(repo, name, branch, **kwargs):
         fetched.append(name)
-        return real(repo, name, branch)
+        return real(repo, name, branch, **kwargs)
 
     monkeypatch.setattr(worktree, "fetch_sandbox_branch", spy)
     runtime.clean_task("ws", "t0", force=True)
@@ -450,8 +469,9 @@ def test_an_unreadable_tip_refuses_even_with_force(git_repo, fake_sbx, tmp_path)
     names = names_for(git_repo, "alpha")
     ready(fake_sbx, names)
     build(git_repo, fake_sbx, "alpha", tmp_path=tmp_path)
-    # The VM is gone, so its remote answers nothing.
+    # The VM's git daemon answers nothing.
     git(git_repo, "remote", "set-url", worktree.sandbox_remote(names[0]), "/nonexistent")
+    CLONES[names[0]] = "/nonexistent"
 
     with pytest.raises(sandbox.SandboxError) as caught:
         runtime.clean_task("ws", "t0", force=True)
@@ -748,8 +768,9 @@ def test_a_fetch_failure_also_restores_a_stopped_vm(git_repo, fake_sbx, tmp_path
     fake_sbx.respond("stop")
     build(git_repo, fake_sbx, "alpha", tmp_path=tmp_path)
     runtime.stop_task("ws", "t0")
-    # The remote cannot be read, so cleanup gives up before `sbx rm`.
+    # The tip cannot be read, so cleanup gives up before `sbx rm`.
     git(git_repo, "remote", "set-url", worktree.sandbox_remote(names[0]), "/nonexistent")
+    CLONES[names[0]] = "/nonexistent"
     stops_before = len([c for c in fake_sbx.calls if c[0] == "stop"])
 
     with pytest.raises(sandbox.SandboxError, match="NOT saved on the host"):
@@ -778,3 +799,70 @@ def test_a_wake_failure_does_not_try_to_stop_what_never_started(
         runtime.clean_task("ws", "t0", force=True)
     # It is still recorded stopped, which is what it is.
     assert rows()["alpha"]["runtime_status"] == "stopped"
+
+
+def test_a_stopped_sandbox_is_cleaned_after_sbx_drops_its_remote(
+    git_repo, fake_sbx, tmp_path
+):
+    """The measured A case, end to end. `sbx stop` tears down the published port
+    AND the host-side `sandbox-<name>` remote, and waking republishes on a new
+    host port WITHOUT restoring the remote -- so fetching by the recorded remote
+    name fails on any sandbox that has ever been stopped, while its commits are
+    perfectly reachable at the new port.
+
+    The remote is deleted here rather than left in place: with it present, a
+    fetch by name succeeds and the test cannot tell whether the URL was used at
+    all. That is precisely why the first version of this fix looked verified.
+    """
+    names = names_for(git_repo, "alpha")
+    with_status(fake_sbx, names, {})
+    ready(fake_sbx, names)
+    fake_sbx.respond("stop")
+    build(git_repo, fake_sbx, "alpha", tmp_path=tmp_path)
+    runtime.stop_task("ws", "t0")
+    # What sbx actually does on stop.
+    git(git_repo, "remote", "remove", worktree.sandbox_remote(names[0]))
+    assert worktree.sandbox_remote(names[0]) not in worktree._git(  # noqa: SLF001
+        str(git_repo), "remote"
+    ).stdout
+
+    removed = runtime.clean_task("ws", "t0")
+
+    assert removed == names
+    # The committed tip really was preserved, by content and not just by ref.
+    ref = worktree.sandbox_tracking_ref(names[0], "amux/ws/t0/alpha")
+    tip = git(git_repo, "rev-parse", ref)
+    assert git(git_repo, "show", "--format=%s", "-s", tip) == "alpha work"
+    assert rows()["alpha"]["status"] == "removed"
+
+
+def test_the_git_source_is_resolved_after_waking_not_before(
+    git_repo, fake_sbx, tmp_path, monkeypatch
+):
+    """The port only exists once the VM is running, so resolving it before the
+    wake would always come back empty."""
+    names = names_for(git_repo, "alpha")
+    with_status(fake_sbx, names, {})
+    ready(fake_sbx, names)
+    fake_sbx.respond("stop")
+    build(git_repo, fake_sbx, "alpha", tmp_path=tmp_path)
+    runtime.stop_task("ws", "t0")
+
+    order: list[str] = []
+    real = sandbox.git_url
+    monkeypatch.setattr(
+        sandbox, "git_url",
+        lambda name, repo: (order.append("resolve"), CLONES.get(name))[1],
+    )
+    real_exec = sandbox.Sandbox.exec
+
+    def spy_exec(self, argv, *, user=None):
+        if list(argv) == ["true"]:
+            order.append("wake")
+        return real_exec(self, argv, user=user)
+
+    monkeypatch.setattr(sandbox.Sandbox, "exec", spy_exec)
+    runtime.clean_task("ws", "t0")
+
+    assert order.index("wake") < order.index("resolve")
+    assert real is not sandbox.git_url
