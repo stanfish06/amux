@@ -174,7 +174,24 @@ class HostRuntime:
         cwd: str | None,
     ) -> dict[str, str]:
         """Per-agent git worktrees when the target dir is a repo. Fail soft: a
-        non-repo target keeps today's shared-directory behavior."""
+        non-repo target keeps today's shared-directory behavior.
+
+        A missing `cwd` is a different thing from a non-repo one and used to
+        share this branch silently: a non-repo target is a deliberate choice,
+        while an unresolved directory means nobody worked out where the grid
+        lives. That combination -- a known workspace and task but no path --
+        skipped per-agent worktrees for every `spg` without `-p`, and tmux
+        inheritance left the panes in a shared directory so it looked correct.
+        It is still fail-soft, because `cwd` is part of a public signature and
+        callers may legitimately pass None, but it no longer does so quietly.
+        """
+        if workspace and task and not cwd:
+            print(
+                "amux: no directory resolved for "
+                f"{workspace}/{task}; agents will share one directory instead "
+                "of getting a worktree each (pass -p, or spawn from the "
+                "workspace directory)"
+            )
         if not (workspace and task and cwd):
             return {}
         repo = worktree.repo_root(cwd)
