@@ -149,6 +149,41 @@ openspec validate prototype-sandbox-agents-context-service
 Change 'prototype-sandbox-agents-context-service' is valid
 ```
 
+## Test shapes: one that survived a later change, and one that did not
+
+Worth recording because it decides who pays for a change later, and it came out
+of an actual collision rather than a style preference.
+
+The same test file asserts the `/v1/events/state` payload two ways:
+
+```python
+# pinned to a literal shape
+assert set(payload["panes"][0]) == {"pane", "kind", …, "last_event"}
+
+# equivalent to the native call
+assert payload["panes"] == [
+    p for p in events.pane_states("amux-root") if p["workspace"] == "proj"
+]
+```
+
+Adding runtime identity to `pane_states` breaks the first and leaves the second
+untouched, because both sides of an equivalence move together. The endpoints
+written as native-equivalence assertions — `/v1/context`, `/v1/notes` — never
+came up while working out the consequences of that change; the one pinned
+literal was the only place it bit.
+
+So: **a test pinned to a literal shape becomes someone else's maintenance
+burden, while the same test written as an equivalence to the native call does
+not.** That is not an argument against pinning — the pinned shape is exactly
+what guards host output from gaining fields, and it should stay for that. It is
+an argument for pinning deliberately, at the boundary you actually mean to
+freeze, rather than by default.
+
+A related detail: `assert set(DEFAULT_WAIT_STATES) <= set(AGENT_STATES)` stays
+true when `stopped` is added to the state vocabulary, where an equality would
+not have. That one was subset-shaped by luck rather than by design, and is
+being left subset-shaped now that the reason is known.
+
 ## What this record does not establish
 
 - **Whether a real sandboxed agent works end to end.** Every check above is
