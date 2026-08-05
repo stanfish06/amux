@@ -308,6 +308,10 @@ def create(
     return Sandbox(name=name, id=str(entry.get("id") or ""), entry=entry)
 
 
+# Codex SKIPS an untrusted hook silently — no prompt, no warning — so without
+# this a sandboxed Codex never reports state and reads permanently idle. Safe
+# only because amux authors the sole hooks.json and the VM is the boundary;
+# revisit if user-supplied hooks are ever allowed.
 HOOK_TRUST_FLAG = "--dangerously-bypass-hook-trust"
 
 AGENT_ATTACH_ARGS: dict[str, tuple[str, ...]] = {"codex": (HOOK_TRUST_FLAG,)}

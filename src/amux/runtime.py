@@ -173,6 +173,9 @@ GONE_RUNTIME_STATUSES = frozenset({"removed", "failed"})
 
 
 def sandbox_rows(workspace: str, task: str) -> list[dict]:
+    # Selects on the RUNTIME axis, never on `status`. `status` answers "was this
+    # work merged"; `runtime_status` answers "does a VM exist". Asking the first
+    # is how an integrated task leaked every sandbox it had.
     return [
         dict(row)
         for row in store.worktrees_for(workspace, task)

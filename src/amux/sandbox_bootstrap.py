@@ -332,5 +332,9 @@ def _deliver(
     mode: str,
 ) -> None:
     _copy(ops, token, source, destination)
+    # chown MUST precede chmod: sbx cp lands files under the HOST uid, and the
+    # agent cannot chmod what it does not own. Note chmod on an already-correct
+    # mode succeeds anyway — coreutils elides the syscall — so a missing chown
+    # surfaces two steps later at the next file, not here.
     _exec(ops, token, ["chown", who.owner, destination], user="root")
     _exec(ops, token, ["chmod", mode, destination])
