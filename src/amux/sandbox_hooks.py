@@ -83,6 +83,11 @@ CODEX_UNMATCHED_EVENTS: frozenset[str] = frozenset()
 
 #: Seconds. A hook that cannot reach the host must not stall the agent.
 HOOK_TIMEOUT = 10
+#: Per-agent, per-event overrides where the agent imposes its own ceiling.
+#: Codex caps SessionEnd at 3s and warns on every run when asked for more
+#: ("clamping SessionEnd hook timeout to 3s"), observed on codex-cli 0.146.0.
+#: Asking for what it will grant keeps that warning out of the agent's output.
+HOOK_TIMEOUT_OVERRIDES: dict[tuple[str, str], int] = {("codex", "SessionEnd"): 3}
 
 #: Where Codex's feature switch lives, and the table it lives in.
 CODEX_FEATURES_TABLE = "features"
@@ -112,11 +117,10 @@ class HookMergeError(Exception):
 class AgentHooks:
     """Where and how one agent's hook configuration is written in a sandbox.
 
-    `paths_are_assumed` is the honest part: the formats above come from verified
-    working configuration, but the *locations* inside Docker's agent images were
-    not inspectable when this was written (`sbx policy init` had not been run, so
-    no sandbox could be created). They are the documented defaults. Re-record
-    them against a live image and flip the flag; nothing else has to change.
+    `paths_are_assumed` records whether the *locations* have been checked against
+    a real Docker image, as opposed to taken from documented defaults. Both were
+    verified on 2026-08-05 against `docker/sandbox-templates` — see the fixtures
+    README for what was observed and how to re-record it.
     """
 
     agent: str
@@ -128,18 +132,26 @@ class AgentHooks:
     paths_are_assumed: bool = True
 
 
+#: Verified in `docker/sandbox-templates:claude-code-docker`, Claude Code
+#: 2.1.221: runs as `agent` with `HOME=/home/agent`, and ships a
+#: `~/.claude/settings.json` carrying UI preferences and no `hooks` key.
 CLAUDE = AgentHooks(
     agent="claude",
     settings_relpath=".claude/settings.json",
     events=CLAUDE_EVENT_KINDS,
     unmatched_events=CLAUDE_UNMATCHED_EVENTS,
+    paths_are_assumed=False,
 )
+#: Verified in `docker/sandbox-templates:codex-docker`, codex-cli 0.146.0: runs
+#: as `agent` with `HOME=/home/agent`, ships a `~/.codex/config.toml` and *no*
+#: `hooks.json`, so amux creates that file rather than merging into one.
 CODEX = AgentHooks(
     agent="codex",
     settings_relpath=".codex/hooks.json",
     events=CODEX_EVENT_KINDS,
     unmatched_events=CODEX_UNMATCHED_EVENTS,
     enable_relpath=".codex/config.toml",
+    paths_are_assumed=False,
 )
 
 HOOKS_BY_AGENT: dict[str, AgentHooks] = {CLAUDE.agent: CLAUDE, CODEX.agent: CODEX}
@@ -194,6 +206,12 @@ def merge_hook_settings(
 
     Idempotent: an event that already carries an amux hook is left alone, so
     re-running bootstrap cannot stack duplicates.
+
+    The cost of that, which bit during the live probe: re-running bootstrap will
+    *not* update an amux hook whose command or timeout has since changed, because
+    it sees the marker and skips. Sandboxes are created fresh, so this is fine
+    today — but a hook already installed in a live sandbox has to be removed
+    before a changed one will take.
     """
     if existing is not None and not isinstance(existing, dict):
         raise HookMergeError(
@@ -219,7 +237,9 @@ def merge_hook_settings(
             {
                 "type": "command",
                 "command": emit_command(shim, config_path, kind, adapter.agent),
-                "timeout": HOOK_TIMEOUT,
+                "timeout": HOOK_TIMEOUT_OVERRIDES.get(
+                    (adapter.agent, event), HOOK_TIMEOUT
+                ),
             }
         ]
         groups.append(group)
