@@ -627,3 +627,154 @@ def test_kw_attempts_every_task_before_reporting(monkeypatch):
 
     assert seen == ["t0", "t1", "t2"]
     assert "t1-box" in str(caught.value)
+
+
+# --- reattachment leaves two rows naming one sandbox ---
+#
+# Measured live: `kg` then a respawn leaves the dead pane's row alongside the
+# live one, both naming the same VM. Iterating ROWS removed that VM on the first
+# and then tried to WAKE it for the second, so one command reported the same
+# sandbox as both "removed" and "could not be removed" -- and because that
+# refusal raised, the remaining tasks were never processed at all. A single stale
+# row made the workspace permanently un-cleanable, which is worse than the leak.
+
+
+def reattach(git_repo, fake_sbx, tmp_path, agent_name="alpha"):
+    """Two rows naming one sandbox, exactly as a respawn produces."""
+    ready(fake_sbx, names_for(git_repo, agent_name))
+    build(git_repo, fake_sbx, agent_name, tmp_path=tmp_path)
+    make_runtime().prepare(
+        specs(("%2", "claude", agent_name)),
+        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+    )
+    name = sandbox.sandbox_name("ws", "t0", agent_name, str(git_repo))
+    assert len([r for r in store.worktrees_for("ws", "t0")
+                if r["sandbox_name"] == name]) == 2
+    return name
+
+
+def test_two_rows_for_one_sandbox_remove_it_exactly_once(
+    git_repo, fake_sbx, tmp_path
+):
+    name = reattach(git_repo, fake_sbx, tmp_path)
+
+    removed = runtime.clean_task("ws", "t0")
+
+    assert removed == [name]
+    assert len([c for c in fake_sbx.calls if c[0] == "rm"]) == 1
+
+
+def test_a_reattached_sandbox_is_not_reported_as_both_removed_and_surviving(
+    git_repo, fake_sbx, tmp_path
+):
+    """The contradictory output was the visible symptom."""
+    name = reattach(git_repo, fake_sbx, tmp_path)
+
+    removed = runtime.clean_task("ws", "t0")  # must not raise
+
+    assert removed == [name]
+
+
+def test_every_row_of_a_removed_sandbox_is_retired(git_repo, fake_sbx, tmp_path):
+    """Including the dead pane's, whose capability would otherwise stay valid."""
+    name = reattach(git_repo, fake_sbx, tmp_path)
+
+    runtime.clean_task("ws", "t0")
+
+    for row in store.worktrees_for("ws", "t0"):
+        assert row["runtime_status"] == "removed"
+        assert store.revoke_context_tokens_for_worktree(row["id"]) == 0
+
+
+# --- a sandbox amux has a row for but sbx does not ---
+
+
+def test_a_vanished_sandbox_is_retired_not_reported_as_a_survivor(
+    git_repo, fake_sbx, tmp_path, capsys
+):
+    """Reporting it stranded is what made re-running `kw` fail identically for
+    ever: nothing to preserve, nothing to remove, but a permanent refusal."""
+    names = names_for(git_repo, "alpha")
+    ready(fake_sbx, names)
+    build(git_repo, fake_sbx, "alpha", tmp_path=tmp_path)
+    # sbx no longer knows about it -- removed by hand, or a part-way pass.
+    fake_sbx._responses.insert(0, {  # noqa: SLF001 - ordering is the point
+        "argv": ["ls", "--json"], "stdout": '{"sandboxes": []}',
+        "stderr": "", "returncode": 0,
+    })
+    fake_sbx.script.write_text(__import__("json").dumps(fake_sbx._responses))
+
+    removed = runtime.clean_task("ws", "t0")  # must not raise
+
+    assert removed == []
+    assert "no longer exists" in capsys.readouterr().out
+    assert not fake_sbx.called_with("rm")
+    # Retired, so a second run has nothing to do and cannot fail again.
+    assert rows()["alpha"]["runtime_status"] == "removed"
+    assert runtime.clean_task("ws", "t0") == []
+
+
+def test_a_vanished_sandbox_does_not_block_a_healthy_one(
+    git_repo, fake_sbx, tmp_path
+):
+    """The un-cleanable workspace: one stale row must not stop the rest."""
+    names = names_for(git_repo, "alpha", "beta")
+    with_status(fake_sbx, names, {})
+    ready(fake_sbx, names)
+    build(git_repo, fake_sbx, "alpha", "beta", tmp_path=tmp_path)
+    fake_sbx._responses.insert(0, {  # noqa: SLF001
+        "argv": ["ls", "--json"],
+        "stdout": '{"sandboxes": [{"name": "%s", "id": "sbx_2"}]}' % names[1],
+        "stderr": "", "returncode": 0,
+    })
+    fake_sbx.script.write_text(__import__("json").dumps(fake_sbx._responses))
+
+    removed = runtime.clean_task("ws", "t0")
+
+    assert removed == [names[1]]
+    assert rows()["alpha"]["runtime_status"] == "removed"
+    assert rows()["beta"]["runtime_status"] == "removed"
+
+
+# --- C on every refusal path, not just the sbx-rm one ---
+
+
+def test_a_fetch_failure_also_restores_a_stopped_vm(git_repo, fake_sbx, tmp_path):
+    """The path happy-deer actually reached: the refusal came from tip
+    preservation, not from `sbx rm`, and the VM was left running while the
+    registry still said stopped."""
+    names = names_for(git_repo, "alpha")
+    ready(fake_sbx, names)
+    fake_sbx.respond("stop")
+    build(git_repo, fake_sbx, "alpha", tmp_path=tmp_path)
+    runtime.stop_task("ws", "t0")
+    # The remote cannot be read, so cleanup gives up before `sbx rm`.
+    git(git_repo, "remote", "set-url", worktree.sandbox_remote(names[0]), "/nonexistent")
+    stops_before = len([c for c in fake_sbx.calls if c[0] == "stop"])
+
+    with pytest.raises(sandbox.SandboxError, match="NOT saved on the host"):
+        runtime.clean_task("ws", "t0", force=True)
+
+    # Stopped again, so sbx and the registry still agree.
+    assert len([c for c in fake_sbx.calls if c[0] == "stop"]) == stops_before + 1
+    assert rows()["alpha"]["runtime_status"] == "stopped"
+
+
+def test_a_wake_failure_does_not_try_to_stop_what_never_started(
+    git_repo, fake_sbx, tmp_path
+):
+    names = names_for(git_repo, "alpha")
+    ready(fake_sbx, names)
+    fake_sbx.respond("stop")
+    build(git_repo, fake_sbx, "alpha", tmp_path=tmp_path)
+    runtime.stop_task("ws", "t0")
+    fake_sbx._responses.insert(0, {  # noqa: SLF001
+        "argv": ["exec", names[0], "true"], "stdout": "",
+        "stderr": "ERROR: sandbox failed to start\n", "returncode": 1,
+    })
+    fake_sbx.script.write_text(__import__("json").dumps(fake_sbx._responses))
+
+    with pytest.raises(sandbox.SandboxError, match="NOT saved on the host"):
+        runtime.clean_task("ws", "t0", force=True)
+    # It is still recorded stopped, which is what it is.
+    assert rows()["alpha"]["runtime_status"] == "stopped"

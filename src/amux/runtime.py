@@ -307,96 +307,104 @@ def stop_task(workspace: str, task: str) -> list[str]:
 def clean_task(workspace: str, task: str, *, force: bool = False) -> list[str]:
     """Remove a task's sandboxes, preserving committed work first.
 
-    The order is the safety property. For each sandbox: wake it if stopped,
-    establish whether it has a committed tip, preserve that tip on the host,
-    remove the sandbox, drop its host remote, revoke its capability, and only
-    then mark the row removed.
+    Iterates distinct SANDBOXES, not rows. Reattachment leaves several rows
+    naming one sandbox -- the dead pane's and the live one's -- and iterating
+    rows removed that VM once and then tried to wake it again for the next row,
+    reporting a survivor it had already deleted. Worse, that refusal aborted the
+    remaining tasks, so a single stale row made a whole workspace permanently
+    un-cleanable: worse than the leak it replaced.
 
-    Two kinds of refusal, both of which leave their row untouched and both of
-    which are raised rather than printed:
-
-    - uncommitted work without `force` -- found for every sandbox before
-      anything is removed, so one re-run shows the whole problem;
-    - anything that would abandon a VM or lose commits -- an unreadable tip, or
-      a sandbox `sbx rm` will not take. These are collected as work proceeds,
-      because the sandboxes that *can* be cleaned should be.
-
-    Raising matters beyond the exit code: the caller kills the tmux session
-    afterwards, and a session killed over abandoned VMs leaves them
-    unaddressable by any amux command.
+    The order per sandbox is the safety property: confirm it still exists, wake
+    it, establish whether it has a committed tip, preserve that tip, remove the
+    sandbox, drop its remote, revoke its capabilities, and only then retire its
+    rows. Refusals are raised, not printed, because the caller kills the tmux
+    session afterwards and a session killed over surviving VMs leaves them
+    unaddressable.
     """
-    rows = sandbox_rows(workspace, task)
-    if not rows:
+    by_sandbox: dict[str, list[dict]] = {}
+    for row in sandbox_rows(workspace, task):
+        by_sandbox.setdefault(row["sandbox_name"], []).append(row)
+    if not by_sandbox:
         return []
 
+    # A sandbox amux has a row for but `sbx` does not know about is already
+    # gone -- removed by hand, or by an earlier pass that got part way. There is
+    # nothing to preserve and nothing to remove, so it is retired rather than
+    # reported as a survivor. Reporting it stranded is what made re-running
+    # `kw` fail identically forever.
+    gone = {name for name in by_sandbox if not sandbox.exists(name)}
+    for name in gone:
+        print(f"amux: {name} no longer exists; recording it as removed")
+        _retire_all(by_sandbox.pop(name))
+
+    live = list(by_sandbox.items())
     if not force:
         dirty = [
-            (row["sandbox_name"], status)
-            for row in rows
-            if (status := _dirty_status(row["sandbox_name"]))
+            (name, status) for name, _ in live if (status := _dirty_status(name))
         ]
         if dirty:
             raise sandbox.SandboxError(_dirty_refusal(dirty))
 
     removed: list[str] = []
     stranded: list[str] = []
-    for row in rows:
-        name = row["sandbox_name"]
+    for name, rows in live:
+        branch = rows[0]["branch"]
+        repo = rows[0]["repo"]
         handle = sandbox.Sandbox(name=name)
+        # Restored on every refusal below, not just one of them: inspecting a
+        # sandbox starts it, so any path that gives up after this point would
+        # otherwise leave a VM running that the registry still calls stopped.
+        was_stopped = any(r["runtime_status"] == "stopped" for r in rows)
 
-        # The `sandbox-<name>` remote is served from inside the VM, so a stopped
-        # sandbox's tip is unreadable until it is running. Waking it first is
-        # what makes "preserve before removing" true rather than aspirational.
+        def give_up(problem: str) -> None:
+            stranded.append(problem)
+            if was_stopped:
+                _restore_stopped(name)
+
         try:
             handle.wake()
         except sandbox.SandboxError as exc:
-            stranded.append(
+            give_up(
                 f"{name}: could not start it to read its committed work ({exc}); "
-                "its branch tip is NOT saved on the host"
+                f"{branch} is NOT saved on the host"
             )
             continue
 
         try:
-            tip = worktree.sandbox_branch_tip(row["repo"], name, row["branch"])
+            tip = worktree.sandbox_branch_tip(repo, name, branch)
         except worktree.WorktreeError as exc:
             # Unreachable, so whether it holds commits is unknown. `--force`
             # authorises losing *uncommitted* work; it does not authorise
             # destroying commits nobody has managed to copy out.
-            stranded.append(
-                f"{name}: cannot read {row['branch']} to preserve it ({exc}); "
-                "its branch tip is NOT saved on the host, so it was left in place"
+            give_up(
+                f"{name}: cannot read {branch} to preserve it ({exc}); "
+                "it is NOT saved on the host, so the sandbox was left in place"
             )
             continue
 
         if tip is None:
-            print(f"amux: {name}: nothing committed on {row['branch']} to preserve")
+            print(f"amux: {name}: nothing committed on {branch} to preserve")
         else:
             try:
-                worktree.fetch_sandbox_branch(row["repo"], name, row["branch"])
+                worktree.fetch_sandbox_branch(repo, name, branch)
             except worktree.WorktreeError as exc:
-                stranded.append(
-                    f"{name}: {row['branch']} is at {tip[:12]} but could not be "
-                    f"fetched ({exc}); it is NOT saved on the host"
+                give_up(
+                    f"{name}: {branch} is at {tip[:12]} but could not be fetched "
+                    f"({exc}); it is NOT saved on the host"
                 )
                 continue
 
         try:
             sandbox.remove(name, force=force)
         except sandbox.SandboxError as exc:
-            # The VM is still there and still owns whatever it owns, so the row
-            # stays addressable. Reported, never silently skipped: this is the
-            # shape that let a whole workspace of microVMs be abandoned while
-            # amux said "killed".
-            stranded.append(f"{name}: could not be removed ({exc})")
-            _restore_stopped(row, handle)
+            give_up(f"{name}: could not be removed ({exc})")
             continue
 
         try:
-            worktree.remove_sandbox_remote(row["repo"], name)
+            worktree.remove_sandbox_remote(repo, name)
         except Exception as exc:  # noqa: BLE001
             print(f"amux: could not remove remote for {name}: {exc}")
-        store.revoke_context_tokens_for_worktree(row["id"])
-        _retire(row["id"], "removed", current=row["status"])
+        _retire_all(rows)
         removed.append(name)
 
     if stranded:
@@ -404,21 +412,30 @@ def clean_task(workspace: str, task: str, *, force: bool = False) -> list[str]:
     return removed
 
 
-def _restore_stopped(row: dict, handle: sandbox.Sandbox) -> None:
-    """Put a sandbox back to stopped if this call is what woke it.
+def _retire_all(rows: list[dict]) -> None:
+    """Retire every row naming one sandbox, and revoke every capability.
 
-    Inspecting a sandbox starts it, so a refused removal would otherwise leave
-    a VM running that the registry still calls stopped -- burning memory and
-    disagreeing with its own record.
+    All of them, because reattachment leaves the dead pane's row alongside the
+    live one and a token left valid on a retired row still authenticates.
     """
-    if row["runtime_status"] != "stopped":
-        return
+    for row in rows:
+        store.revoke_context_tokens_for_worktree(row["id"])
+        _retire(row["id"], "removed", current=row["status"])
+
+
+def _restore_stopped(name: str) -> None:
+    """Put a sandbox back to stopped, having woken it to inspect it.
+
+    Called from every refusal path, not just the `sbx rm` one: a VM left running
+    while the registry still calls it stopped burns memory and disagrees with
+    its own record, and the fetch-failure path reaches that state too.
+    """
     try:
-        sandbox.stop(row["sandbox_name"])
+        sandbox.stop(name)
     except sandbox.SandboxError as exc:
         print(
-            f"amux: {row['sandbox_name']} was started to inspect it and could "
-            f"not be stopped again ({exc}); it is running"
+            f"amux: {name} was started to inspect it and could not be stopped "
+            f"again ({exc}); it is running"
         )
 
 
