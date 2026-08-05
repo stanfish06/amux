@@ -12,6 +12,7 @@ line is left to the human.
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 from dataclasses import dataclass
@@ -38,9 +39,7 @@ class MergeResult:
 
 
 def _git(repo: str, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-    proc = subprocess.run(
-        ["git", "-C", repo, *args], capture_output=True, text=True
-    )
+    proc = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
     if check and proc.returncode != 0:
         raise WorktreeError(proc.stderr.strip() or proc.stdout.strip())
     return proc
@@ -57,7 +56,9 @@ def repo_root(path: str) -> str | None:
 
 
 def has_commits(repo: str) -> bool:
-    return _git(repo, "rev-parse", "--verify", "-q", "HEAD", check=False).returncode == 0
+    return (
+        _git(repo, "rev-parse", "--verify", "-q", "HEAD", check=False).returncode == 0
+    )
 
 
 def head_ref(repo: str) -> str:
@@ -91,35 +92,85 @@ def _branch_exists(repo: str, branch: str) -> bool:
     )
 
 
-def setup_task(
-    repo: str,
-    workspace: str,
-    task: str,
-    panes: list[tuple[str, str, str]],
-) -> dict[str, str]:
-    """Create the integration worktree + one worktree per pane.
+@dataclass(frozen=True)
+class TaskIntegration:
+    """The task's integration worktree, and the base every agent branches off."""
 
-    `panes` is a list of (pane_id, agent, name). Returns {pane_id: worktree_path}.
-    Registers every pane in the worktree store.
-    """
+    repo: str
+    workspace: str
+    task: str
+    base_ref: str
+    branch: str
+    path: str
+
+
+def registered_worktrees(repo: str) -> set[str]:
+    """Paths git currently considers worktrees of `repo`."""
+    out = _git(repo, "worktree", "list", "--porcelain", check=False).stdout
+    return {
+        os.path.realpath(line.split(" ", 1)[1])
+        for line in out.splitlines()
+        if line.startswith("worktree ")
+    }
+
+
+def setup_task_integration(repo: str, workspace: str, task: str) -> TaskIntegration:
+    """Create the task's integration branch and worktree, or adopt the existing one."""
     if not has_commits(repo):
         raise WorktreeError("repo has no commits yet")
     base = head_ref(repo)
-    int_branch = integration_branch(workspace, task)
-    root = task_worktree_root(workspace, task)
-    int_path = f"{root}/{INTEGRATION_DIR}"
+    branch = integration_branch(workspace, task)
+    path = f"{task_worktree_root(workspace, task)}/{INTEGRATION_DIR}"
 
-    if not _branch_exists(repo, int_branch):
-        _git(repo, "branch", int_branch, base)
-    _git(repo, "worktree", "add", int_path, int_branch)
+    if not _branch_exists(repo, branch):
+        _git(repo, "branch", branch, base)
+    if os.path.realpath(path) not in registered_worktrees(repo):
+        _git(repo, "worktree", "add", path, branch)
+    return TaskIntegration(
+        repo=repo,
+        workspace=workspace,
+        task=task,
+        base_ref=base,
+        branch=branch,
+        path=path,
+    )
+
+
+def remove_task_integration(integration: TaskIntegration) -> None:
+    """Undo `setup_task_integration`."""
+    _git(
+        integration.repo,
+        "worktree",
+        "remove",
+        "--force",
+        integration.path,
+        check=False,
+    )
+
+
+def setup_host_agents(
+    integration: TaskIntegration,
+    panes: list[tuple[str, str, str]],
+) -> dict[str, str]:
+    """One worktree + registry row per host pane, branched off the integration
+    branch.
+
+    `panes` is a list of (pane_id, agent, name). Returns {pane_id: path}. Rolls
+    back its own worktrees and rows on failure; the integration worktree belongs
+    to the caller that created it.
+    """
+    repo, workspace, task = integration.repo, integration.workspace, integration.task
+    root = task_worktree_root(workspace, task)
 
     paths: dict[str, str] = {}
+    created: list[str] = []
     registered: list[int] = []
     try:
         for pane_id, agent, name in panes:
             branch = agent_branch(workspace, task, name)
             path = f"{root}/{name}"
-            _git(repo, "worktree", "add", path, "-b", branch, int_branch)
+            _git(repo, "worktree", "add", path, "-b", branch, integration.branch)
+            created.append(path)
             registered.append(
                 store.register_worktree(
                     pane=pane_id,
@@ -129,22 +180,62 @@ def setup_task(
                     name=name,
                     path=path,
                     branch=branch,
-                    base_ref=base,
+                    base_ref=integration.base_ref,
                     repo=repo,
                 )
             )
             paths[pane_id] = path
     except Exception:
-        # Roll back this task's worktrees so a failed spawn leaves no debris.
-        for path in [int_path, *paths.values()]:
+        for path in created:
             _git(repo, "worktree", "remove", "--force", path, check=False)
-        # The registry is append-only, so rows already inserted outlive the
-        # rollback. Left active, a later integrate would merge branches whose
-        # worktrees are gone.
         for wt_id in registered:
             store.set_worktree_status(wt_id, "removed")
         raise
     return paths
+
+
+def setup_task(
+    repo: str,
+    workspace: str,
+    task: str,
+    panes: list[tuple[str, str, str]],
+) -> dict[str, str]:
+    """Host-runtime task setup: the integration worktree + one worktree per pane."""
+    integration = setup_task_integration(repo, workspace, task)
+    try:
+        return setup_host_agents(integration, panes)
+    except Exception:
+        remove_task_integration(integration)
+        raise
+
+
+def _merge_source(row: dict) -> str:
+    """What `integrate` should merge for one execution row."""
+    if row.get("runtime") != "docker-sandbox":
+        return row["branch"]
+    sandbox_name = row.get("sandbox_name") or ""
+    if not sandbox_name:
+        raise WorktreeError(
+            f"sandbox row for '{row['name']}' has no sandbox name recorded; "
+            "its branch cannot be located"
+        )
+    return fetch_sandbox_branch(row["repo"], sandbox_name, row["branch"])
+
+
+def _record_failure(workspace: str, task: str, row: dict, text: str) -> None:
+    """Leave a task-scoped blocker so a failed integrate is visible to the team
+    rather than only to whoever happened to run the command."""
+    store.add_note(
+        workspace=workspace,
+        task=task,
+        pane=row["pane"],
+        agent=row["agent"],
+        worktree_id=row["id"],
+        repo=row["repo"],
+        scope="task",
+        kind="blocker",
+        text=text,
+    )
 
 
 def integrate(
@@ -172,34 +263,44 @@ def integrate(
     for row in rows:
         pane, name, branch = row["pane"], row["name"], row["branch"]
         wt_id, repo = row["id"], row["repo"]
-        before = _git(int_path, "rev-parse", "HEAD").stdout.strip()
-        n_commits = int(
-            _git(int_path, "rev-list", "--count", f"HEAD..{branch}").stdout.strip()
-            or "0"
-        )
-        proc = _git(int_path, "merge", "--no-ff", branch, check=False)
-        if proc.returncode != 0:
-            _git(int_path, "merge", "--abort", check=False)
-            err = proc.stderr.strip() or proc.stdout.strip()
-            store.add_note(
-                workspace=workspace,
-                task=task,
-                pane=pane,
-                agent=row["agent"],
-                worktree_id=wt_id,
-                repo=repo,
-                scope="task",
-                kind="blocker",
-                text=f"integrate: conflict merging {name} ({branch}): {err}",
+
+        try:
+            source = _merge_source(row)
+        except WorktreeError as exc:
+            err = str(exc)
+            _record_failure(
+                workspace,
+                task,
+                row,
+                f"integrate: cannot reach {name} ({branch}): {err}",
             )
             results.append(
                 MergeResult(pane=pane, name=name, branch=branch, ok=False, error=err)
             )
             continue
-        shortstat = _git(
-            int_path, "diff", "--shortstat", before, "HEAD"
-        ).stdout.strip()
-        store.set_worktree_status(wt_id, "merged")
+
+        before = _git(int_path, "rev-parse", "HEAD").stdout.strip()
+        n_commits = int(
+            _git(int_path, "rev-list", "--count", f"HEAD..{source}").stdout.strip()
+            or "0"
+        )
+        proc = _git(int_path, "merge", "--no-ff", source, check=False)
+        if proc.returncode != 0:
+            _git(int_path, "merge", "--abort", check=False)
+            err = proc.stderr.strip() or proc.stdout.strip()
+            _record_failure(
+                workspace,
+                task,
+                row,
+                f"integrate: conflict merging {name} ({branch}): {err}",
+            )
+            results.append(
+                MergeResult(pane=pane, name=name, branch=branch, ok=False, error=err)
+            )
+            continue
+        shortstat = _git(int_path, "diff", "--shortstat", before, "HEAD").stdout.strip()
+        if n_commits:
+            store.set_worktree_status(wt_id, "merged")
         store.add_note(
             workspace=workspace,
             task=task,
@@ -237,21 +338,71 @@ def remove_task(workspace: str, task: str) -> list[str]:
     for row in rows:
         if row["status"] == "removed" or not row["repo"]:
             continue
-        # Per row: a task can span repos, and rows registered without one would
-        # otherwise run `git -C ""` and fail silently under check=False.
-        if _git(
-            row["repo"], "worktree", "remove", "--force", row["path"], check=False
-        ).returncode == 0:
+        if not row["path"]:
+            continue
+        if (
+            _git(
+                row["repo"], "worktree", "remove", "--force", row["path"], check=False
+            ).returncode
+            == 0
+        ):
             removed.append(row["path"])
-            # Only on success — a row marked removed while its worktree is still
-            # on disk is both unreachable and invisible.
             store.set_worktree_status(row["id"], "removed")
     for repo in {row["repo"] for row in rows if row["repo"]}:
         _git(repo, "worktree", "remove", "--force", int_path, check=False)
     return removed
 
 
+def sandbox_remote(sandbox_name: str) -> str:
+    """The host-side remote `sbx create --clone` publishes for a sandbox."""
+    return f"sandbox-{sandbox_name}"
+
+
+def sandbox_tracking_ref(sandbox_name: str, branch: str) -> str:
+    """Where a fetched sandbox branch lands on the host."""
+    return f"refs/amux/sandboxes/{sandbox_name}/{branch}"
+
+
+def sandbox_branch_tip(
+    repo: str, sandbox_name: str, branch: str, *, source: str | None = None
+) -> str | None:
+    """The commit the sandbox has on `branch`, or None if it has no such branch."""
+    proc = _git(
+        repo, "ls-remote", source or sandbox_remote(sandbox_name), branch, check=False
+    )
+    if proc.returncode != 0:
+        raise WorktreeError(proc.stderr.strip() or proc.stdout.strip())
+    out = proc.stdout.strip()
+    return out.split()[0] if out else None
+
+
+def fetch_sandbox_branch(
+    repo: str, sandbox_name: str, branch: str, *, source: str | None = None
+) -> str:
+    """Fetch a sandbox's committed branch to a durable local ref, and return it."""
+    ref = sandbox_tracking_ref(sandbox_name, branch)
+    proc = _git(
+        repo,
+        "fetch",
+        "--no-tags",
+        source or sandbox_remote(sandbox_name),
+        f"+{branch}:{ref}",
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise WorktreeError(proc.stderr.strip() or proc.stdout.strip())
+    return ref
+
+
+def remove_sandbox_remote(repo: str, sandbox_name: str) -> None:
+    """Drop a sandbox's host remote if it is still there."""
+    _git(repo, "remote", "remove", sandbox_remote(sandbox_name), check=False)
+
+
 def latest_commit_subject(path: str) -> str:
+    """The subject of `path`'s last commit, or "" when there is no path."""
+    if not path:
+        return ""
     proc = _git(path, "log", "-1", "--format=%s", check=False)
     return proc.stdout.strip() if proc.returncode == 0 else ""
 

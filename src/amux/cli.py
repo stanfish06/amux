@@ -4,9 +4,20 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 from collections import Counter
 
-from amux import core, events, monitor, store, utils, worktree
+from amux import (
+    context_service,
+    core,
+    events,
+    monitor,
+    runtime,
+    sandbox,
+    store,
+    utils,
+    worktree,
+)
 from amux.shared import ALIAS, scrub_pyinstaller_env
 
 
@@ -47,6 +58,54 @@ def _cmd_lsg(server, args) -> int:
     return 0
 
 
+HOST = runtime.HOST
+DOCKER_SANDBOX = runtime.DOCKER_SANDBOX
+RUNTIMES = (HOST, DOCKER_SANDBOX)
+
+_SANDBOX_ONLY = ("cpus", "memory", "share_skills", "context_port")
+
+
+def _service_probe(port: int):
+    # `sandbox.preflight` probes whether the context service is usable.
+
+    def probe() -> tuple[bool, str]:
+        result = context_service.status(context_service.ServiceConfig(port=port))
+        if result.running and result.port != port:
+            return False, (
+                f"the running service is on port {result.port}, but this grid would"
+                f" tell its sandboxes to dial {port}"
+            )
+        return result.healthy, result.message
+
+    return probe
+
+
+def _resolve_runtime(args) -> runtime.Runtime | None:
+    # The runtime used by a spawn should use, or None for the default host one.
+
+    chosen = getattr(args, "runtime", HOST)
+    given = [
+        name for name in _SANDBOX_ONLY if getattr(args, name, None) not in (None, False)
+    ]
+    if chosen == HOST:
+        if given:
+            flags = ", ".join("--" + name.replace("_", "-") for name in sorted(given))
+            raise ValueError(f"{flags} only applies to --runtime {DOCKER_SANDBOX}")
+        return None
+    defaults = sandbox.Resources()
+    resources = sandbox.Resources(
+        cpus=defaults.cpus if args.cpus is None else args.cpus,
+        memory=defaults.memory if args.memory is None else args.memory,
+        share_skills=bool(args.share_skills),
+    )
+    # Before tmux, git, or the database is touched.
+    resources.validate()
+    config = runtime.SandboxConfig(resources=resources, port=args.context_port)
+    return runtime.SandboxRuntime(
+        config, service_healthy=_service_probe(config.resolved_port)
+    )
+
+
 def _resolve_grid(args) -> tuple[int, int, list[str]]:
     agents = core.parse_agent_specs(args.agent or [], args.rows, args.cols)
     nrows, ncols = core.resolve_grid_shape(len(agents), args.rows, args.cols)
@@ -58,6 +117,7 @@ def _composition(agents: list[str]) -> str:
 
 
 def _cmd_spw(server, args) -> int:
+    chosen = _resolve_runtime(args)
     nrows, ncols, agents = _resolve_grid(args)
     space = core.spawn_agent_space(
         server,
@@ -67,6 +127,7 @@ def _cmd_spw(server, args) -> int:
         init_grid_ncols=ncols,
         init_grid_agents=agents,
         init_task_name=args.task,
+        runtime=chosen,
     )
     print(
         f"spawned {ALIAS['session']} '{space.project_name}' "
@@ -77,8 +138,19 @@ def _cmd_spw(server, args) -> int:
     return 0
 
 
+def _workspace_dir(workspace: str) -> str | None:
+    # Where a task runs when `-p` is omitted: the workspace's own repository.
+
+    for row in reversed(store.worktrees_for(workspace)):
+        if row["repo"]:
+            return row["repo"]
+    return None
+
+
 def _cmd_spg(server, args) -> int:
+    chosen = _resolve_runtime(args)
     session = _get_session(server, args.workspace)
+    cwd = args.path or _workspace_dir(args.workspace)
     nrows, ncols, agents = _resolve_grid(args)
     grid = core.spawn_agent_grid(
         session,
@@ -86,7 +158,8 @@ def _cmd_spg(server, args) -> int:
         nrows=nrows,
         ncols=ncols,
         agents=agents,
-        cwd=args.path,
+        cwd=cwd,
+        runtime=chosen,
     )
     print(
         f"spawned {ALIAS['window']} '{grid.task_name}' in '{args.workspace}' "
@@ -95,11 +168,42 @@ def _cmd_spg(server, args) -> int:
     return 0
 
 
+def _check_force(args) -> None:
+    if args.force and not args.clean:
+        raise ValueError("--force only applies together with --clean")
+
+
 def _cmd_kw(server, args) -> int:
     session = _get_session(server, args.workspace)
+    _check_force(args)
+    problems: list[str] = []
+    handled: set[str] = set()
+    for window in session.windows:
+        task = window.name or ""
+        handled.add(task)
+        if args.clean:
+            try:
+                runtime.clean_task(args.workspace, task, force=args.force)
+            except sandbox.SandboxError as exc:
+                problems.append(f"{task}: {exc}")
+                continue
+            worktree.remove_task(args.workspace, task)
+        else:
+            runtime.stop_task(args.workspace, task)
     if args.clean:
-        for window in session.windows:
-            worktree.remove_task(args.workspace, window.name or "")
+        for task in runtime.sandbox_tasks(args.workspace):
+            if task in handled:
+                continue
+            try:
+                runtime.clean_task(args.workspace, task, force=args.force)
+            except sandbox.SandboxError as exc:
+                problems.append(f"{task} (no window): {exc}")
+
+    if problems:
+        raise sandbox.SandboxError(
+            f"{ALIAS['session']} '{args.workspace}' was left in place because "
+            "some sandboxes survived:\n" + "\n".join(problems)
+        )
     core.load_agent_space(session).terminate()
     print(f"killed {ALIAS['session']} '{args.workspace}'")
     return 0
@@ -108,8 +212,15 @@ def _cmd_kw(server, args) -> int:
 def _cmd_kg(server, args) -> int:
     session = _get_session(server, args.workspace)
     window = _get_window(session, args.task)
+    _check_force(args)
     if args.clean:
+        # Deliberately unguarded: a refusal must propagate past the terminate()
+        # below, because killing the window would leave the surviving sandboxes
+        # with no amux command that can address them.
+        runtime.clean_task(args.workspace, args.task, force=args.force)
         worktree.remove_task(args.workspace, args.task)
+    else:
+        runtime.stop_task(args.workspace, args.task)  # see `_cmd_kw`
     core.load_agent_grid(window).terminate()
     print(f"killed {ALIAS['window']} '{args.task}' in '{args.workspace}'")
     return 0
@@ -252,6 +363,101 @@ def _cmd_ctx(server, args) -> int:
     return 0
 
 
+def _cmd_doctor(server, args) -> int:
+    if args.runtime == HOST:
+        print(f"runtime {HOST}: no external prerequisites (tmux and git only)")
+        return 0
+
+    defaults = sandbox.Resources()
+    resources = sandbox.Resources(
+        cpus=defaults.cpus if args.cpus is None else args.cpus,
+        memory=defaults.memory if args.memory is None else args.memory,
+        share_skills=bool(args.share_skills),
+    )
+    port = (
+        args.context_port
+        if args.context_port is not None
+        else context_service.DEFAULT_PORT
+    )
+    config = runtime.SandboxConfig(resources=resources, port=port)
+    git_failure = ""
+    try:
+        repo = worktree.repo_root(args.path) or ""
+    except OSError as exc:
+        repo, git_failure = "", f"cannot run git: {exc.strerror or exc}"
+    report = sandbox.preflight(
+        agents=core.parse_agent_specs(args.agent or [], None, None),
+        repo=repo,
+        resources=resources,
+        endpoint=config.policy_target,
+        service_healthy=_service_probe(config.resolved_port),
+    )
+    print(f"runtime {DOCKER_SANDBOX} (optional backend) for {args.path}:")
+    if git_failure:
+        print(f"  [FAIL] git: {git_failure}")
+        print("         fix: install git and put it on PATH")
+    print(report.report())
+    if report.ok and not git_failure:
+        print("\nall checks pass")
+        return 0
+    print(
+        f"\n{len(report.failures) + bool(git_failure)} check(s) failed."
+        f" amux changes nothing on its own: run the fixes above yourself."
+    )
+    return 1
+
+
+def _cmd_context_service(server, args) -> int:
+    overrides = {}
+    if args.port is not None:
+        overrides["port"] = args.port
+    if args.db is not None:
+        overrides["db_path"] = Path(args.db).expanduser()
+    config = context_service.ServiceConfig.from_env(**overrides)
+    code, message = context_service.run_action(
+        args.action, config, force=getattr(args, "force", False)
+    )
+    if message:
+        print(message, file=sys.stderr if code else sys.stdout)
+    return code
+
+
+def _add_sandbox_args(parser: argparse.ArgumentParser, runtime_default: str = HOST):
+    defaults = sandbox.Resources()
+    parser.add_argument(
+        "--runtime",
+        default=runtime_default,
+        choices=RUNTIMES,
+        help=f"execution backend (default: {runtime_default}; {DOCKER_SANDBOX} is "
+        "optional and needs Docker Sandboxes installed and signed in)",
+    )
+    parser.add_argument(
+        "--cpus",
+        type=int,
+        default=None,
+        help=f"CPU cap per sandbox (default: {defaults.cpus}; {DOCKER_SANDBOX} only)",
+    )
+    parser.add_argument(
+        "--memory",
+        default=None,
+        help=f"memory cap per sandbox, e.g. 4g (default: {defaults.memory}; "
+        f"{DOCKER_SANDBOX} only)",
+    )
+    parser.add_argument(
+        "--share-skills",
+        action="store_true",
+        help="let sandboxes share Docker's skills store, which is read-write "
+        f"and shared between them (default: off; {DOCKER_SANDBOX} only)",
+    )
+    parser.add_argument(
+        "--context-port",
+        type=int,
+        default=None,
+        help="loopback port of the host context service (default: "
+        f"{context_service.DEFAULT_PORT}; {DOCKER_SANDBOX} only)",
+    )
+
+
 def _add_grid_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "-r", "--rows", type=int, default=None, help="grid rows (default: derived)"
@@ -293,6 +499,7 @@ def main(argv: list[str] | None = None) -> int:
     p_spw.add_argument("-p", "--path", default=os.getcwd(), help="project directory")
     p_spw.add_argument("-t", "--task", default="task0", help="initial task name")
     _add_grid_args(p_spw)
+    _add_sandbox_args(p_spw)
     p_spw.set_defaults(func=_cmd_spw)
 
     p_spg = sub.add_parser("spg", help="spawn a new agent grid in a workspace")
@@ -302,6 +509,7 @@ def main(argv: list[str] | None = None) -> int:
         "-p", "--path", default=None, help="task directory (default: workspace dir)"
     )
     _add_grid_args(p_spg)
+    _add_sandbox_args(p_spg)
     p_spg.set_defaults(func=_cmd_spg)
 
     p_kw = sub.add_parser("kw", help="kill a workspace")
@@ -310,6 +518,12 @@ def main(argv: list[str] | None = None) -> int:
         "--clean",
         action="store_true",
         help="also remove the workspace's git worktrees (branches are kept)",
+    )
+    p_kw.add_argument(
+        "--force",
+        action="store_true",
+        help="permit removing a sandbox with uncommitted work (implies data "
+        "loss; the committed tip is preserved first)",
     )
     p_kw.set_defaults(func=_cmd_kw)
 
@@ -320,6 +534,12 @@ def main(argv: list[str] | None = None) -> int:
         "--clean",
         action="store_true",
         help="also remove the task's git worktrees (branches are kept)",
+    )
+    p_kg.add_argument(
+        "--force",
+        action="store_true",
+        help="permit removing a sandbox with uncommitted work (implies data "
+        "loss; the committed tip is preserved first)",
     )
     p_kg.set_defaults(func=_cmd_kg)
 
@@ -441,11 +661,62 @@ def main(argv: list[str] | None = None) -> int:
     p_wait.add_argument("--timeout", type=float, default=300.0)
     p_wait.set_defaults(func=events.cmd_wait)
 
+    p_doctor = sub.add_parser(
+        "doctor",
+        help="check a runtime's prerequisites (read-only; fixes nothing)",
+    )
+    p_doctor.add_argument(
+        "-p", "--path", default=os.getcwd(), help="project directory to check"
+    )
+    p_doctor.add_argument(
+        "-a",
+        "--agent",
+        action="append",
+        default=None,
+        metavar="AGENT[:COUNT]",
+        help="agent spec to check, repeatable (default: claude)",
+    )
+    # Unlike spw/spg, doctor exists *to* inspect the optional backend, so
+    # checking it is the useful default.
+    _add_sandbox_args(p_doctor, runtime_default=DOCKER_SANDBOX)
+    p_doctor.set_defaults(func=_cmd_doctor)
+
+    p_svc = sub.add_parser(
+        "context-service",
+        help="the host-only context service sandboxed agents read through",
+    )
+    p_svc.add_argument(
+        "action",
+        choices=context_service.ACTIONS,
+        help="serve in the foreground, or start/status/stop the background one",
+    )
+    p_svc.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help=f"loopback port (default: {context_service.DEFAULT_PORT}, or "
+        f"${context_service.ENV_PORT})",
+    )
+    p_svc.add_argument(
+        "--db", default=None, help="context store path (default: the amux state one)"
+    )
+    p_svc.add_argument(
+        "--force",
+        action="store_true",
+        help="stop: send SIGKILL instead of SIGTERM",
+    )
+    p_svc.set_defaults(func=_cmd_context_service)
+
     args = parser.parse_args(argv)
     server = core.get_server(args.socket_name)
     try:
         return args.func(server, args)
-    except (ValueError, worktree.WorktreeError) as exc:
+    except (
+        ValueError,
+        worktree.WorktreeError,
+        sandbox.SandboxError,
+        context_service.ServiceLifecycleError,
+    ) as exc:
         print(f"amux: {exc}", file=sys.stderr)
         return 1
 

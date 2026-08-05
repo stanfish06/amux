@@ -6,13 +6,16 @@ from dataclasses import dataclass
 from libtmux import Pane, Server, Session, Window
 from libtmux.constants import PaneDirection
 
-from amux import events, store, worktree
+from amux import events, sandbox_hooks, store, worktree
+from amux.runtime import (
+    AGENT_COMMANDS,
+    HOST,
+    GridCreationError,
+    HostRuntime,
+    PaneSpec,
+    Runtime,
+)
 from amux.shared import ALIAS, DEFAULT_SOCKET
-
-AGENT_COMMANDS = {
-    "claude": "claude --dangerously-skip-permissions",
-    "codex": "codex --dangerously-bypass-approvals-and-sandbox",
-}
 
 AGENT_OPTION = "@amux_agent"
 LABEL_OPTION = "@amux_label"
@@ -264,6 +267,30 @@ def _taken_names(session: Session) -> set[str]:
     return names
 
 
+def _next_name(agent: str, resumable: dict[str, list[str]], taken: set[str]) -> str:
+    while resumable.get(agent):
+        candidate = resumable[agent].pop(0)
+        if candidate not in taken:
+            return candidate
+    return random_name(taken)
+
+
+def _rollback(runtime: Runtime) -> list[str]:
+    try:
+        return list(runtime.rollback())
+    except Exception as exc:  # noqa: BLE001
+        return [f"runtime rollback: {exc}"]
+
+
+def _discard(what: str, teardown) -> str | None:
+    """Best-effort tmux teardown. Returns a problem description, or None."""
+    try:
+        teardown()
+    except Exception as exc:  # noqa: BLE001
+        return f"{what}: {exc}"
+    return None
+
+
 def _split_evenly(
     pane: Pane, n: int, direction: PaneDirection, cwd: str | None
 ) -> list[Pane]:
@@ -285,10 +312,13 @@ def _build_grid(
     cwd: str | None,
     workspace: str | None = None,
     task: str | None = None,
+    runtime: Runtime | None = None,
 ) -> AgentGrid:
     if len(agents) != nrows * ncols:
         raise ValueError(f"{len(agents)} agents do not fit a {nrows}x{ncols} grid")
+    runtime = runtime or HostRuntime()
     taken = _taken_names(window.session)
+    resumable = runtime.resumable_names(workspace=workspace, task=task, cwd=cwd)
     rows = _split_evenly(window.panes[0], nrows, PaneDirection.Below, cwd)
     agent_panes = []
     panes_info: list[tuple[Pane, str, str]] = []
@@ -297,7 +327,7 @@ def _build_grid(
         for j, pane in enumerate(cols):
             agent = agents[i * ncols + j]
             label = f"r{i}c{j}"
-            name = random_name(taken)
+            name = _next_name(agent, resumable, taken)
             taken.add(name)
             # Keep the name tag stable: block apps/prompts from re-titling the pane.
             pane.cmd("set-option", "-p", "allow-set-title", "off")
@@ -311,31 +341,28 @@ def _build_grid(
             )
             panes_info.append((pane, agent, name))
 
-    # Per-agent git worktrees when the target dir is a repo. Fail soft: a
-    # non-repo target keeps today's shared-directory behavior.
-    worktree_paths: dict[str, str] = {}
-    if workspace and task and cwd:
-        repo = worktree.repo_root(cwd)
-        if repo:
-            try:
-                worktree_paths = worktree.setup_task(
-                    repo,
-                    workspace,
-                    task,
-                    [(p.id or "", agent, name) for p, agent, name in panes_info],
-                )
-            except worktree.WorktreeError as exc:
-                print(f"amux: worktree isolation unavailable: {exc}")
-
     socket = _socket_name(window)
+    try:
+        launches = {
+            launch.pane: launch
+            for launch in runtime.prepare(
+                [PaneSpec(p.id or "", agent, name) for p, agent, name in panes_info],
+                workspace=workspace,
+                task=task,
+                cwd=cwd,
+                socket=socket,
+            )
+        }
+    except Exception as exc:
+        # A grid is all-or-nothing: half a grid leaves sandboxes nothing will
+        # ever attach to and rows a later integrate would try to merge.
+        raise GridCreationError(exc, _rollback(runtime)) from exc
+
     for pane, agent, name in panes_info:
-        command = AGENT_COMMANDS.get(agent, agent)
-        wt = worktree_paths.get(pane.id or "")
-        pane_cwd = wt or cwd or pane.pane_current_path or ""
-        if wt:
-            pane.send_keys(worktree.shell_cd(wt))
-        if command:
-            pane.send_keys(command)
+        launch = launches[pane.id or ""]
+        pane_cwd = launch.cwd or pane.pane_current_path or ""
+        for keys in launch.keys:
+            pane.send_keys(keys)
         events.emit("spawn", pane=pane.id, agent=agent, socket=socket)
         agent_panes.append(
             AgentPane(
@@ -366,9 +393,15 @@ def spawn_agent_space(
     init_grid_ncols: int = 1,
     init_grid_agents: list[str] | None = None,
     init_task_name: str = "task0",
+    runtime: Runtime | None = None,
 ) -> AgentSpace:
     if server.has_session(session_name):
         raise ValueError(f"{ALIAS['session']} '{session_name}' already exists")
+    agents = init_grid_agents or ["claude"] * (init_grid_nrows * init_grid_ncols)
+    runtime = runtime or HostRuntime()
+    runtime.preflight(
+        agents, workspace=session_name, task=init_task_name, cwd=session_path
+    )
     # Detached sessions get a virtual size; make it big enough to split evenly.
     width = max(200, 80 * init_grid_ncols)
     height = max(50, 24 * init_grid_nrows)
@@ -388,16 +421,25 @@ def spawn_agent_space(
     assert session is not None
     window = session.windows[0]
     window.rename_window(init_task_name)
-    agents = init_grid_agents or ["claude"] * (init_grid_nrows * init_grid_ncols)
-    grid = _build_grid(
-        window,
-        init_grid_nrows,
-        init_grid_ncols,
-        agents,
-        session_path,
-        workspace=session_name,
-        task=init_task_name,
-    )
+    try:
+        grid = _build_grid(
+            window,
+            init_grid_nrows,
+            init_grid_ncols,
+            agents,
+            session_path,
+            workspace=session_name,
+            task=init_task_name,
+            runtime=runtime,
+        )
+    except BaseException as exc:
+        problem = _discard("kill session", lambda: session.cmd("kill-session"))
+        if problem:
+            if isinstance(exc, GridCreationError):
+                exc.add_cleanup_failure(problem)
+            else:
+                print(f"amux: {problem}")
+        raise
     return AgentSpace(
         session=session,
         agent_grids=[grid],
@@ -413,19 +455,33 @@ def spawn_agent_grid(
     ncols: int,
     agents: list[str] | None = None,
     cwd: str | None = None,
+    runtime: Runtime | None = None,
 ) -> AgentGrid:
+    agents = agents or ["claude"] * (nrows * ncols)
+    runtime = runtime or HostRuntime()
+    runtime.preflight(agents, workspace=session.name or "", task=window_name, cwd=cwd)
     window = session.new_window(
         window_name=window_name, start_directory=cwd, attach=False
     )
-    return _build_grid(
-        window,
-        nrows,
-        ncols,
-        agents or ["claude"] * (nrows * ncols),
-        cwd,
-        workspace=session.name or "",
-        task=window_name,
-    )
+    try:
+        return _build_grid(
+            window,
+            nrows,
+            ncols,
+            agents,
+            cwd,
+            workspace=session.name or "",
+            task=window_name,
+            runtime=runtime,
+        )
+    except BaseException as exc:
+        problem = _discard("kill task window", lambda: window.cmd("kill-window"))
+        if problem:
+            if isinstance(exc, GridCreationError):
+                exc.add_cleanup_failure(problem)
+            else:
+                print(f"amux: {problem}")
+        raise
 
 
 def load_agent_pane(pane: Pane, facts: events.PaneFacts | None = None) -> AgentPane:
@@ -486,8 +542,41 @@ def _roster_entry(pane: Pane) -> dict:
         entry["branch"] = wt["branch"]
         entry["worktree"] = wt["path"]
         entry["repo"] = wt["repo"]
-        entry["last_commit"] = worktree.latest_commit_subject(wt["path"])
+        if wt["path"]:
+            entry["last_commit"] = worktree.latest_commit_subject(wt["path"])
+        entry.update(runtime_fields(wt))
     return entry
+
+
+def runtime_fields(row) -> dict:
+    """Runtime identity for a roster entry, or {} for a host agent."""
+    runtime = (row["runtime"] if "runtime" in row.keys() else "") or HOST
+    if runtime == HOST:
+        return {}
+    missing = missing_state_kinds(row)
+    return {
+        "runtime": runtime,
+        "runtime_status": row["runtime_status"] or "",
+        "sandbox_name": row["sandbox_name"] or "",
+        "sandbox_id": row["sandbox_id"] or "",
+        # A degraded agent cannot report every state, so its resolved state is
+        # not authoritative and must never be presented as if it were.
+        "state_degraded": bool(missing),
+        "missing_kinds": list(missing),
+    }
+
+
+def missing_state_kinds(row) -> tuple[str, ...]:
+    """State kinds this execution's agent cannot report."""
+    mechanism = (row["hook_mechanism"] if "hook_mechanism" in row.keys() else "") or ""
+    if not mechanism:
+        # Nothing recorded: a host row, or an execution from before the
+        # mechanism was tracked. Claiming degradation we have not observed
+        # would be as wrong as hiding it.
+        return ()
+    return sandbox_hooks.missing_kinds(
+        row["agent"], hooks_supported=mechanism == "hooks"
+    )
 
 
 def build_context(server: Server, pane_id: str) -> dict:

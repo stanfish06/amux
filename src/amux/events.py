@@ -14,7 +14,7 @@ from amux.shared import DEFAULT_SOCKET, STATE_DIR  # noqa: F401  (re-export)
 STATE_OPTION = "@amux_state"
 
 EventKind = Literal["spawn", "busy", "stop", "notify", "exit"]
-AgentState = Literal["starting", "busy", "idle", "needs-input", "dead"]
+AgentState = Literal["starting", "busy", "idle", "needs-input", "stopped", "dead"]
 PaneKind = Literal["amux", "other"]
 
 STATE_BY_KIND: dict[EventKind, AgentState] = {
@@ -67,7 +67,11 @@ def _amux_socket() -> str | None:
     if not tmux:
         return None
     socket_path = tmux.split(",")[0]
-    return socket_path if socket_path and socket_path.split("/")[-1].startswith(DEFAULT_SOCKET) else None
+    return (
+        socket_path
+        if socket_path and socket_path.split("/")[-1].startswith(DEFAULT_SOCKET)
+        else None
+    )
 
 
 def _socket_args(socket: str) -> list[str]:
@@ -104,6 +108,12 @@ def self_pane_id() -> str | None:
 
 def _wait_channel(pane: str) -> str:
     return f"amux-state-{pane.lstrip('%')}"
+
+
+def publish_state(pane: str, state: AgentState, socket: str) -> None:
+    """Set a pane's state option and wake anything waiting on it."""
+    _tmux(socket, "set-option", "-p", "-t", pane, STATE_OPTION, state)
+    _tmux(socket, "wait-for", "-S", _wait_channel(pane))
 
 
 def _scope_from_registry(pane: str) -> tuple[str, str]:
@@ -161,8 +171,7 @@ def emit(
         detail=detail,
         worktree_since=facts.boundary,
     )
-    _tmux(socket, "set-option", "-p", "-t", pane, STATE_OPTION, event.state)
-    _tmux(socket, "wait-for", "-S", _wait_channel(pane))
+    publish_state(pane, event.state, socket)
     return event
 
 
@@ -321,7 +330,11 @@ def pane_facts(pane: str, socket: str | None = None) -> PaneFacts:
     if out is None:
         return PaneFacts(alive=None)
     facts = _parse_pane(out)
-    return facts if facts.alive and out.split(_DELIM)[0] == pane else PaneFacts(alive=False)
+    return (
+        facts
+        if facts.alive and out.split(_DELIM)[0] == pane
+        else PaneFacts(alive=False)
+    )
 
 
 def pane_status(
@@ -384,6 +397,8 @@ def pane_states(socket: str | None = None) -> list[dict]:
     for row in store.events_for_panes(list(facts_by_pane), since=floor):
         newest_by_pane[row["pane"]] = Event.from_row(row)  # rows arrive oldest first
 
+    rows = store.worktrees_for_panes(list(facts_by_pane), since=floor)
+
     out = []
     for pane, facts in facts_by_pane.items():
         latest = in_incarnation(newest_by_pane.get(pane), facts.boundary)
@@ -397,7 +412,12 @@ def pane_states(socket: str | None = None) -> list[dict]:
                 "name": facts.name,
                 "label": facts.label,
                 "state": (
-                    resolve_state(alive=True, option=facts.state_option, latest=latest)
+                    runtime_aware_state(
+                        resolve_state(
+                            alive=True, option=facts.state_option, latest=latest
+                        ),
+                        rows.get(pane),
+                    )
                     if facts.kind == "amux"
                     else None
                 ),
@@ -406,9 +426,31 @@ def pane_states(socket: str | None = None) -> list[dict]:
                     if latest
                     else None
                 ),
+                **runtime_identity(rows.get(pane)),
             }
         )
     return out
+
+
+def runtime_identity(row) -> dict:
+    """Runtime fields for a monitor row, or {} for a host agent."""
+    if row is None:
+        return {}
+    from amux import core
+
+    return core.runtime_fields(row)
+
+
+def runtime_aware_state(state: AgentState | None, row) -> AgentState | None:
+    """Fold the execution's runtime lifecycle into its resolved pane state."""
+    if row is None or state is None:
+        return state
+    keys = row.keys() if hasattr(row, "keys") else row
+    if "runtime" not in keys or "runtime_status" not in keys:
+        return state
+    if row["runtime"] != "host" and row["runtime_status"] == "stopped":
+        return "stopped"
+    return state
 
 
 def wait(
@@ -479,7 +521,9 @@ def cmd_state(server, args) -> int:
 
 
 def cmd_tail(server, args) -> int:
-    for event in tail(n=args.n, pane=args.pane, workspace=args.workspace, task=args.task):
+    for event in tail(
+        n=args.n, pane=args.pane, workspace=args.workspace, task=args.task
+    ):
         print(event.to_line())
     return 0
 

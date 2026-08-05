@@ -1,0 +1,6 @@
+# Codex configuration for Docker sandbox
+# This configuration enables "yolo mode" - no approvals, full access
+
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+mcp_oauth_credentials_store = "file"
