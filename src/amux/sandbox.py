@@ -1,31 +1,4 @@
-"""Docker Sandbox (`sbx`) adapter.
-
-Every `sbx` invocation amux makes goes through this module, and nothing outside
-it parses `sbx` output. `sbx` is an evolving external tool: isolating it here
-means a CLI change is a change to one file with one set of fixtures, rather
-than a hunt through orchestration code.
-
-The command surface below was verified against **sbx v0.37.1** by running the
-real CLI, not read from a design document. Where the two disagreed, the CLI
-won. In particular:
-
-- there is no `sbx inspect`; the only machine-readable listing is
-  `sbx ls --json`, which returns `{"sandboxes": [...]}`;
-- there is no `--version` flag; `sbx version` prints
-  `sbx version: v0.37.1 <sha>` on stdout;
-- `sbx diagnose -o json` returns `{"version", "checks": [...], "summary"}`
-  where each check carries `name`/`status`/`message`/`detail`/`hint` and
-  status is one of pass/warn/fail/skip;
-- `sbx policy check network HOST:PORT` is read-only and is how reachability is
-  tested without mutating policy. It exits non-zero with a `412` and a
-  `sbx policy init` hint while the global policy is uninitialized;
-- `--no-share-skills` is absent from `sbx create --help` but is accepted;
-- sandbox names admit only letters, numbers, hyphens, periods and plus signs.
-
-Nothing here mutates Docker policy or installs anything. `sbx policy init` in
-particular is a global, one-time, user-owned decision: amux detects that it is
-missing and reports the exact command, and never runs it.
-"""
+"""Docker Sandbox (`sbx`) adapter."""
 
 from __future__ import annotations
 
@@ -41,19 +14,13 @@ from typing import Any
 
 SBX = "sbx"
 
-# The surface documented above was verified against this release. Older builds
-# predate `sbx ls --json`, so the adapter reports rather than guesses.
 MIN_VERSION = (0, 37, 0)
 
-# Docker's supported agent kinds are broader than this; the prototype commits
-# only to the two amux already launches on the host.
 SUPPORTED_AGENTS = ("claude", "codex")
 
 DEFAULT_TIMEOUT_S = 120.0
 
-# `sbx create --name` accepts letters, numbers, hyphens, periods and plus signs.
 _NAME_ALLOWED = re.compile(r"[^A-Za-z0-9.+-]+")
-# `-m/--memory` takes binary units, e.g. `1024m`, `8g`.
 _MEMORY_RE = re.compile(r"^[0-9]+(\.[0-9]+)?[kmgt]i?b?$", re.IGNORECASE)
 
 _VERSION_RE = re.compile(r"v?(\d+)\.(\d+)\.(\d+)")
@@ -87,11 +54,6 @@ def run(
     timeout: float = DEFAULT_TIMEOUT_S,
     cwd: str | os.PathLike[str] | None = None,
 ) -> SbxResult:
-    """Invoke `sbx` and capture both streams.
-
-    Arguments must never carry secrets: argv is visible to every process on the
-    host. Tokens reach a sandbox as a file via `copy_in`, never as a flag.
-    """
     argv = (SBX, *args)
     try:
         proc = subprocess.run(
@@ -107,7 +69,9 @@ def run(
             "and re-run, or spawn without --runtime docker-sandbox"
         ) from exc
     except subprocess.TimeoutExpired as exc:
-        raise SandboxError(f"sbx {' '.join(args)} timed out after {timeout:g}s") from exc
+        raise SandboxError(
+            f"sbx {' '.join(args)} timed out after {timeout:g}s"
+        ) from exc
 
     result = SbxResult(
         argv=argv,
@@ -129,15 +93,7 @@ def _json(result: SbxResult, what: str) -> Any:
         ) from exc
 
 
-# --- version ---
-
-
 def version() -> str:
-    """The installed `sbx` version, e.g. `v0.37.1`.
-
-    `sbx version` prints `sbx version: <version> <commit>`; only the version is
-    stable enough to act on.
-    """
     out = run("version").stdout.strip()
     match = _VERSION_RE.search(out)
     if not match:
@@ -157,7 +113,6 @@ def is_supported(text: str) -> bool:
 
 
 def unsupported_reason(text: str) -> str:
-    """Why this `sbx` is too old, phrased for a user, or "" when it is fine."""
     if is_supported(text):
         return ""
     want = ".".join(str(n) for n in MIN_VERSION)
@@ -167,56 +122,27 @@ def unsupported_reason(text: str) -> str:
     )
 
 
-# --- naming ---
-
-
 def _sanitize(part: str) -> str:
-    """Reduce one identity component to characters `sbx --name` accepts."""
     cleaned = _NAME_ALLOWED.sub("-", part.strip().lower()).strip("-.+")
     return cleaned or "x"
 
 
 def repo_fingerprint(repo: str | os.PathLike[str]) -> str:
-    """A short, stable digest of a repository's real path.
-
-    Two checkouts can share a workspace, task and agent name, so identity that
-    stops at those three would collide across repositories. The digest is of
-    the resolved path, so a symlinked checkout maps to the same sandbox.
-    """
     real = os.path.realpath(os.fspath(repo))
     return hashlib.sha256(real.encode()).hexdigest()[:8]
 
 
 def sandbox_name(workspace: str, task: str, agent_name: str, repo: str) -> str:
-    """The deterministic sandbox name for one agent.
-
-    Derived, not random: a crashed amux must be able to find the sandbox it
-    created. The recorded sandbox *id* remains the authority for identity --
-    this name only has to be reproducible and collision-free.
-    """
-    parts = "-".join(
-        _sanitize(p) for p in (workspace, task, agent_name)
-    )
+    parts = "-".join(_sanitize(p) for p in (workspace, task, agent_name))
     return f"amux-{parts}-{repo_fingerprint(repo)}"
 
 
 def git_remote(name: str) -> str:
-    """The host-side git remote `sbx create --clone` publishes for a sandbox."""
     return f"sandbox-{name}"
-
-
-# --- resources ---
 
 
 @dataclass(frozen=True)
 class Resources:
-    """Explicit per-sandbox caps.
-
-    Deliberately not `sbx`'s defaults: `--cpus 0` means every host CPU and the
-    default memory is half the host's, neither of which is a cap. Four agents
-    on one laptop is the case that has to stay usable.
-    """
-
     cpus: int = 2
     memory: str = "4g"
     share_skills: bool = False
@@ -242,21 +168,11 @@ class Resources:
         self.validate()
         flags = ["--cpus", str(self.cpus), "--memory", self.memory]
         if not self.share_skills:
-            # Docker's shared skills store is read-write and shared across
-            # sandboxes, so it is opt-in rather than opt-out here.
             flags.append("--no-share-skills")
         return tuple(flags)
 
 
-# --- inspection ---
-
-
 def sandboxes() -> list[dict[str, Any]]:
-    """Every sandbox `sbx` knows about.
-
-    `sbx ls --json` returns `{"sandboxes": [...]}`; a missing or non-list
-    `sandboxes` key means the output shape changed and must not be guessed at.
-    """
     payload = _json(run("ls", "--json"), "the sandbox list")
     found = payload.get("sandboxes") if isinstance(payload, dict) else None
     if not isinstance(found, list):
@@ -276,33 +192,15 @@ def exists(name: str) -> bool:
     return find(name) is not None
 
 
-#: The git daemon `sbx create --clone` runs inside the VM. The sandbox-side port
-#: is stable; the HOST port it is published on is reassigned on every restart,
-#: which is why a remote recorded at create time cannot be trusted later.
 GIT_DAEMON_PORT = 9418
 
 
 def published_ports(entry: dict[str, Any]) -> list[dict[str, Any]]:
-    """Ports from an `sbx ls --json` entry.
-
-    `.get` rather than `[...]`: while a sandbox is stopped the `ports` key is
-    absent entirely rather than present-and-empty, so indexing it raises for
-    exactly the sandboxes cleanup cares about most.
-    """
     ports = entry.get("ports") or []
     return [p for p in ports if isinstance(p, dict)]
 
 
 def git_url(name: str, repo: str) -> str | None:
-    """The git URL the sandbox is currently serving its clone on, or None.
-
-    Read fresh from `sbx ls --json` every time, never remembered: `sbx stop`
-    tears down both the published port and the host-side `sandbox-<name>`
-    remote, and waking the sandbox republishes on a DIFFERENT host port without
-    restoring the remote. Fetching by the recorded remote name therefore fails
-    on any sandbox that has ever been stopped -- while the commits are perfectly
-    reachable at the new port.
-    """
     entry = find(name)
     if entry is None:
         return None
@@ -318,11 +216,6 @@ def git_url(name: str, repo: str) -> str | None:
 
 
 def diagnose() -> dict[str, Any]:
-    """`sbx diagnose -o json`, parsed.
-
-    Runs with `check=False`: a failing check is a diagnosis, not an error, and
-    the payload is what preflight needs to report.
-    """
     result = run("diagnose", "-o", "json", check=False)
     payload = _json(result, "sbx diagnostics")
     if not isinstance(payload, dict) or not isinstance(payload.get("checks"), list):
@@ -331,7 +224,6 @@ def diagnose() -> dict[str, Any]:
 
 
 def failed_checks(report: dict[str, Any]) -> list[dict[str, Any]]:
-    """Diagnostic checks that did not pass, worst first."""
     order = {"fail": 0, "warn": 1, "skip": 2}
     bad = [
         check
@@ -364,11 +256,6 @@ class PolicyCheck:
 
 
 def check_network(target: str, sandbox: str | None = None) -> PolicyCheck:
-    """Ask whether policy would allow reaching `host:port`. Read-only.
-
-    `sbx policy check` evaluates the same authorizer sandboxes are enforced
-    against, so this answers the real question without adding a rule.
-    """
     args = ["policy", "check", "network", target]
     if sandbox:
         args += ["--sandbox", sandbox]
@@ -381,16 +268,8 @@ def check_network(target: str, sandbox: str | None = None) -> PolicyCheck:
 
 
 def allow_network_command(target: str, sandbox: str | None = None) -> str:
-    """The exact command a user would run to permit `host:port`.
-
-    Returned as text to print, never executed: widening sandbox network policy
-    is the user's call.
-    """
     scope = f" --sandbox {sandbox}" if sandbox else ""
     return f"sbx policy allow network{scope} {target}"
-
-
-# --- lifecycle ---
 
 
 def create_argv(
@@ -400,11 +279,6 @@ def create_argv(
     resources: Resources,
     clone: bool = True,
 ) -> tuple[str, ...]:
-    """The exact `sbx create` argv for one agent's sandbox.
-
-    Separated from execution so tests can pin the command surface without a
-    Docker daemon, and so a caller can show a user what it is about to run.
-    """
     if agent not in SUPPORTED_AGENTS:
         raise SandboxError(
             f"agent '{agent}' is not supported by the docker-sandbox runtime; "
@@ -424,7 +298,6 @@ def create(
     resources: Resources,
     clone: bool = True,
 ) -> Sandbox:
-    """Create one clone-mode sandbox and return a handle bound to its real id."""
     run(*create_argv(name, agent, repo, resources, clone=clone))
     entry = find(name)
     if entry is None:
@@ -435,35 +308,12 @@ def create(
     return Sandbox(name=name, id=str(entry.get("id") or ""), entry=entry)
 
 
-# Codex will not run a hook it has no persisted trust for -- and it does not
-# say so. Verified live on codex 0.146.0 with a positive control: with the flag
-# UserPromptSubmit and SessionEnd both fired; without it, identical hooks.json
-# and config.toml, zero hooks fired, no prompt, exit 0. Codex printed
-# "clamping SessionEnd hook timeout" in *both* runs, so it parses the document
-# either way and trust alone gates execution. Without this flag a sandboxed
-# Codex reads as permanently idle with nothing anywhere reporting why.
-#
-# The flag bypasses hook review for one invocation. That is acceptable here
-# ONLY because amux itself authors the sole hooks.json in the VM and the VM is
-# the isolation boundary. If amux ever lets a user supply hooks, this must be
-# revisited -- it would then be bypassing review of code amux did not write.
-#
-# Claude needs no equivalent.
 HOOK_TRUST_FLAG = "--dangerously-bypass-hook-trust"
 
 AGENT_ATTACH_ARGS: dict[str, tuple[str, ...]] = {"codex": (HOOK_TRUST_FLAG,)}
 
 
 def attach_argv(name: str, agent: str = "") -> tuple[str, ...]:
-    """The pane command that attaches to an existing sandbox.
-
-    The AGENT positional is omitted where possible: `sbx run --name` reattaches
-    to the agent already recorded in the sandbox's spec, which is what makes a
-    stopped sandbox resumable rather than recreated. It is named only when the
-    agent needs per-invocation arguments, since those go after `--` and `sbx`
-    has nothing to attach them to otherwise. Naming it does not recreate the
-    sandbox; the VM and its contents are still reused.
-    """
     args = ["run", "--name", name]
     extra = AGENT_ATTACH_ARGS.get(agent, ())
     if extra:
@@ -472,7 +322,6 @@ def attach_argv(name: str, agent: str = "") -> tuple[str, ...]:
 
 
 def attach_command(name: str, agent: str = "") -> str:
-    """`attach_argv` as a shell line, for sending to a tmux pane."""
     return " ".join((SBX, *attach_argv(name, agent)))
 
 
@@ -488,13 +337,8 @@ def remove(name: str, force: bool = False) -> None:
     run(*args)
 
 
-# --- preflight ---
-
-
 @dataclass(frozen=True)
 class Check:
-    """One preflight result. `remediation` is a command or action, not prose."""
-
     name: str
     ok: bool
     detail: str = ""
@@ -534,25 +378,10 @@ class Preflight:
 
 
 def is_primary_checkout(repo: str | os.PathLike[str]) -> bool:
-    """True when `repo` is a repository's main checkout.
-
-    A secondary worktree stores `.git` as a *file* pointing elsewhere, and
-    `sbx create --clone` cannot clone from one. This matters in practice
-    because amux runs its own agents inside secondary worktrees, so the
-    obvious thing to hand the sandbox runtime is exactly the thing that
-    cannot work.
-    """
     return (Path(repo) / ".git").is_dir()
 
 
 def _client_source_check() -> Check:
-    """Whether the sandbox context client can actually be found in this build.
-
-    Asked through `sandbox_bootstrap.client_source()` rather than by inspecting
-    paths here, so this checks whatever that resolver really does -- it answers
-    differently for a source checkout and a frozen bundle, and preflight should
-    not hold a second opinion about which is right.
-    """
     from amux import sandbox_bootstrap
 
     try:
@@ -578,22 +407,7 @@ def preflight(
     endpoint: str,
     service_healthy: Callable[[], tuple[bool, str]] | None = None,
 ) -> Preflight:
-    """Check everything that must hold before a sandbox grid is created.
-
-    Read-only by construction: every `sbx` subcommand used here (`version`,
-    `ls`, `diagnose`, `policy check`) inspects state, and none of them creates
-    a sandbox, writes policy, or signs anything in. Nothing here touches tmux,
-    git, or the database either -- the point is that a failure leaves the host
-    exactly as it was.
-
-    `service_healthy` is injected rather than imported so preflight does not
-    depend on the context service being importable, and so the whole check can
-    run in tests without a listener.
-    """
     checks: list[Check] = []
-
-    # 1. Resource values and agent kinds are pure local validation, so they run
-    #    first: no reason to probe Docker to reject `--cpus 0`.
     try:
         resources.validate()
         checks.append(
@@ -602,11 +416,6 @@ def preflight(
     except SandboxError as exc:
         checks.append(Check("resources", False, str(exc), "correct the resource flags"))
 
-    # The shim amux copies into every sandbox. Checked here because a packaged
-    # amux resolves it differently from a source checkout, and a build that
-    # omitted it fails at bootstrap -- after the pane, the sandbox and the
-    # token already exist. That is a packaging fault, so it says so rather than
-    # surfacing as a generic bootstrap error.
     checks.append(_client_source_check())
 
     unsupported = sorted({a for a in agents if a not in SUPPORTED_AGENTS})
@@ -614,16 +423,22 @@ def preflight(
         Check(
             "agents",
             not unsupported,
-            ", ".join(agents) if not unsupported else f"unsupported: {', '.join(unsupported)}",
+            ", ".join(agents)
+            if not unsupported
+            else f"unsupported: {', '.join(unsupported)}",
             f"the docker-sandbox runtime supports {' and '.join(SUPPORTED_AGENTS)}; "
             "spawn the others with the default host runtime",
         )
     )
 
-    # 2. The repository, before anything external.
     if not repo:
         checks.append(
-            Check("repository", False, "no git repository", "spawn inside a git repository")
+            Check(
+                "repository",
+                False,
+                "no git repository",
+                "spawn inside a git repository",
+            )
         )
     elif not is_primary_checkout(repo):
         checks.append(
@@ -638,9 +453,6 @@ def preflight(
     else:
         checks.append(Check("repository", True, repo))
 
-    # 3. sbx itself: presence, then whether this build has the surface amux
-    #    parses. A missing executable makes every later check meaningless, so
-    #    they are skipped rather than reported as spurious failures.
     try:
         detected = version()
     except SandboxError as exc:
@@ -661,11 +473,12 @@ def preflight(
             not reason,
             reason or detected,
             f"upgrade Docker Sandboxes to v{'.'.join(str(n) for n in MIN_VERSION)} "
-            "or newer" if reason else "",
+            "or newer"
+            if reason
+            else "",
         )
     )
 
-    # 4. Docker's own diagnosis, including authentication.
     try:
         report = diagnose()
         bad = failed_checks(report)
@@ -683,9 +496,6 @@ def preflight(
     except SandboxError as exc:
         checks.append(Check("docker", False, str(exc), "run `sbx diagnose`"))
 
-    # 5. The context service, and whether a sandbox could actually reach it.
-    #    Both matter: a healthy service behind a policy that blocks the port is
-    #    just as broken as no service at all.
     if service_healthy is not None:
         healthy, detail = service_healthy()
         checks.append(
@@ -711,13 +521,6 @@ def preflight(
 
 @dataclass(frozen=True)
 class Sandbox:
-    """A live sandbox handle.
-
-    Satisfies the `SandboxOps` protocol that `sandbox_bootstrap` drives, so
-    bootstrap never shells out to `sbx` itself and can be tested against a
-    stub.
-    """
-
     name: str
     id: str = ""
     entry: dict[str, Any] | None = None
@@ -727,11 +530,6 @@ class Sandbox:
         return git_remote(self.name)
 
     def copy_in(self, source: Path, destination: str) -> None:
-        """Copy a host file to an absolute path inside the sandbox.
-
-        This is the delivery path for the context token: the secret travels as
-        a file, so it never appears in argv.
-        """
         if not destination.startswith("/"):
             raise SandboxError(
                 f"sandbox destination must be absolute, got {destination!r}"
@@ -739,44 +537,15 @@ class Sandbox:
         run("cp", os.fspath(source), f"{self.name}:{destination}")
 
     def exec(self, argv: Sequence[str], *, user: str | None = None) -> str:
-        """Run a command inside the sandbox and return its stdout.
-
-        `user` selects the in-VM user (`sbx exec -u`). It exists for one
-        reason: `sbx cp` preserves the source file's mode but sets its owner to
-        the *host* uid, and offers no flag for either. A 0600 file therefore
-        lands owned by a uid that does not exist in the container, so the agent
-        cannot read its own capability and cannot chmod what it does not own.
-        The fix is a `chown` as root after each copy, which needs this.
-
-        `None` means exactly today's behaviour -- no `-u` at all -- rather than
-        naming a default user, because the agent account differs between the
-        Claude and Codex images and amux has no business guessing it. Root is
-        never a default: everything else amux runs in a sandbox runs as the
-        agent, and defaulting to root would make that the accident.
-        """
         if not argv:
             raise SandboxError("exec needs a command")
         flags = ("-u", user) if user else ()
         return run("exec", *flags, self.name, *argv).stdout
 
     def wake(self) -> None:
-        """Ensure the VM is running, starting it if it is stopped.
-
-        There is no `sbx start`; `sbx exec` starts a stopped sandbox before
-        running its command, so the cheapest true command doubles as a start.
-        Needed because the host-side `sandbox-<name>` git remote is served from
-        inside the VM: a stopped sandbox's committed tip cannot be read at all,
-        so cleanup would destroy commits it never managed to preserve.
-        """
         self.exec(["true"])
 
     def working_tree_status(self) -> str:
-        """Porcelain status of the clone inside the sandbox. Empty means clean.
-
-        This is what stands between `--clean` and destroying an agent's
-        uncommitted work, so a status that cannot be read is treated as dirty
-        by the caller rather than as clean.
-        """
         return self.exec(["git", "status", "--porcelain"]).strip()
 
     def refresh(self) -> Sandbox:

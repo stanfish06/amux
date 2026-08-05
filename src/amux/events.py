@@ -14,9 +14,6 @@ from amux.shared import DEFAULT_SOCKET, STATE_DIR  # noqa: F401  (re-export)
 STATE_OPTION = "@amux_state"
 
 EventKind = Literal["spawn", "busy", "stop", "notify", "exit"]
-# `stopped` has no event kind: nothing an agent does produces it. It comes from
-# the execution row, when a sandbox has been stopped but not cleaned up, and it
-# is one of the six states the spec enumerates rather than a new invention.
 AgentState = Literal["starting", "busy", "idle", "needs-input", "stopped", "dead"]
 PaneKind = Literal["amux", "other"]
 
@@ -70,7 +67,11 @@ def _amux_socket() -> str | None:
     if not tmux:
         return None
     socket_path = tmux.split(",")[0]
-    return socket_path if socket_path and socket_path.split("/")[-1].startswith(DEFAULT_SOCKET) else None
+    return (
+        socket_path
+        if socket_path and socket_path.split("/")[-1].startswith(DEFAULT_SOCKET)
+        else None
+    )
 
 
 def _socket_args(socket: str) -> list[str]:
@@ -110,18 +111,7 @@ def _wait_channel(pane: str) -> str:
 
 
 def publish_state(pane: str, state: AgentState, socket: str) -> None:
-    """Set a pane's state option and wake anything waiting on it.
-
-    Split out of `emit` because the context service needs exactly this and not
-    the store write beside it: `emit` attributes an event to whichever worktree
-    the pane fronts *now*, which is right for a hook running inside that pane
-    and wrong for a capability token, whose pane id tmux may since have
-    recycled onto a different agent. The service writes the event itself with
-    the identity its token is bound to, then calls this to move the pane.
-
-    Both halves stay here so there is one place that knows the option name and
-    the wait channel.
-    """
+    """Set a pane's state option and wake anything waiting on it."""
     _tmux(socket, "set-option", "-p", "-t", pane, STATE_OPTION, state)
     _tmux(socket, "wait-for", "-S", _wait_channel(pane))
 
@@ -340,7 +330,11 @@ def pane_facts(pane: str, socket: str | None = None) -> PaneFacts:
     if out is None:
         return PaneFacts(alive=None)
     facts = _parse_pane(out)
-    return facts if facts.alive and out.split(_DELIM)[0] == pane else PaneFacts(alive=False)
+    return (
+        facts
+        if facts.alive and out.split(_DELIM)[0] == pane
+        else PaneFacts(alive=False)
+    )
 
 
 def pane_status(
@@ -403,7 +397,6 @@ def pane_states(socket: str | None = None) -> list[dict]:
     for row in store.events_for_panes(list(facts_by_pane), since=floor):
         newest_by_pane[row["pane"]] = Event.from_row(row)  # rows arrive oldest first
 
-    # One query, not one per pane: this is the monitor's per-refresh view.
     rows = store.worktrees_for_panes(list(facts_by_pane), since=floor)
 
     out = []
@@ -440,13 +433,7 @@ def pane_states(socket: str | None = None) -> list[dict]:
 
 
 def runtime_identity(row) -> dict:
-    """Runtime fields for a monitor row, or {} for a host agent.
-
-    The monitor and `GET /v1/events/state` both read `pane_states`, so this is
-    what makes a sandboxed agent distinguishable from a host one in the views
-    that show every pane at once. Omitted entirely for host agents, so their
-    monitor rows are unchanged.
-    """
+    """Runtime fields for a monitor row, or {} for a host agent."""
     if row is None:
         return {}
     from amux import core
@@ -455,21 +442,12 @@ def runtime_identity(row) -> dict:
 
 
 def runtime_aware_state(state: AgentState | None, row) -> AgentState | None:
-    """Fold the execution's runtime lifecycle into its resolved pane state.
-
-    A stopped sandbox's pane still holds whatever state its last event implied,
-    which would show a VM that is not running as `idle` -- indistinguishable
-    from one that is running and waiting. The row knows better, so it wins.
-    """
+    """Fold the execution's runtime lifecycle into its resolved pane state."""
     if row is None or state is None:
         return state
     keys = row.keys() if hasattr(row, "keys") else row
     if "runtime" not in keys or "runtime_status" not in keys:
         return state
-    # Gated on the runtime, not just the status: `stopped` describes a VM, and
-    # a host agent has none. A host row carrying that status is malformed, and
-    # reporting it as stopped would invent a state the host runtime cannot be
-    # in.
     if row["runtime"] != "host" and row["runtime_status"] == "stopped":
         return "stopped"
     return state
@@ -543,7 +521,9 @@ def cmd_state(server, args) -> int:
 
 
 def cmd_tail(server, args) -> int:
-    for event in tail(n=args.n, pane=args.pane, workspace=args.workspace, task=args.task):
+    for event in tail(
+        n=args.n, pane=args.pane, workspace=args.workspace, task=args.task
+    ):
         print(event.to_line())
     return 0
 

@@ -224,7 +224,10 @@ class ContextClient:
         return text.replace(token, "***")
 
     def get(
-        self, path: str, params: dict[str, Any] | None = None, timeout: float | None = None
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        timeout: float | None = None,
     ) -> dict:
         return self._request("GET", path, params=params, timeout=timeout)
 
@@ -251,7 +254,9 @@ class ContextClient:
         if data is not None:
             request.add_header("Content-Type", "application/json")
         try:
-            with self._opener.open(request, timeout=timeout or self.config.timeout) as response:
+            with self._opener.open(
+                request, timeout=timeout or self.config.timeout
+            ) as response:
                 return self._document(response.read())
         except urllib.error.HTTPError as exc:
             raise self._service_error(exc) from None
@@ -578,7 +583,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_notes = sub.add_parser("notes", help="list notes visible to this agent")
     p_notes.add_argument("--task", default=None, help="task filter")
-    p_notes.add_argument("--scope", default=None, help=f"one of {'/'.join(NOTE_SCOPES)}")
+    p_notes.add_argument(
+        "--scope", default=None, help=f"one of {'/'.join(NOTE_SCOPES)}"
+    )
     p_notes.add_argument("--kind", default=None, help=f"one of {'/'.join(NOTE_KINDS)}")
     p_notes.add_argument("-n", type=int, default=20, help="max notes")
     p_notes.add_argument("--json", action="store_true", help="JSONL output")
@@ -589,7 +596,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_note = sub.add_parser("note", help="publish a scoped note")
     p_note.add_argument("text", nargs="+", help="note text")
     p_note.add_argument(
-        "--scope", default="task", help=f"one of {'/'.join(NOTE_SCOPES)} (default: task)"
+        "--scope",
+        default="task",
+        help=f"one of {'/'.join(NOTE_SCOPES)} (default: task)",
     )
     p_note.add_argument(
         "--kind", default="note", help=f"one of {'/'.join(NOTE_KINDS)} (default: note)"
@@ -603,7 +612,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_emit = ev.add_parser("emit", help="append an event (called by agent hooks)")
     p_emit.add_argument("kind", help=f"one of {'/'.join(EVENT_KINDS)}")
     p_emit.add_argument(
-        "--detail", default=None, help="free-form note (default: from hook JSON on stdin)"
+        "--detail",
+        default=None,
+        help="free-form note (default: from hook JSON on stdin)",
     )
     # Accepted for host-hook compatibility, ignored: see cmd_event_emit.
     p_emit.add_argument("--pane", default=None, help=argparse.SUPPRESS)

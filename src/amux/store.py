@@ -1,15 +1,3 @@
-"""Scoped context store: events, notes, and the worktree registry.
-
-One SQLite file at $XDG_STATE_HOME/amux/context.db. WAL + busy_timeout so
-concurrent agents can read/write without tripping over each other.
-
-Identity: a worktree owns a surrogate `id` that nothing recycles, and notes and
-events carry that id plus the `repo` they belong to. Pane ids are *not* stable —
-tmux keeps its `%N` counter in the server process, so a restarted amux-root
-hands `%67` back out to an unrelated agent. Anything keyed on a pane alone
-silently merges two different worktrees' history.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -37,8 +25,6 @@ NOTE_SCOPES = ("agent", "task", "workspace")
 NOTE_KINDS = ("note", "decision", "finding", "blocker")
 RUNTIMES = ("host", "docker-sandbox")
 
-# Added in schema 3. Every one carries a default, so a version 2 row becomes a
-# host row on read and an older amux binary still writes valid rows.
 _RUNTIME_COLUMNS = (
     ("runtime", "TEXT NOT NULL DEFAULT 'host'"),
     ("runtime_status", "TEXT NOT NULL DEFAULT ''"),
@@ -215,9 +201,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
             existing = _columns(conn, "worktrees")
             for column, decl in _RUNTIME_COLUMNS:
                 if column not in existing:
-                    conn.execute(
-                        f"ALTER TABLE worktrees ADD COLUMN {column} {decl}"
-                    )
+                    conn.execute(f"ALTER TABLE worktrees ADD COLUMN {column} {decl}")
 
         _apply_schema(conn)
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -294,9 +278,6 @@ def schema_version(db_path: Path | None = None) -> int:
     """
     with _session(db_path) as conn:
         return int(conn.execute("PRAGMA user_version").fetchone()[0])
-
-
-# --- events ---
 
 
 def add_event(
@@ -384,9 +365,7 @@ def events_for_panes(
         return _rows(conn, sql + " ORDER BY ts, id", params)
 
 
-def _page(
-    sql: str, params: tuple, after: int | None, limit: int
-) -> tuple[str, tuple]:
+def _page(sql: str, params: tuple, after: int | None, limit: int) -> tuple[str, tuple]:
     """Append ordering and a limit, flipping direction for a cursor walk.
 
     Without `after` these queries answer "the latest N", so they sort newest
@@ -663,15 +642,11 @@ def set_worktree_status(
         )
 
 
-# --- capability tokens ---
-#
 # A sandbox holds a plaintext token; the host keeps only its SHA-256. Every
 # fact the context service attributes to a caller — workspace, task, repo,
 # pane, agent, visibility — is read from the execution row this token is bound
 # to, never from the request. That is what stops a sandbox claiming to be
 # another agent.
-
-
 def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
@@ -683,12 +658,7 @@ def mint_context_token(
     now: float | None = None,
     db_path: Path | None = None,
 ) -> tuple[str, int]:
-    """Create a capability for one execution and return `(plaintext, id)`.
-
-    The plaintext is returned once and never stored; the caller is responsible
-    for delivering it to its sandbox and dropping it. `ttl` is in seconds, and
-    omitting it means the capability lives until the sandbox is removed.
-    """
+    """Create a capability for one execution and return `(plaintext, id)`."""
     for permission in permissions:
         if not permission.strip() or "," in permission:
             raise ValueError(
@@ -697,9 +667,12 @@ def mint_context_token(
     now = time.time() if now is None else now
     token = secrets.token_urlsafe(32)
     with _session(db_path) as conn:
-        if conn.execute(
-            "SELECT 1 FROM worktrees WHERE id = ?", (worktree_id,)
-        ).fetchone() is None:
+        if (
+            conn.execute(
+                "SELECT 1 FROM worktrees WHERE id = ?", (worktree_id,)
+            ).fetchone()
+            is None
+        ):
             raise ValueError(f"no worktree with id {worktree_id}")
         cur = conn.execute(
             "INSERT INTO context_tokens"
@@ -719,13 +692,7 @@ def mint_context_token(
 def context_token_record(
     token: str, now: float | None = None, db_path: Path | None = None
 ) -> dict[str, Any] | None:
-    """Resolve a plaintext token to its execution identity, or None.
-
-    None covers unknown, expired, and revoked alike: the service must not tell
-    a caller which of those it was. The row is fetched by hash and then
-    confirmed with a constant-time compare, so a near-miss hash cannot be
-    narrowed by timing the response.
-    """
+    """Resolve a plaintext token to its execution identity, or None."""
     if not token:
         return None
     now = time.time() if now is None else now
@@ -791,13 +758,7 @@ def set_worktree_runtime(
     sandbox_id: str | None = None,
     db_path: Path | None = None,
 ) -> None:
-    """Update the VM-side lifecycle fields, leaving unnamed ones alone.
-
-    Deliberately separate from `set_worktree_status`: `status` tracks amux's
-    merge lifecycle (active/merged/removed) and `runtime_status` tracks the
-    sandbox itself (created/running/stopped/failed). A sandbox can be stopped
-    while its branch is still unmerged, so neither may overwrite the other.
-    """
+    """Update the VM-side lifecycle fields, leaving unnamed ones alone."""
     updates = {
         "runtime_status": runtime_status,
         "sandbox_name": sandbox_name,

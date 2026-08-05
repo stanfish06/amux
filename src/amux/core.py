@@ -268,12 +268,6 @@ def _taken_names(session: Session) -> set[str]:
 
 
 def _next_name(agent: str, resumable: dict[str, list[str]], taken: set[str]) -> str:
-    """A prior name for this agent kind if one is free, else a fresh one.
-
-    Only names not already worn by a live pane: a resumable row can outlive its
-    pane, but two panes must never share a name -- notes, events and worktrees
-    are addressed by it.
-    """
     while resumable.get(agent):
         candidate = resumable[agent].pop(0)
         if candidate not in taken:
@@ -282,9 +276,6 @@ def _next_name(agent: str, resumable: dict[str, list[str]], taken: set[str]) -> 
 
 
 def _rollback(runtime: Runtime) -> list[str]:
-    """Unwind a runtime's acquired resources, reporting failures rather than
-    raising them. A rollback runs while an error is already propagating, so it
-    must never be the thing that surfaces."""
     try:
         return list(runtime.rollback())
     except Exception as exc:  # noqa: BLE001
@@ -327,10 +318,6 @@ def _build_grid(
         raise ValueError(f"{len(agents)} agents do not fit a {nrows}x{ncols} grid")
     runtime = runtime or HostRuntime()
     taken = _taken_names(window.session)
-    # A resumable execution can only be found by its name, so a respawn has to
-    # be steered onto its prior names or the runtime's reattach path is
-    # unreachable however correct it is: `kg` removes the pane, the name stops
-    # being taken, a fresh one is drawn, and the stopped VM is orphaned.
     resumable = runtime.resumable_names(workspace=workspace, task=task, cwd=cwd)
     rows = _split_evenly(window.panes[0], nrows, PaneDirection.Below, cwd)
     agent_panes = []
@@ -354,8 +341,6 @@ def _build_grid(
             )
             panes_info.append((pane, agent, name))
 
-    # The runtime decides where each pane works and what it runs; everything
-    # tmux-facing stays here so pane metadata and events are runtime-agnostic.
     socket = _socket_name(window)
     try:
         launches = {
@@ -413,8 +398,6 @@ def spawn_agent_space(
     if server.has_session(session_name):
         raise ValueError(f"{ALIAS['session']} '{session_name}' already exists")
     agents = init_grid_agents or ["claude"] * (init_grid_nrows * init_grid_ncols)
-    # Before the session exists: a runtime that cannot run this grid must leave
-    # no tmux session, sandbox, git reference or registry row behind.
     runtime = runtime or HostRuntime()
     runtime.preflight(
         agents, workspace=session_name, task=init_task_name, cwd=session_path
@@ -450,8 +433,6 @@ def spawn_agent_space(
             runtime=runtime,
         )
     except BaseException as exc:
-        # This call created the session, so this call takes it away again: a
-        # failed spawn must not leave a workspace holding dead panes.
         problem = _discard("kill session", lambda: session.cmd("kill-session"))
         if problem:
             if isinstance(exc, GridCreationError):
@@ -477,11 +458,8 @@ def spawn_agent_grid(
     runtime: Runtime | None = None,
 ) -> AgentGrid:
     agents = agents or ["claude"] * (nrows * ncols)
-    # Before the window exists, for the same reason as `spawn_agent_space`.
     runtime = runtime or HostRuntime()
-    runtime.preflight(
-        agents, workspace=session.name or "", task=window_name, cwd=cwd
-    )
+    runtime.preflight(agents, workspace=session.name or "", task=window_name, cwd=cwd)
     window = session.new_window(
         window_name=window_name, start_directory=cwd, attach=False
     )
@@ -497,8 +475,6 @@ def spawn_agent_grid(
             runtime=runtime,
         )
     except BaseException as exc:
-        # Only the window: the workspace pre-existed this call and other tasks
-        # are still running in it.
         problem = _discard("kill task window", lambda: window.cmd("kill-window"))
         if problem:
             if isinstance(exc, GridCreationError):
@@ -566,12 +542,6 @@ def _roster_entry(pane: Pane) -> dict:
         entry["branch"] = wt["branch"]
         entry["worktree"] = wt["path"]
         entry["repo"] = wt["repo"]
-        # Only for a row that actually has a host worktree. A sandbox row
-        # carries path='', and `git -C ''` is a documented no-op that reports
-        # the *calling process's* checkout -- so an unguarded call here
-        # attributes the host's HEAD subject to a sandboxed agent that never
-        # made that commit. A sandbox's real commit arrives through its
-        # `sandbox-<name>` remote, not from a host path.
         if wt["path"]:
             entry["last_commit"] = worktree.latest_commit_subject(wt["path"])
         entry.update(runtime_fields(wt))
@@ -579,11 +549,7 @@ def _roster_entry(pane: Pane) -> dict:
 
 
 def runtime_fields(row) -> dict:
-    """Runtime identity for a roster entry, or {} for a host agent.
-
-    Empty for `host` on purpose: adding the keys unconditionally would change
-    every existing consumer's output for agents whose runtime has not changed.
-    """
+    """Runtime identity for a roster entry, or {} for a host agent."""
     runtime = (row["runtime"] if "runtime" in row.keys() else "") or HOST
     if runtime == HOST:
         return {}
@@ -601,15 +567,8 @@ def runtime_fields(row) -> dict:
 
 
 def missing_state_kinds(row) -> tuple[str, ...]:
-    """State kinds this execution's agent cannot report.
-
-    Derived rather than stored: it is a pure function of the agent and which
-    hook mechanism its image supports, so every reader computes the same answer
-    from one recorded fact instead of three of them storing a list.
-    """
-    mechanism = (
-        row["hook_mechanism"] if "hook_mechanism" in row.keys() else ""
-    ) or ""
+    """State kinds this execution's agent cannot report."""
+    mechanism = (row["hook_mechanism"] if "hook_mechanism" in row.keys() else "") or ""
     if not mechanism:
         # Nothing recorded: a host row, or an execution from before the
         # mechanism was tracked. Claiming degradation we have not observed

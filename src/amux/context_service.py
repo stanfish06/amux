@@ -1,31 +1,4 @@
-"""Host-side context service: the only path from a sandbox to amux context.
-
-A sandboxed agent has no host tmux socket, no amux state directory, and no
-`context.db`. It gets structured context by asking this service, which runs on
-the host, owns the SQLite store, and answers a deliberately small versioned
-JSON interface over loopback. Docker routes `host.docker.internal:<port>` here
-only when the user has allowed `localhost:<port>` in sandbox policy; amux
-checks that rule elsewhere and never widens it.
-
-Everything here fails closed. The bind address is not configurable — a service
-that can be reached from off-host is a different trust boundary, not a
-configuration choice. Every request that is not `GET /healthz` must present a
-capability token; routing happens *after* authentication so an unauthenticated
-caller cannot map the interface. Bodies are bounded before they are read,
-errors carry a stable code, and logs are redacted on the way out.
-
-Identity is the other half. A caller presents a token and nothing else: the
-workspace, task, repository, pane, agent and permissions all come from the
-execution row that token is bound to, so a request cannot name who it is. The
-handlers reuse the native `store`, `core` and `events` functions, which is what
-makes a sandboxed agent's answers the same as an equivalently scoped host
-agent's rather than merely similar.
-
-At the bottom: `serve_foreground` runs the service, and `start`/`status`/`stop`
-manage one per state directory through a run file recording its pid and bound
-port. Every one of them refuses rather than degrades — there is no
-unauthenticated listener and no mounted database to fall back to.
-"""
+# Host-side context service
 
 from __future__ import annotations
 
@@ -75,10 +48,6 @@ class ConfigError(ValueError):
     """Bad service configuration — actionable, printed, never a traceback."""
 
 
-# --- error envelope ---
-
-# code -> HTTP status. The code is the stable half of the contract: clients
-# branch on it, so statuses may gain nuance but a code never changes meaning.
 ERROR_STATUS: dict[str, int] = {
     "invalid_request": 400,
     "unauthorized": 401,
@@ -96,23 +65,17 @@ _CODE_BY_STATUS = {status: code for code, status in ERROR_STATUS.items()}
 
 
 def _code_for_status(status: int) -> str:
-    """A code for a status http.server raised on its own (414, 431, 501, 505)."""
     return _CODE_BY_STATUS.get(
         status, "invalid_request" if status < 500 else "internal_error"
     )
 
 
 class ServiceError(Exception):
-    """A refusal the client is allowed to see. Messages say what to fix and
-    never quote request material back, which would echo secrets into logs."""
-
     def __init__(self, code: str, message: str, *, close: bool = False) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.status = ERROR_STATUS.get(code, 500)
-        # Set when we refuse a body we did not drain: the connection is out of
-        # step with the client and cannot be reused for a second request.
         self.close = close
 
     def envelope(self) -> dict[str, Any]:
@@ -120,8 +83,6 @@ class ServiceError(Exception):
             "error": {"code": self.code, "message": self.message, "status": self.status}
         }
 
-
-# --- redaction ---
 
 _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)\bbearer\s+[\w.~+/=-]+"), "Bearer <redacted>"),
@@ -137,11 +98,6 @@ _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
 
 
 def redact(text: str) -> str:
-    """Strip credential-shaped material from a string bound for a log.
-
-    Belt and braces: no code path here logs a body or an Authorization header,
-    so this exists to keep the next one honest too.
-    """
     for pattern, replacement in _REDACTIONS:
         text = pattern.sub(replacement, text)
     return text
@@ -162,9 +118,6 @@ def configure_logging(
     stream: Any | None = None,
     level: int = logging.INFO,
 ) -> logging.Logger:
-    """Point the service log at its file (and optionally a stream) through the
-    redacting formatter. `propagate` stays off: a root handler would re-emit
-    the same records unredacted."""
     log = get_logger()
     log.setLevel(level)
     log.propagate = False
@@ -185,18 +138,8 @@ def configure_logging(
     return log
 
 
-# --- configuration ---
-
-
 @dataclass(frozen=True)
 class ServiceConfig:
-    """Ports, paths, and every bound the interface promises.
-
-    The limits are part of the contract, not tuning knobs: clients are told a
-    request may be refused for exceeding them, so they live in one place and
-    are reported the same way each time.
-    """
-
     port: int = DEFAULT_PORT
     db_path: Path | None = None  # None -> store.DB_PATH
     socket: str = DEFAULT_SOCKET  # tmux server whose pane options we update
@@ -208,21 +151,11 @@ class ServiceConfig:
     max_results: int = 200
     default_results: int = 10
     max_wait_s: float = 60.0
-    # How often a long poll re-queries SQLite. In-process writes wake it
-    # immediately; this is what makes a *native* host write visible too.
     poll_interval_s: float = 0.25
-    # How often the accept loop checks whether it has been asked to stop, which
-    # is therefore also how long `shutdown()` can block. A daemon should not
-    # wake hundreds of times a second to poll a flag it will read once, so this
-    # stays coarse; a test that starts and stops a server per case sets it low.
-    # Not the same knob as `poll_interval_s` — conflating them would change how
-    # long a caller's wait can miss a native write.
     shutdown_poll_s: float = 0.5
     request_timeout_s: float = 30.0
 
     def __post_init__(self) -> None:
-        # 0 binds an ephemeral port. Real runs want a stable one the sandbox
-        # policy names, but tests need to bind without picking a fight.
         if not 0 <= self.port <= 65535:
             raise ConfigError(f"port must be between 0 and 65535, got {self.port}")
         for name in (
@@ -281,13 +214,6 @@ class ServiceConfig:
 
     @property
     def state_home(self) -> Path:
-        """The amux state directory, resolved on use rather than captured.
-
-        A dataclass default is evaluated once, at class-definition time, so a
-        field defaulting to `shared.STATE_DIR` would keep pointing at the real
-        one even after a test redirected it — and this is where 2.5 puts the
-        PID file and the log.
-        """
         return self.state_dir or shared.STATE_DIR
 
     @property
@@ -296,35 +222,16 @@ class ServiceConfig:
         return self.log_path or self.state_home / LOG_NAME
 
 
-# --- identity and capabilities ---
-
-# What a capability may do. A token carries a subset; a route names the one it
-# needs. Read is not implied by write: a hook-only capability that may post
-# events has no business reading the roster.
 PERM_CONTEXT_READ = "context:read"
 PERM_NOTES_WRITE = "notes:write"
 PERM_EVENTS_WRITE = "events:write"
 
-# What amux mints for a sandboxed agent. Every agent token carries all three,
-# so this is *not* least privilege in practice, and documentation must not
-# claim it is. Two things are true instead: host control — spawn, kill, clean,
-# integrate, monitor — is not expressible in this vocabulary at all, so no
-# token can be escalated into it; and `requires=` on each route is the seam
-# through which a narrower capability can be minted later without changing any
-# handler.
 AGENT_PERMISSIONS = (PERM_CONTEXT_READ, PERM_NOTES_WRITE, PERM_EVENTS_WRITE)
 
 
 @dataclass(frozen=True)
 class Identity:
-    """Who the *host* says a caller is.
-
-    Every field is read from the capability's execution row, never from the
-    request. A body field called `agent` or `workspace` is data, not identity,
-    and no handler may read it as one. These fields are also the whole of the
-    caller's visibility: workspace, task, pane, and repo are exactly what the
-    native note rules filter on.
-    """
+    """Caller identity"""
 
     worktree_id: int
     token_id: int = 0
@@ -345,14 +252,12 @@ class Identity:
 
     @property
     def scope(self) -> str:
-        """`workspace/task`, for a refusal an agent has to act on."""
         return f"{self.workspace}/{self.task}"
 
 
 def identity_from_record(
     record: Mapping[str, Any], default_socket: str = DEFAULT_SOCKET
 ) -> Identity:
-    """Build an `Identity` from `store.context_token_record`'s row."""
     return Identity(
         worktree_id=int(record["worktree_id"]),
         token_id=int(record["id"]),
@@ -368,11 +273,6 @@ def identity_from_record(
         sandbox_name=record["sandbox_name"] or "",
         sandbox_id=record["sandbox_id"] or "",
         status=record["status"] or "active",
-        # A row that names its tmux server wins. An empty value means exactly
-        # one thing — a row migrated from schema 2, before the column existed —
-        # since register_worktree now always records it. That reading is
-        # unambiguous only while amux runs one tmux server per host, which holds
-        # for the prototype.
         socket=record["socket_name"] or default_socket,
         permissions=frozenset(record["permissions"]),
     )
@@ -384,25 +284,16 @@ def _libtmux_server(socket: str) -> Any:
     return libtmux.Server(socket_name=socket)
 
 
-# `authenticator(service, token) -> Identity`, raising ServiceError to refuse.
 Authenticator = Callable[["ContextService", str], Identity]
 
 _UNAUTHORIZED = "invalid or expired capability token"
 
 
 def store_authenticator(service: ContextService, token: str) -> Identity:
-    """Resolve a presented token through the host store.
-
-    `store.context_token_record` answers None for unknown, expired, and revoked
-    alike and compares the hash in constant time, so this cannot be used to
-    narrow a guess.
-    """
     record = store.context_token_record(token, db_path=service.db_path)
     if record is None:
         raise ServiceError("unauthorized", _UNAUTHORIZED)
     if record["status"] == "removed":
-        # Removal revokes tokens; reaching here means that failed, so refuse
-        # anyway rather than serve a retired execution.
         raise ServiceError(
             "unauthorized", "this execution has been removed from the registry"
         )
@@ -414,16 +305,7 @@ def reject_all_tokens(service: ContextService, token: str) -> Identity:
     raise ServiceError("unauthorized", _UNAUTHORIZED)
 
 
-# --- scope ---
-
-
 def _quote(value: str, limit: int = 64) -> str:
-    """A caller-supplied value, made safe to put in a message.
-
-    Refusals name what was asked for — "pane %99 is not in proj/fix" is
-    actionable where "forbidden" is not — but the value came from the wire, so
-    it is truncated and stripped of anything that could forge a log line.
-    """
     cleaned = "".join(c for c in value[:limit] if c.isprintable() and c not in "\"'")
     return cleaned + ("…" if len(value) > limit else "")
 
@@ -440,10 +322,6 @@ def require_scope(
     workspace: str | None = None,
     repo: str | None = None,
 ) -> None:
-    """Refuse a request that names a workspace or repository other than the
-    caller's. Task is deliberately absent: a sibling task in the same workspace
-    is readable to exactly the extent the native note rules allow, so handlers
-    pass the task through and let visibility decide."""
     if workspace is not None and workspace != identity.workspace:
         raise deny("workspace", workspace, identity)
     if repo is not None and repo != identity.repo:
@@ -455,9 +333,6 @@ def require_permission(identity: Identity, permission: str) -> None:
         raise ServiceError(
             "forbidden", f"this capability does not grant '{permission}'"
         )
-
-
-# --- schema compatibility ---
 
 
 @dataclass(frozen=True)
@@ -477,23 +352,11 @@ class SchemaInfo:
 
 
 def schema_info(db_path: Path) -> SchemaInfo:
-    """The store's schema version, as `store` reports it after opening.
-
-    The store and the service judge a version differently, on purpose. The
-    store is a library and stays permissive: opening migrates a database this
-    build is ahead of, and one written by a *newer* amux is left alone, because
-    the migration is additive and an old binary can still read it. The service
-    is a trust boundary and fails closed: it refuses to serve a version it does
-    not expect rather than guess that the difference is additive.
-    """
     try:
         version = store.schema_version(db_path)
     except sqlite3.Error:
         return SchemaInfo(version=None, expected=store.SCHEMA_VERSION)
     return SchemaInfo(version=version, expected=store.SCHEMA_VERSION)
-
-
-# --- requests and routing ---
 
 
 @dataclass
@@ -507,8 +370,6 @@ class Request:
 
     @property
     def caller(self) -> Identity:
-        """The authenticated caller. Handlers use this and never `body`, for
-        anything that decides attribution or scope."""
         if self.identity is None:
             raise ServiceError("unauthorized", _UNAUTHORIZED)
         return self.identity
@@ -552,16 +413,11 @@ def _token_from_authorization(raw: str) -> str:
             "unauthorized", "missing 'Authorization: Bearer <token>' header"
         )
     if scheme.lower() != "bearer" or not token.strip():
-        raise ServiceError(
-            "unauthorized", "expected 'Authorization: Bearer <token>'"
-        )
+        raise ServiceError("unauthorized", "expected 'Authorization: Bearer <token>'")
     token = token.strip()
     if len(token) > MAX_TOKEN_CHARS:
         raise ServiceError("unauthorized", "capability token is too long")
     return token
-
-
-# --- the service ---
 
 
 class ContextService:
@@ -596,12 +452,6 @@ class ContextService:
     def handle(
         self, request: Request, read_body: Callable[[], dict[str, Any]] | None = None
     ) -> tuple[int, dict[str, Any]]:
-        """Authenticate, route, *then* read the body.
-
-        That order is the point: an unauthenticated caller, or one asking for an
-        operation that does not exist, is refused before we read a single byte
-        it sent.
-        """
         route = self.resolve(request)
         if read_body is not None:
             request.body = read_body()
@@ -611,8 +461,6 @@ class ContextService:
         methods = {m for (m, p) in _ROUTES if p == request.path}
         public = any(r.public for (_, p), r in _ROUTES.items() if p == request.path)
         if not public:
-            # Before routing: a 404 handed to an unauthenticated caller would
-            # tell it which operations exist.
             request.identity = self.authenticate(request)
         matched = _ROUTES.get((request.method, request.path))
         if matched is not None:
@@ -630,24 +478,19 @@ class ContextService:
         )
 
     def authenticate(self, request: Request) -> Identity:
-        return self.authenticator(self, _token_from_authorization(request.authorization))
+        return self.authenticator(
+            self, _token_from_authorization(request.authorization)
+        )
 
     def wake(self) -> None:
-        """Release every waiter: something this service committed has changed."""
         with self._changed:
             self._changed.notify_all()
 
     def sleep(self, timeout: float) -> None:
-        """Wait to be woken, or for `timeout` — whichever comes first."""
         with self._changed:
             self._changed.wait(timeout)
 
     def tmux_server(self, socket: str) -> Any:
-        """The libtmux server a caller's pane lives on, cached per socket.
-
-        A seam, so the read paths can be exercised without a tmux server. In
-        production this is the same object the native commands build.
-        """
         with self._servers_lock:
             server = self._servers.get(socket)
             if server is None:
@@ -656,18 +499,12 @@ class ContextService:
             return server
 
     def build_context(self, identity: Identity) -> dict[str, Any]:
-        """`core.build_context` for a sandboxed caller.
-
-        Same function the native `amux ctx` calls, so a sandbox and an
-        equivalently scoped host agent see the same roster and the same notes.
-        Only the runtime fields are added on top, and only to `self`.
-        """
+        """`core.build_context` for a sandboxed caller."""
         try:
-            context = core.build_context(self.tmux_server(identity.socket), identity.pane)
+            context = core.build_context(
+                self.tmux_server(identity.socket), identity.pane
+            )
         except ValueError as exc:
-            # The pane the execution was attached to is gone — a killed task,
-            # usually, with the sandbox still running. Say so instead of
-            # returning a roster that quietly claims to be complete.
             raise ServiceError(
                 "service_unavailable",
                 f"the host pane for {identity.name or identity.agent} is no longer on"
@@ -680,7 +517,10 @@ class ContextService:
             "sandbox_name": identity.sandbox_name,
             "sandbox_id": identity.sandbox_id,
         }
-        for entry in [context["self"], *(a for t in context["team"] for a in t["agents"])]:
+        for entry in [
+            context["self"],
+            *(a for t in context["team"] for a in t["agents"]),
+        ]:
             # A sandbox row has no host worktree, and `git -C ""` silently runs
             # wherever the service happens to live — which would report the
             # host's own checkout as the agent's last commit. Task 5.4 makes
@@ -692,13 +532,8 @@ class ContextService:
 
 @route("GET", "/healthz", public=True)
 def _healthz(service: ContextService, request: Request) -> tuple[int, dict[str, Any]]:
-    """Liveness plus schema compatibility, and nothing else: this is the one
-    endpoint an unauthenticated caller can reach, so it names no path, port,
-    workspace, or agent."""
     info = service.schema_info()
     payload = {
-        # `ok` and `schema_version` are what the sandbox client reads; the rest
-        # is for a human running `curl` or reading a preflight failure.
         "ok": info.compatible,
         "service": SERVICE_NAME,
         "api": API_VERSION,
@@ -710,12 +545,7 @@ def _healthz(service: ContextService, request: Request) -> tuple[int, dict[str, 
     return (200 if info.compatible else 503, payload)
 
 
-# --- bounded input ---
-
-
 def _one(request: Request, name: str) -> str | None:
-    """A single query value, or None. A repeated parameter is a refusal rather
-    than a guess about which one the caller meant."""
     values = request.query.get(name)
     if not values:
         return None
@@ -741,8 +571,7 @@ def _int_param(
     if not minimum <= value <= maximum:
         raise ServiceError(
             "invalid_request",
-            f"parameter '{name}' must be between {minimum} and {maximum},"
-            f" got {value}",
+            f"parameter '{name}' must be between {minimum} and {maximum}, got {value}",
         )
     return value
 
@@ -792,9 +621,6 @@ def _choice(request: Request, name: str, allowed: Sequence[str]) -> str | None:
 def _text_field(
     body: Mapping[str, Any], name: str, limit: int, *, required: bool = True
 ) -> str:
-    """A bounded string from a JSON body, with the limit and the actual length
-    in the refusal — the agent sees only this text, and truncating its note
-    silently would be worse than refusing it."""
     value = body.get(name, "")
     if not isinstance(value, str):
         raise ServiceError("invalid_request", f"field '{name}' must be a string")
@@ -822,15 +648,10 @@ def _choice_field(
 
 
 def _cursor(rows: Sequence[Mapping[str, Any]], after: int | None) -> int | None:
-    """The highest id the caller has now seen. Monotonic: an empty page keeps
-    the cursor the caller came in with, so it never rewinds and never skips."""
     ids = [int(r["id"]) for r in rows]
     if not ids:
         return after
     return max(ids + ([after] if after is not None else []))
-
-
-# --- context and notes ---
 
 
 @route("GET", "/v1/context", requires=PERM_CONTEXT_READ)
@@ -840,12 +661,7 @@ def _context(service: ContextService, request: Request) -> tuple[int, dict[str, 
 
 @route("GET", "/v1/notes", requires=PERM_CONTEXT_READ)
 def _notes(service: ContextService, request: Request) -> tuple[int, dict[str, Any]]:
-    """Visible notes, by exactly the native rules.
-
-    `task` may name a sibling task in the caller's workspace, as `amux notes
-    --task` does; agent-scoped notes stay pinned to the caller's own pane on
-    every route, so widening the task cannot widen what is private.
-    """
+    """Visible notes"""
     caller = request.caller
     require_scope(
         caller, workspace=_one(request, "workspace"), repo=_one(request, "repo")
@@ -862,9 +678,6 @@ def _notes(service: ContextService, request: Request) -> tuple[int, dict[str, An
     kind = _choice(request, "kind", store.NOTE_KINDS)
     task = _one(request, "task") or caller.task
 
-    # `after` is a store-level cursor: `id > after` ascending, so a walk is
-    # caught up page by page and cannot leave a hole behind the cursor. Without
-    # one the query keeps its native newest-first shape.
     if scope is None:
         notes = store.visible_notes(
             workspace=caller.workspace,
@@ -895,12 +708,7 @@ def _notes(service: ContextService, request: Request) -> tuple[int, dict[str, An
 
 @route("POST", "/v1/notes", requires=PERM_NOTES_WRITE)
 def _add_note(service: ContextService, request: Request) -> tuple[int, dict[str, Any]]:
-    """Publish a note as the caller.
-
-    Scope here is a visibility level, not a target: workspace, task, pane and
-    agent all come from the capability, so there is no scope outside the
-    caller's own for a note to land in.
-    """
+    """Publish a note as the caller."""
     caller = request.caller
     text = _text_field(request.body, "text", service.config.max_text_chars)
     scope = _choice_field(request.body, "scope", store.NOTE_SCOPES, "task")
@@ -919,10 +727,6 @@ def _add_note(service: ContextService, request: Request) -> tuple[int, dict[str,
         ts=ts,
         db_path=service.db_path,
     )
-    # Read the row back rather than describing what we think we wrote. A
-    # response assembled from the identity would report the caller's own pane
-    # even if the insert had somehow filed the note under another one, which
-    # makes the receipt evidence of nothing.
     row = _note_by_id(service, caller.worktree_id, note_id) or {
         "id": note_id,
         "ts": ts,
@@ -936,16 +740,12 @@ def _add_note(service: ContextService, request: Request) -> tuple[int, dict[str,
         "kind": kind,
         "text": text,
     }
-    # `name` is not a notes column — it is the execution's stable name, which
-    # the client prints in its receipt line.
     return 200, {"note": {**row, "name": caller.name}}
 
 
 def _note_by_id(
     service: ContextService, worktree_id: int, note_id: int
 ) -> dict[str, Any] | None:
-    """The one note with this id, through the public cursor: ids ascend, so the
-    first row after `note_id - 1` is it."""
     rows = store.query_notes(
         worktree_id=worktree_id,
         after=note_id - 1,
@@ -957,8 +757,6 @@ def _note_by_id(
     service.log.warning("note %d could not be read back after insert", note_id)
     return None
 
-
-# --- events ---
 
 EVENT_KINDS: tuple[str, ...] = tuple(events.STATE_BY_KIND)
 AGENT_STATES: tuple[str, ...] = tuple(dict.fromkeys(events.STATE_BY_KIND.values()))
@@ -989,8 +787,6 @@ def _states_param(request: Request) -> tuple[str, ...]:
 
 
 def _pane_param(service: ContextService, request: Request) -> str:
-    """The pane a wait is about: the caller's own unless it names another in
-    its scope. A pane outside the scope is refused rather than watched."""
     caller = request.caller
     pane = _one(request, "pane")
     if pane is None or pane == "" or pane == caller.pane:
@@ -1013,13 +809,7 @@ def _pane_param(service: ContextService, request: Request) -> str:
 
 @route("POST", "/v1/events", requires=PERM_EVENTS_WRITE)
 def _add_event(service: ContextService, request: Request) -> tuple[int, dict[str, Any]]:
-    """Record a state change for the caller and update its host pane.
-
-    Attribution is the capability's execution row, passed explicitly rather
-    than resolved from the pane. `events.emit` asks the store which worktree a
-    pane fronts *now*, which is right for a hook running inside that pane and
-    wrong here: tmux recycles `%N`, and a token outlives the coincidence.
-    """
+    """Record a state change for the caller and update its host pane."""
     caller = request.caller
     kind = _choice_field(request.body, "kind", EVENT_KINDS, "")
     detail = _text_field(
@@ -1039,8 +829,6 @@ def _add_event(service: ContextService, request: Request) -> tuple[int, dict[str
         db_path=service.db_path,
     )
     state = events.STATE_BY_KIND[kind]  # type: ignore[index]
-    # Only after the event is durable: a pane option that claims a state the
-    # store cannot corroborate is worse than a late one.
     alive = events.pane_facts(caller.pane, caller.socket).alive
     if alive:
         events.publish_state(caller.pane, state, caller.socket)  # type: ignore[arg-type]
@@ -1067,13 +855,10 @@ def _add_event(service: ContextService, request: Request) -> tuple[int, dict[str
 
 
 @route("GET", "/v1/events/state", requires=PERM_CONTEXT_READ)
-def _event_state(service: ContextService, request: Request) -> tuple[int, dict[str, Any]]:
-    """Resolved state for the panes in the caller's workspace.
-
-    `events.pane_states` answers for the whole tmux server, which is more than
-    this caller may see. The workspace is the boundary, which is exactly what
-    `amux ctx` already discloses to the same agent.
-    """
+def _event_state(
+    service: ContextService, request: Request
+) -> tuple[int, dict[str, Any]]:
+    """Resolved state for the panes in the caller's workspace."""
     caller = request.caller
     panes = [
         entry
@@ -1084,21 +869,14 @@ def _event_state(service: ContextService, request: Request) -> tuple[int, dict[s
 
 
 @route("GET", "/v1/events/wait", requires=PERM_CONTEXT_READ)
-def _event_wait(service: ContextService, request: Request) -> tuple[int, dict[str, Any]]:
-    """Block until a pane reaches one of `states`, or until the cap expires.
-
-    Two wake-ups, on purpose: an in-process signal from `POST /v1/events`, and
-    a re-query every `poll_interval_s` so a *native* host write — a hook in a
-    host pane, a `kg` — is seen too. Expiring is not a failure: the answer is
-    `state: null` plus a cursor the caller resumes from, so capping the poll
-    costs a round trip and never a lost transition.
-    """
+def _event_wait(
+    service: ContextService, request: Request
+) -> tuple[int, dict[str, Any]]:
+    """Block until a pane reaches one of `states`, or until the cap expires."""
     caller = request.caller
     pane = _pane_param(service, request)
     wanted = _states_param(request)
     after = _cursor_param(request, "after")
-    # The caller's timeout is a request, not a promise: the cap wins, and
-    # expiring early is a resumable answer rather than an error.
     timeout = min(
         _float_param(request, "timeout", service.config.max_wait_s, 0.0, 86400.0),
         service.config.max_wait_s,
@@ -1133,9 +911,6 @@ def _events_after(
     return rows[-service.config.max_results :]
 
 
-# --- HTTP plumbing ---
-
-
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = f"{SERVICE_NAME}/1"
@@ -1145,8 +920,6 @@ class _Handler(BaseHTTPRequestHandler):
     def service(self) -> ContextService:
         return self.server.service  # type: ignore[attr-defined]
 
-    # -- responses --
-
     def _write(
         self, status: int, payload: dict[str, Any], *, close: bool = False
     ) -> None:
@@ -1155,8 +928,6 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
-        # No CORS headers, ever: a page in a host browser must not be able to
-        # use this service, and `application/json` keeps it behind a preflight.
         if close:
             self.close_connection = True
             self.send_header("Connection", "close")
@@ -1165,8 +936,6 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def _refuse(self, error: ServiceError) -> None:
-        """Send a refusal, tolerating a client that has already hung up: a
-        broken pipe while apologising is not a service fault."""
         try:
             self._write(error.status, error.envelope(), close=error.close)
         except OSError:
@@ -1175,13 +944,8 @@ class _Handler(BaseHTTPRequestHandler):
     def send_error(  # type: ignore[override]
         self, code: int, message: str | None = None, explain: str | None = None
     ) -> None:
-        """Keep http.server's own refusals (bad request line, 414, 501, 505) on
-        the same envelope instead of its HTML page."""
         self.close_connection = True
         if self.request_version == "HTTP/0.9":
-            # An unparseable request line leaves the version at 0.9, and
-            # `send_response_only` then suppresses the status line and headers —
-            # a bare JSON body no client can read. Answer as 1.1 instead.
             self.request_version = self.protocol_version
         error = ServiceError(_code_for_status(code), message or "request refused")
         payload = error.envelope()
@@ -1191,11 +955,7 @@ class _Handler(BaseHTTPRequestHandler):
         except OSError:
             pass
 
-    # -- request parsing --
-
     def _read_body(self) -> dict[str, Any]:
-        """Parse a bounded JSON object, refusing before reading anything we are
-        not willing to hold in memory."""
         if self.headers.get("Transfer-Encoding"):
             raise ServiceError(
                 "invalid_request",
@@ -1220,8 +980,6 @@ class _Handler(BaseHTTPRequestHandler):
             )
         limit = self.service.config.max_body_bytes
         if length > limit:
-            # Refused unread, so the socket still holds the body: this
-            # connection cannot be reused.
             raise ServiceError(
                 "payload_too_large",
                 f"request body of {length} bytes exceeds the {limit} byte limit",
@@ -1248,8 +1006,6 @@ class _Handler(BaseHTTPRequestHandler):
                 "invalid_request", "request body is not valid UTF-8"
             ) from None
         except json.JSONDecodeError as exc:
-            # Position only. Quoting the body back would put whatever the
-            # caller sent into an error a log might keep.
             raise ServiceError(
                 "invalid_request", f"request body is not valid JSON: {exc.msg}"
             ) from None
@@ -1266,8 +1022,6 @@ class _Handler(BaseHTTPRequestHandler):
                 close=True,
             )
         return {}
-
-    # -- dispatch --
 
     def _serve(self, method: str) -> None:
         started = time.monotonic()
@@ -1299,8 +1053,6 @@ class _Handler(BaseHTTPRequestHandler):
             self._write(status, payload)
         except ServiceError as exc:
             status, code = exc.status, exc.code
-            # A body we never read leaves the socket mid-request, whether we
-            # refused it for its size or refused the caller before reading.
             exc.close = exc.close or not drained
             self._refuse(exc)
         except Exception:
@@ -1309,7 +1061,6 @@ class _Handler(BaseHTTPRequestHandler):
             status, code = error.status, error.code
             self._refuse(error)
         finally:
-            # Who, by durable id — never the token, and never the body.
             caller = request.identity if request else None
             self.service.log.info(
                 "%s %s -> %s %s %s %.1fms",
@@ -1331,8 +1082,6 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_error(405, "method is not supported by this service")
 
     do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = _unsupported_method
-
-    # -- logging --
 
     def log_request(self, *args: Any, **kwargs: Any) -> None:
         pass  # _serve writes the access line, with a status and a duration.
@@ -1357,13 +1106,10 @@ class _Server(ThreadingHTTPServer):
         super().__init__(address, handler)
 
     def finish_request(self, request: Any, client_address: Any) -> None:
-        # A client that opens a connection and stalls must not hold a thread.
         request.settimeout(self.service.config.request_timeout_s)
         super().finish_request(request, client_address)
 
     def handle_error(self, request: Any, client_address: Any) -> None:
-        # socketserver's default prints a traceback to stderr, which for a
-        # daemonised service means an unredacted line nobody reads.
         self.service.log.exception("connection from %s failed", client_address)
 
 
@@ -1428,10 +1174,6 @@ def start_service(
     )
     thread.start()
     if config is not None and config.db_path not in (None, store.DB_PATH):
-        # The native read paths — core.build_context, events.pane_status — take
-        # no db_path and always use the store's own. Pointing the service
-        # somewhere else makes those two disagree, which is a debugging aid at
-        # best and a wrong answer at worst.
         service.log.warning(
             "the configured database is not the store's own; the native context"
             " and state paths will still read %s",
@@ -1446,13 +1188,6 @@ def start_service(
     )
     return ServiceHandle(service=service, server=server, thread=thread)
 
-
-# --- lifecycle ---
-#
-# One run file per state directory records the pid and the *bound* port, so
-# preflight can find a service it did not start. Every failure here refuses:
-# there is no unauthenticated listener and no mounted database to fall back to,
-# and `start` will not quietly stand up a second service beside a confusing one.
 
 RUNFILE_NAME = "context-service.json"
 
@@ -1646,8 +1381,6 @@ def status(config: ServiceConfig | None = None) -> ServiceStatus:
 
 
 def _require_compatible_schema(config: ServiceConfig) -> SchemaInfo:
-    """Refuse before binding anything. A service that cannot read the store it
-    is the sole owner of has nothing safe to serve."""
     info = schema_info(config.database)
     if info.version is None:
         raise ServiceStartupError(
@@ -1666,12 +1399,6 @@ def _require_compatible_schema(config: ServiceConfig) -> SchemaInfo:
 
 
 def launch_argv(config: ServiceConfig) -> list[str]:
-    """How to re-exec amux as a detached foreground service.
-
-    A frozen build has no `-m`: `sys.executable` *is* the amux binary, so it is
-    invoked through its own subcommand. From a source checkout the module form
-    keeps the launcher working even where the `amux` script is not on PATH.
-    """
     if getattr(sys, "frozen", False):
         return [sys.executable, "context-service", "serve", "--port", str(config.port)]
     module = __spec__.name if __spec__ else "amux.context_service"
@@ -1694,11 +1421,6 @@ def start(
     launcher: Callable[[ServiceConfig], Any] | None = None,
     timeout: float = 15.0,
 ) -> ServiceStatus:
-    """Ensure a healthy service is running, and say what happened.
-
-    Idempotent, because sandbox preflight calls it on every spawn: an already
-    healthy service is left exactly as it is.
-    """
     config = config or ServiceConfig()
     current = status(config)
     if current.running:
@@ -1730,18 +1452,16 @@ def stop(
     timeout: float = 10.0,
     force: bool = False,
 ) -> ServiceStatus:
-    """Signal the recorded service and wait for it to go.
-
-    Idempotent. The run file is removed only once the process is actually gone,
-    so a refusal never leaves a record claiming nothing is running.
-    """
+    """Signal the recorded service and wait for it to go."""
     config = config or ServiceConfig()
     current = status(config)
     if current.state == "stopped":
         return current
     if current.state == "stale":
         remove_runfile(config)
-        return ServiceStatus("stopped", f"cleared a stale run file for pid {current.pid}")
+        return ServiceStatus(
+            "stopped", f"cleared a stale run file for pid {current.pid}"
+        )
 
     pid = current.pid or 0
     try:
@@ -1761,8 +1481,7 @@ def stop(
             return ServiceStatus("stopped", f"{SERVICE_NAME} (pid {pid}) stopped")
         time.sleep(0.05)
     raise ServiceLifecycleError(
-        f"pid {pid} did not stop within {timeout:g}s; retry with force to"
-        f" send SIGKILL"
+        f"pid {pid} did not stop within {timeout:g}s; retry with force to send SIGKILL"
     )
 
 
@@ -1772,12 +1491,7 @@ def serve_foreground(
     stream: Any | None = None,
     ready: Callable[[ServiceHandle], None] | None = None,
 ) -> int:
-    """Run the service in this process until it is signalled.
-
-    The order matters: schema, then bind, then claim the run file. Each step
-    refuses outright, so a run file only ever names a process that really is
-    listening on the port it records.
-    """
+    """Run the service in this process until it is signalled."""
     config = config or ServiceConfig()
     log = configure_logging(config, stream=stream or sys.stderr)
     try:
@@ -1803,8 +1517,6 @@ def serve_foreground(
 
     def shut_down(signum: int, _frame: Any) -> None:
         log.info("stopping on signal %d", signum)
-        # From a signal handler, so it must not block: shutdown() waits for the
-        # serve loop, which is this thread.
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     for signum in (signal.SIGTERM, signal.SIGINT):
@@ -1838,11 +1550,7 @@ ACTIONS = ("serve", "start", "status", "stop")
 def run_action(
     action: str, config: ServiceConfig, *, force: bool = False
 ) -> tuple[int, str]:
-    """Perform one lifecycle action and return `(exit code, message)`.
-
-    Shared by `python -m amux.context_service` and `amux context-service`, so
-    the two cannot drift into reporting the same state differently.
-    """
+    """Perform one lifecycle action and return `(exit code, message)`."""
     if action == "serve":
         return serve_foreground(config), ""
     try:
@@ -1859,11 +1567,6 @@ def run_action(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """`python -m amux.context_service <serve|start|status|stop>`.
-
-    A debugging and launcher entry point; `amux context-service` is the
-    user-facing one, and both go through `run_action`.
-    """
     parser = argparse.ArgumentParser(prog="amux-context-service")
     parser.add_argument("action", choices=ACTIONS, help="what to do")
     parser.add_argument("--port", type=int, default=None, help="loopback port")

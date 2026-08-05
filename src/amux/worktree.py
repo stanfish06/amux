@@ -39,9 +39,7 @@ class MergeResult:
 
 
 def _git(repo: str, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-    proc = subprocess.run(
-        ["git", "-C", repo, *args], capture_output=True, text=True
-    )
+    proc = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
     if check and proc.returncode != 0:
         raise WorktreeError(proc.stderr.strip() or proc.stdout.strip())
     return proc
@@ -58,7 +56,9 @@ def repo_root(path: str) -> str | None:
 
 
 def has_commits(repo: str) -> bool:
-    return _git(repo, "rev-parse", "--verify", "-q", "HEAD", check=False).returncode == 0
+    return (
+        _git(repo, "rev-parse", "--verify", "-q", "HEAD", check=False).returncode == 0
+    )
 
 
 def head_ref(repo: str) -> str:
@@ -94,12 +94,7 @@ def _branch_exists(repo: str, branch: str) -> bool:
 
 @dataclass(frozen=True)
 class TaskIntegration:
-    """The task's integration worktree, and the base every agent branches off.
-
-    Both runtimes need this: host agents get worktrees branched from it, and
-    sandboxed agents get clones whose committed branches are merged back into
-    it. Only the per-agent step differs, so only the per-agent step is split.
-    """
+    """The task's integration worktree, and the base every agent branches off."""
 
     repo: str
     workspace: str
@@ -120,14 +115,7 @@ def registered_worktrees(repo: str) -> set[str]:
 
 
 def setup_task_integration(repo: str, workspace: str, task: str) -> TaskIntegration:
-    """Create the task's integration branch and worktree, or adopt the existing
-    one.
-
-    Idempotent on purpose. `kg`/`kw` without `--clean` deliberately leave the
-    integration worktree in place, so respawning that task must find it rather
-    than fail on `worktree add` -- which is what made a resumed task
-    unrecoverable without `--clean`.
-    """
+    """Create the task's integration branch and worktree, or adopt the existing one."""
     if not has_commits(repo):
         raise WorktreeError("repo has no commits yet")
     base = head_ref(repo)
@@ -149,12 +137,7 @@ def setup_task_integration(repo: str, workspace: str, task: str) -> TaskIntegrat
 
 
 def remove_task_integration(integration: TaskIntegration) -> None:
-    """Undo `setup_task_integration`.
-
-    The branch is kept deliberately, as everywhere else in this module: it is
-    the task's durable line, a retry is idempotent because `_branch_exists`
-    short-circuits, and anything already merged into it must stay reachable.
-    """
+    """Undo `setup_task_integration`."""
     _git(
         integration.repo,
         "worktree",
@@ -180,10 +163,6 @@ def setup_host_agents(
     root = task_worktree_root(workspace, task)
 
     paths: dict[str, str] = {}
-    # Tracked separately from `paths`: a worktree exists on disk from the moment
-    # `worktree add` returns, but only joins `paths` once its row is registered.
-    # Rolling back `paths` alone would strand the worktree of whichever pane the
-    # registry failed on.
     created: list[str] = []
     registered: list[int] = []
     try:
@@ -207,12 +186,8 @@ def setup_host_agents(
             )
             paths[pane_id] = path
     except Exception:
-        # Roll back this task's worktrees so a failed spawn leaves no debris.
         for path in created:
             _git(repo, "worktree", "remove", "--force", path, check=False)
-        # The registry is append-only, so rows already inserted outlive the
-        # rollback. Left active, a later integrate would merge branches whose
-        # worktrees are gone.
         for wt_id in registered:
             store.set_worktree_status(wt_id, "removed")
         raise
@@ -225,10 +200,7 @@ def setup_task(
     task: str,
     panes: list[tuple[str, str, str]],
 ) -> dict[str, str]:
-    """Host-runtime task setup: the integration worktree + one worktree per pane.
-
-    A failure anywhere unwinds both halves, so a failed spawn leaves no debris.
-    """
+    """Host-runtime task setup: the integration worktree + one worktree per pane."""
     integration = setup_task_integration(repo, workspace, task)
     try:
         return setup_host_agents(integration, panes)
@@ -238,14 +210,7 @@ def setup_task(
 
 
 def _merge_source(row: dict) -> str:
-    """What `integrate` should merge for one execution row.
-
-    A host row's branch is already local. A sandbox row's is not: it lives in
-    the VM's clone and reaches the host only through the `sandbox-<name>`
-    remote, so it is fetched to a durable ref first. Uncommitted files in the
-    sandbox cannot cross that boundary, which is exactly the intended
-    behaviour -- only committed work is integrated.
-    """
+    """What `integrate` should merge for one execution row."""
     if row.get("runtime") != "docker-sandbox":
         return row["branch"]
     sandbox_name = row.get("sandbox_name") or ""
@@ -299,16 +264,15 @@ def integrate(
         pane, name, branch = row["pane"], row["name"], row["branch"]
         wt_id, repo = row["id"], row["repo"]
 
-        # A host agent's branch is already in this repository. A sandboxed
-        # agent's lives inside its VM and reaches the host only through the
-        # remote `sbx create --clone` published, so it must be fetched first --
-        # and only committed work comes across, which is the point.
         try:
             source = _merge_source(row)
         except WorktreeError as exc:
             err = str(exc)
             _record_failure(
-                workspace, task, row, f"integrate: cannot reach {name} ({branch}): {err}"
+                workspace,
+                task,
+                row,
+                f"integrate: cannot reach {name} ({branch}): {err}",
             )
             results.append(
                 MergeResult(pane=pane, name=name, branch=branch, ok=False, error=err)
@@ -334,20 +298,7 @@ def integrate(
                 MergeResult(pane=pane, name=name, branch=branch, ok=False, error=err)
             )
             continue
-        shortstat = _git(
-            int_path, "diff", "--shortstat", before, "HEAD"
-        ).stdout.strip()
-        # Only when something was actually integrated. `merged` is a terminal
-        # status -- this function selects on `active` -- so marking a
-        # zero-commit agent merged records work that never existed AND
-        # permanently forecloses the work it has not done yet: no amux command
-        # can integrate it again, not even `--agent <name>`, and recovery is a
-        # manual git merge.
-        #
-        # That makes integrating EARLY the expensive mistake, since any agent
-        # idle during the first pass would be shut out. Leaving it active costs
-        # nothing: the result below still reports "0 commit(s), no changes", and
-        # a later pass picks up whatever the agent goes on to commit.
+        shortstat = _git(int_path, "diff", "--shortstat", before, "HEAD").stdout.strip()
         if n_commits:
             store.set_worktree_status(wt_id, "merged")
         store.add_note(
@@ -387,19 +338,15 @@ def remove_task(workspace: str, task: str) -> list[str]:
     for row in rows:
         if row["status"] == "removed" or not row["repo"]:
             continue
-        # A sandbox row has no host worktree (path=''), and `git worktree
-        # remove ""` is not a no-op worth relying on. Sandboxes are removed by
-        # `runtime.clean_task`, which has to check for uncommitted work first.
         if not row["path"]:
             continue
-        # Per row: a task can span repos, and rows registered without one would
-        # otherwise run `git -C ""` and fail silently under check=False.
-        if _git(
-            row["repo"], "worktree", "remove", "--force", row["path"], check=False
-        ).returncode == 0:
+        if (
+            _git(
+                row["repo"], "worktree", "remove", "--force", row["path"], check=False
+            ).returncode
+            == 0
+        ):
             removed.append(row["path"])
-            # Only on success — a row marked removed while its worktree is still
-            # on disk is both unreachable and invisible.
             store.set_worktree_status(row["id"], "removed")
     for repo in {row["repo"] for row in rows if row["repo"]}:
         _git(repo, "worktree", "remove", "--force", int_path, check=False)
@@ -412,31 +359,14 @@ def sandbox_remote(sandbox_name: str) -> str:
 
 
 def sandbox_tracking_ref(sandbox_name: str, branch: str) -> str:
-    """Where a fetched sandbox branch lands on the host.
-
-    Namespaced under `refs/amux/` rather than `refs/heads/`: it is a record of
-    what a sandbox had committed at fetch time, not a branch anyone checks out,
-    and it must not collide with the identically named branch a *host* agent of
-    the same name would own. It is also what survives `sbx rm`, which is why
-    cleanup fetches before removing.
-    """
+    """Where a fetched sandbox branch lands on the host."""
     return f"refs/amux/sandboxes/{sandbox_name}/{branch}"
 
 
 def sandbox_branch_tip(
     repo: str, sandbox_name: str, branch: str, *, source: str | None = None
 ) -> str | None:
-    """The commit the sandbox has on `branch`, or None if it has no such branch.
-
-    Raises `WorktreeError` when the remote cannot be reached at all, which is a
-    different thing from having nothing to preserve and must not be treated the
-    same way: "this agent never committed" is safe to remove, while "we could
-    not ask" means its commits might be about to be destroyed.
-
-    `ls-remote` rather than parsing a failed fetch's stderr: the exit code
-    separates unreachable from absent, and empty output means the branch simply
-    is not there.
-    """
+    """The commit the sandbox has on `branch`, or None if it has no such branch."""
     proc = _git(
         repo, "ls-remote", source or sandbox_remote(sandbox_name), branch, check=False
     )
@@ -449,15 +379,8 @@ def sandbox_branch_tip(
 def fetch_sandbox_branch(
     repo: str, sandbox_name: str, branch: str, *, source: str | None = None
 ) -> str:
-    """Fetch a sandbox's committed branch to a durable local ref, and return it.
-
-    Raises `WorktreeError` with git's own message when the sandbox is stopped,
-    already removed, or has never committed the branch -- those are different
-    problems and the caller reports them rather than papering over them.
-    """
+    """Fetch a sandbox's committed branch to a durable local ref, and return it."""
     ref = sandbox_tracking_ref(sandbox_name, branch)
-    # `source` may be a URL rather than a remote name: a sandbox that has been
-    # stopped no longer has a host-side remote, and git fetches either.
     proc = _git(
         repo,
         "fetch",
@@ -472,24 +395,12 @@ def fetch_sandbox_branch(
 
 
 def remove_sandbox_remote(repo: str, sandbox_name: str) -> None:
-    """Drop a sandbox's host remote if it is still there.
-
-    Unchecked: `sbx rm` may already have removed it, and `git remote remove`
-    fails loudly on a remote that does not exist.
-    """
+    """Drop a sandbox's host remote if it is still there."""
     _git(repo, "remote", "remove", sandbox_remote(sandbox_name), check=False)
 
 
 def latest_commit_subject(path: str) -> str:
-    """The subject of `path`'s last commit, or "" when there is no path.
-
-    The empty-path guard is the point. `git -C ""` is not an error: it is a
-    no-op that reports the *calling process's* checkout, so a sandbox row
-    (path='') would silently attribute whatever commit amux happened to be
-    sitting on to an agent that never made it. Callers gate on runtime too,
-    but this makes the whole class of mistake impossible rather than
-    remembered.
-    """
+    """The subject of `path`'s last commit, or "" when there is no path."""
     if not path:
         return ""
     proc = _git(path, "log", "-1", "--format=%s", check=False)

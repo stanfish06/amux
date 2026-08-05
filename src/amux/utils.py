@@ -33,14 +33,7 @@ DEGRADED_MARK = "*"
 
 
 def state_to_string(agent: dict) -> str:
-    """An agent's state, marked when the agent cannot report all of them.
-
-    No seventh state: the vocabulary stays starting/busy/idle/needs-input/
-    stopped/dead and the marker rides alongside, so nothing that branches on
-    state has to learn a new value. But a degraded agent's state is never
-    rendered bare -- showing `idle` for an agent that physically cannot send
-    `busy` is a claim amux is not entitled to make.
-    """
+    """An agent's state, marked when the agent cannot report all of them."""
     state = agent.get("state") or "-"
     return f"{state}{DEGRADED_MARK}" if agent.get("state_degraded") else state
 
@@ -85,11 +78,11 @@ def context_to_string(ctx: dict) -> list[str]:
                 if last:
                     row += f"  {_age(last['ts'])}"
                     if last["detail"]:
-                        row += f"  \"{last['detail']}\""
+                        row += f'  "{last["detail"]}"'
                 if a.get("branch"):
                     row += f"  {a['branch']}"
                 if a.get("last_commit"):
-                    row += f"  \"{a['last_commit']}\""
+                    row += f'  "{a["last_commit"]}"'
                 if a["cwd"] and a["cwd"] != me["cwd"]:
                     row += f"  {a['cwd']}"
             lines.append(row.rstrip())

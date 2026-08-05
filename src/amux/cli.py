@@ -7,7 +7,17 @@ import sys
 from pathlib import Path
 from collections import Counter
 
-from amux import context_service, core, events, monitor, runtime, sandbox, store, utils, worktree
+from amux import (
+    context_service,
+    core,
+    events,
+    monitor,
+    runtime,
+    sandbox,
+    store,
+    utils,
+    worktree,
+)
 from amux.shared import ALIAS, scrub_pyinstaller_env
 
 
@@ -56,12 +66,7 @@ _SANDBOX_ONLY = ("cpus", "memory", "share_skills", "context_port")
 
 
 def _service_probe(port: int):
-    """How `sandbox.preflight` asks whether the context service is usable.
-
-    Health alone is not the question: a service listening on a different port
-    than the one this grid would hand its sandboxes is no use to them, and
-    saying so here is much cheaper than debugging it from inside a microVM.
-    """
+    # `sandbox.preflight` probes whether the context service is usable.
 
     def probe() -> tuple[bool, str]:
         result = context_service.status(context_service.ServiceConfig(port=port))
@@ -76,11 +81,8 @@ def _service_probe(port: int):
 
 
 def _resolve_runtime(args) -> runtime.Runtime | None:
-    """The runtime a spawn should use, or None for the default host one.
+    # The runtime used by a spawn should use, or None for the default host one.
 
-    Sandbox-only flags are refused rather than ignored under `--runtime host`:
-    a cap that silently does nothing is worse than a rejected command.
-    """
     chosen = getattr(args, "runtime", HOST)
     given = [
         name for name in _SANDBOX_ONLY if getattr(args, name, None) not in (None, False)
@@ -88,9 +90,7 @@ def _resolve_runtime(args) -> runtime.Runtime | None:
     if chosen == HOST:
         if given:
             flags = ", ".join("--" + name.replace("_", "-") for name in sorted(given))
-            raise ValueError(
-                f"{flags} only applies to --runtime {DOCKER_SANDBOX}"
-            )
+            raise ValueError(f"{flags} only applies to --runtime {DOCKER_SANDBOX}")
         return None
     defaults = sandbox.Resources()
     resources = sandbox.Resources(
@@ -117,8 +117,6 @@ def _composition(agents: list[str]) -> str:
 
 
 def _cmd_spw(server, args) -> int:
-    # Argument validation first, before any tmux or git lookup: a rejected flag
-    # should read as a rejected flag, not as a missing workspace.
     chosen = _resolve_runtime(args)
     nrows, ncols, agents = _resolve_grid(args)
     space = core.spawn_agent_space(
@@ -141,20 +139,8 @@ def _cmd_spw(server, args) -> int:
 
 
 def _workspace_dir(workspace: str) -> str | None:
-    """Where a task runs when `-p` is omitted: the workspace's own repository.
+    # Where a task runs when `-p` is omitted: the workspace's own repository.
 
-    From the registry rather than from tmux, because both tmux answers are
-    wrong. `#{session_path}` reads back as `.` for a session created with a
-    relative start directory, and a pane's current path is the *agent's*
-    worktree -- a secondary checkout, whose `repo_root` is itself rather than
-    the repository, and which `sbx create --clone` refuses outright. The
-    registry holds what amux recorded when the workspace was spawned, which is
-    the primary checkout.
-
-    None when nothing is recorded: a workspace spawned outside a repository has
-    no directory to resolve, and inventing one is worse than passing the None
-    that preflight will report on.
-    """
     for row in reversed(store.worktrees_for(workspace)):
         if row["repo"]:
             return row["repo"]
@@ -162,13 +148,8 @@ def _workspace_dir(workspace: str) -> str | None:
 
 
 def _cmd_spg(server, args) -> int:
-    chosen = _resolve_runtime(args)  # see `_cmd_spw`
+    chosen = _resolve_runtime(args)
     session = _get_session(server, args.workspace)
-    # `-p` is documented as defaulting to the workspace directory, and nothing
-    # downstream implemented that: the None travelled into
-    # `runtime.preflight`, where the sandbox runtime cannot find a repository
-    # and refuses, and into `HostRuntime._worktrees`, which returns {} for a
-    # falsy cwd and so skips per-agent worktrees without saying so.
     cwd = args.path or _workspace_dir(args.workspace)
     nrows, ncols, agents = _resolve_grid(args)
     grid = core.spawn_agent_grid(
@@ -188,10 +169,6 @@ def _cmd_spg(server, args) -> int:
 
 
 def _check_force(args) -> None:
-    """`--force` only overrides the dirty-sandbox refusal, which only `--clean`
-    can reach. Refused rather than ignored, for the same reason sandbox-only
-    spawn flags are: a flag that silently does nothing teaches the wrong thing
-    about what the command did."""
     if args.force and not args.clean:
         raise ValueError("--force only applies together with --clean")
 
@@ -205,32 +182,15 @@ def _cmd_kw(server, args) -> int:
         task = window.name or ""
         handled.add(task)
         if args.clean:
-            # Sandboxes first: a refusal must abort before any host worktree is
-            # removed, so a dirty sandbox does not cost the user the rest.
             try:
                 runtime.clean_task(args.workspace, task, force=args.force)
             except sandbox.SandboxError as exc:
-                # Collected rather than raised here: the other tasks' sandboxes
-                # should still be cleaned, and the user should see the whole
-                # picture once instead of one task per re-run.
                 problems.append(f"{task}: {exc}")
                 continue
             worktree.remove_task(args.workspace, task)
         else:
-            # Stop, do not destroy: a sandbox keeps its disk and its provider
-            # session so a later spawn can resume it as itself.
             runtime.stop_task(args.workspace, task)
     if args.clean:
-        # A task killed with `kg` had its window removed and its VM kept, so it
-        # is not in the loop above and was previously unreachable: `kw --clean`
-        # could never remove it and re-running did not help. The registry is the
-        # only place it still exists.
-        #
-        # Sandboxes only. `worktree.remove_task` is deliberately NOT called for
-        # these: reaching host worktrees the same way would start DELETING in a
-        # case that is silently skipped today, which is a wider change to the
-        # default runtime than this fixes. Recorded as a follow-up rather than
-        # rejected -- see the note in `runtime.sandbox_tasks`.
         for task in runtime.sandbox_tasks(args.workspace):
             if task in handled:
                 continue
@@ -240,9 +200,6 @@ def _cmd_kw(server, args) -> int:
                 problems.append(f"{task} (no window): {exc}")
 
     if problems:
-        # The session is deliberately NOT killed. Killing it would make every
-        # surviving sandbox unaddressable by amux -- `kw` would answer
-        # "workspace not found" -- leaving `sbx rm -f` as the only way out.
         raise sandbox.SandboxError(
             f"{ALIAS['session']} '{args.workspace}' was left in place because "
             "some sandboxes survived:\n" + "\n".join(problems)
@@ -407,12 +364,6 @@ def _cmd_ctx(server, args) -> int:
 
 
 def _cmd_doctor(server, args) -> int:
-    """Report whether a runtime's prerequisites hold. Never fixes anything.
-
-    Deliberately read-only: it does not install `sbx`, sign anyone in, or widen
-    Docker's network policy. Each failure prints the exact command to run
-    instead, so the decision stays the user's.
-    """
     if args.runtime == HOST:
         print(f"runtime {HOST}: no external prerequisites (tmux and git only)")
         return 0
@@ -433,8 +384,6 @@ def _cmd_doctor(server, args) -> int:
     try:
         repo = worktree.repo_root(args.path) or ""
     except OSError as exc:
-        # git itself missing. A doctor reports; it does not abort on the first
-        # thing it cannot do, or the user learns one prerequisite per run.
         repo, git_failure = "", f"cannot run git: {exc.strerror or exc}"
     report = sandbox.preflight(
         agents=core.parse_agent_specs(args.agent or [], None, None),
@@ -474,11 +423,6 @@ def _cmd_context_service(server, args) -> int:
 
 
 def _add_sandbox_args(parser: argparse.ArgumentParser, runtime_default: str = HOST):
-    """The `docker-sandbox` runtime's options.
-
-    Every one of them is inert under the default runtime and says so, because
-    the backend is opt-in: amux runs agents on the host unless asked otherwise.
-    """
     defaults = sandbox.Resources()
     parser.add_argument(
         "--runtime",
