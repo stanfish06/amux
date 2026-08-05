@@ -242,17 +242,14 @@ def test_doctor_for_the_host_runtime_needs_nothing_external(capsys):
     assert "no external prerequisites" in out
 
 
-def test_doctor_says_so_when_sbx_is_absent(capsys, monkeypatch, git_repo):
-    """Absence is simulated at the seam doctor uses rather than by emptying
-    PATH: conftest's `no_sbx` cannot be combined with any code path that shells
-    out, because the `no_real_sbx` guard fires on an unresolvable `sbx` first.
+def test_doctor_says_so_when_sbx_is_absent(capsys, tmp_path, no_sbx):
+    """A machine that has not installed the optional backend.
+
+    `no_sbx` gives PATH a single empty directory, so git is missing too and the
+    report says both; the claim under test is the `sbx` line and its
+    remediation.
     """
-
-    def missing() -> str:
-        raise sandbox.SandboxError("sbx is not installed or not on PATH")
-
-    monkeypatch.setattr(sandbox, "version", missing)
-    code = cli.main(["doctor", "--path", str(git_repo)])
+    code = cli.main(["doctor", "--path", str(tmp_path)])
     out = capsys.readouterr().out
     assert code == 1
     assert "[FAIL] sbx" in out
