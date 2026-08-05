@@ -12,8 +12,10 @@ PYINSTALLER_MODE := --onedir
 AMUX_BIN := $(CURDIR)/dist/amux/amux
 endif
 
+VENV := $(CURDIR)/.venv
+
 dev:
-	pipenv run pip install -e ".[dev]"
+	uv sync --extra dev
 
 # The sandbox shim must ship as DATA, not just as a compiled module. PyInstaller
 # puts amux's modules in the archive inside the executable and no .py on disk, but
@@ -29,7 +31,7 @@ dev:
 #   exactly where sandbox_client.__file__ points; changing it re-breaks shim
 #   installation with no build error at all.
 build: dev
-	pipenv run env -u PYTHONPATH pyinstaller $(PYINSTALLER_MODE) --name amux \
+	env -u PYTHONPATH $(VENV)/bin/pyinstaller $(PYINSTALLER_MODE) --name amux \
 		--paths src \
 		--add-data $(CURDIR)/src/amux/sandbox_client.py:amux \
 		--specpath build --workpath build --distpath dist \
