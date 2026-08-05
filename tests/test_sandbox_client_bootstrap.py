@@ -212,6 +212,41 @@ def test_install_creates_the_config_directory_before_copying_into_it(staging):
     assert mkdir_index < chmod_index
 
 
+# --- the shim must exist in a PACKAGED build too ------------------------------
+#
+# A PyInstaller build ships no .py on disk, so `sandbox_client.__file__` named a
+# path that did not exist and every sandbox spawn from a packaged amux died at
+# shim installation. The fix is packaging-only: once the file ships as data at
+# destination `amux`, `__file__` resolves and the resolver needs no frozen branch.
+# No test can run against a frozen bundle — but one CAN assert the build ships the
+# file, and that is the assertion that would have caught this.
+
+
+def test_an_unfrozen_build_still_resolves_from_the_source_tree():
+    assert sb.client_source() == Path(sc.__file__ or "")
+
+
+def test_the_build_ships_the_shim_as_data():
+    """The half a frozen-bundle test cannot reach. This is the assertion that
+    would have caught the original bug: the Makefile simply did not ship it.
+
+    It insists on the *absolute* form. `--add-data` resolves a relative source
+    against `--specpath`, which the build sets to `build/`, so the relative
+    spelling does not merely fail at run time — it fails the build with
+    "Unable to find build/src/amux/sandbox_client.py". An earlier version of this
+    test asserted the relative string and would have pinned that breakage in
+    place.
+    """
+    makefile = Path(__file__).resolve().parents[1] / "Makefile"
+    build = makefile.read_text()
+    assert f"--add-data $(CURDIR)/src/amux/{sb.CLIENT_MODULE}:amux" in build
+    assert f"--add-data src/amux/{sb.CLIENT_MODULE}" not in build
+    # one invocation serves both --onefile and --onedir via PYINSTALLER_MODE,
+    # so a single occurrence covers every packaged build
+    assert build.count("pyinstaller") == 1
+    assert "--specpath build" in build  # the reason $(CURDIR) is load-bearing
+
+
 # --- ownership: sbx cp lands files as the HOST uid ---------------------------
 #
 # Verified against a live image: `sbx cp` preserves the source mode but sets the

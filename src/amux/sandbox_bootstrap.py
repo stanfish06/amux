@@ -141,13 +141,48 @@ def default_staging_dir() -> Path:
     return shared.STATE_DIR / "staging"
 
 
+#: The shim's module file, as it is named inside the `amux` package.
+CLIENT_MODULE = "sandbox_client.py"
+
+
 def client_source() -> Path:
-    """The shim file to copy in."""
+    """The shim file to copy into a sandbox.
+
+    A PyInstaller build compiles amux into an archive inside the executable and
+    ships no `.py` on disk, so `sandbox_client.__file__` names a path that does
+    not exist and every sandbox spawn from a *packaged* amux dies here. Source
+    checkouts and the host runtime are unaffected, which is why no test saw it;
+    swift-crane found it in a frozen union build.
+
+    Shipping the source is a packaging requirement that no runtime trick can
+    replace. Measured in a frozen bundle with the source absent: `__file__` is
+    missing, `importlib.resources` raises FileNotFoundError, and
+    `inspect.getsource` raises OSError — there is no source text in the bundle for
+    any API to read. So the Makefile ships it with
+    `--add-data $(CURDIR)/src/amux/sandbox_client.py:amux` — absolute, because a
+    relative source resolves against `--specpath` and fails the build outright.
+
+    No frozen-specific branch is needed, and that was measured rather than
+    assumed: with an absolute `--add-data` whose destination is `amux`, PyInstaller
+    unpacks the file at exactly the path it already reports as
+    `sandbox_client.__file__`, in both `--onefile` and `--onedir`. So `__file__`
+    resolves and this function works unmodified — the destination `amux` is what
+    makes that true, and changing it would re-break shim installation with no
+    build error at all.
+
+    The `is_file` guard is the point of the function: a mis-packaged build gets a
+    named error naming the exact path, instead of an empty shim copied into the VM
+    or a bare `sbx cp` failure.
+    """
     from amux import sandbox_client
 
     source = Path(sandbox_client.__file__ or "")
     if not source.is_file():
-        raise BootstrapError(f"sandbox client source is missing at {source}")
+        raise BootstrapError(
+            f"the sandbox client source is missing at {source}, so there is nothing "
+            f"to install into a sandbox. A packaged amux must ship it: "
+            f"pyinstaller --add-data <repo>/src/amux/{CLIENT_MODULE}:amux"
+        )
     return source
 
 
