@@ -866,3 +866,126 @@ def test_the_git_source_is_resolved_after_waking_not_before(
 
     assert order.index("wake") < order.index("resolve")
     assert real is not sandbox.git_url
+
+
+# --- a task whose window kg removed ---
+#
+# `kg <ws> <task>` without --clean removes the WINDOW and keeps the VM. `_cmd_kw`
+# derived its task list from session.windows, so that task was never passed to
+# clean_task at all: `kw --clean` could not reach the VM and re-running did not
+# help. Orphaned by construction, at ~818 MB RSS and ~2.4 GB disk per sandbox.
+
+
+def test_sandbox_tasks_reads_the_registry_not_tmux(git_repo, fake_sbx, tmp_path):
+    ready(fake_sbx, names_for(git_repo, "alpha"))
+    build(git_repo, fake_sbx, "alpha", tmp_path=tmp_path)
+
+    assert runtime.sandbox_tasks("ws") == ["t0"]
+
+
+def test_a_retired_task_is_not_offered_again(git_repo, fake_sbx, tmp_path):
+    ready(fake_sbx, names_for(git_repo, "alpha"))
+    build(git_repo, fake_sbx, "alpha", tmp_path=tmp_path)
+    (row,) = store.worktrees_for("ws", "t0")
+    store.set_worktree_runtime(row["id"], runtime_status="removed")
+
+    assert runtime.sandbox_tasks("ws") == []
+
+
+def test_host_tasks_are_not_offered(git_repo):
+    integration = worktree.setup_task_integration(str(git_repo), "ws", "t0")
+    worktree.setup_host_agents(integration, [("%1", "claude", "hosty")])
+
+    assert runtime.sandbox_tasks("ws") == []
+
+
+def test_kw_reaches_a_windowless_task(monkeypatch):
+    """The fix: the VM survives in the registry, so kw finds it there."""
+    from amux import cli
+
+    session = type("S", (), {"windows": [type("W", (), {"name": "t1"})()]})()
+    cleaned: list[str] = []
+    monkeypatch.setattr(cli, "_get_session", lambda server, ws: session)
+    monkeypatch.setattr(cli.runtime, "sandbox_tasks", lambda ws: ["t0", "t1"])
+    monkeypatch.setattr(
+        cli.runtime, "clean_task",
+        lambda ws, task, force=False: cleaned.append(task) or [],
+    )
+    monkeypatch.setattr(cli.worktree, "remove_task", lambda ws, task: [])
+    monkeypatch.setattr(
+        cli.core, "load_agent_space",
+        lambda s: type("G", (), {"terminate": lambda self: None})(),
+    )
+    args = type("A", (), {"workspace": "ws", "clean": True, "force": False})()
+
+    assert cli._cmd_kw(None, args) == 0  # noqa: SLF001
+    # t1 via its window, t0 via the registry -- and t1 not twice.
+    assert cleaned == ["t1", "t0"]
+
+
+def test_kw_does_not_remove_host_worktrees_for_a_windowless_task(monkeypatch):
+    """The boundary of the narrow fix. Reaching host worktrees this way would
+    start DELETING in a case that is silently skipped today, which is a wider
+    change to the default runtime than this fixes. Deliberate, and asserted so
+    it cannot be widened by accident."""
+    from amux import cli
+
+    session = type("S", (), {"windows": []})()
+    removed: list[str] = []
+    monkeypatch.setattr(cli, "_get_session", lambda server, ws: session)
+    monkeypatch.setattr(cli.runtime, "sandbox_tasks", lambda ws: ["t0"])
+    monkeypatch.setattr(cli.runtime, "clean_task", lambda ws, task, force=False: [])
+    monkeypatch.setattr(
+        cli.worktree, "remove_task", lambda ws, task: removed.append(task) or []
+    )
+    monkeypatch.setattr(
+        cli.core, "load_agent_space",
+        lambda s: type("G", (), {"terminate": lambda self: None})(),
+    )
+    args = type("A", (), {"workspace": "ws", "clean": True, "force": False})()
+
+    cli._cmd_kw(None, args)  # noqa: SLF001
+    assert removed == []
+
+
+def test_a_windowless_refusal_still_spares_the_session(monkeypatch):
+    from amux import cli
+
+    session = type("S", (), {"windows": []})()
+    monkeypatch.setattr(cli, "_get_session", lambda server, ws: session)
+    monkeypatch.setattr(cli.runtime, "sandbox_tasks", lambda ws: ["t0"])
+    monkeypatch.setattr(
+        cli.runtime, "clean_task",
+        lambda ws, task, force=False: (_ for _ in ()).throw(
+            sandbox.SandboxError("box-1: could not be removed")
+        ),
+    )
+    monkeypatch.setattr(cli.worktree, "remove_task", lambda ws, task: [])
+    monkeypatch.setattr(
+        cli.core, "load_agent_space",
+        lambda s: (_ for _ in ()).throw(AssertionError("must not terminate")),
+    )
+    args = type("A", (), {"workspace": "ws", "clean": True, "force": False})()
+
+    with pytest.raises(sandbox.SandboxError) as caught:
+        cli._cmd_kw(None, args)  # noqa: SLF001
+    assert "t0 (no window)" in str(caught.value)
+
+
+def test_kw_without_clean_does_not_sweep_the_registry(monkeypatch):
+    """Stopping is not cleanup: `kw` with no --clean must not start removing
+    VMs it was never asked to remove."""
+    from amux import cli
+
+    session = type("S", (), {"windows": []})()
+    monkeypatch.setattr(cli, "_get_session", lambda server, ws: session)
+    monkeypatch.setattr(
+        cli.runtime, "sandbox_tasks",
+        lambda ws: (_ for _ in ()).throw(AssertionError("must not sweep")),
+    )
+    monkeypatch.setattr(
+        cli.core, "load_agent_space",
+        lambda s: type("G", (), {"terminate": lambda self: None})(),
+    )
+    args = type("A", (), {"workspace": "ws", "clean": False, "force": False})()
+    assert cli._cmd_kw(None, args) == 0  # noqa: SLF001

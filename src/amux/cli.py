@@ -200,8 +200,10 @@ def _cmd_kw(server, args) -> int:
     session = _get_session(server, args.workspace)
     _check_force(args)
     problems: list[str] = []
+    handled: set[str] = set()
     for window in session.windows:
         task = window.name or ""
+        handled.add(task)
         if args.clean:
             # Sandboxes first: a refusal must abort before any host worktree is
             # removed, so a dirty sandbox does not cost the user the rest.
@@ -218,6 +220,25 @@ def _cmd_kw(server, args) -> int:
             # Stop, do not destroy: a sandbox keeps its disk and its provider
             # session so a later spawn can resume it as itself.
             runtime.stop_task(args.workspace, task)
+    if args.clean:
+        # A task killed with `kg` had its window removed and its VM kept, so it
+        # is not in the loop above and was previously unreachable: `kw --clean`
+        # could never remove it and re-running did not help. The registry is the
+        # only place it still exists.
+        #
+        # Sandboxes only. `worktree.remove_task` is deliberately NOT called for
+        # these: reaching host worktrees the same way would start DELETING in a
+        # case that is silently skipped today, which is a wider change to the
+        # default runtime than this fixes. Recorded as a follow-up rather than
+        # rejected -- see the note in `runtime.sandbox_tasks`.
+        for task in runtime.sandbox_tasks(args.workspace):
+            if task in handled:
+                continue
+            try:
+                runtime.clean_task(args.workspace, task, force=args.force)
+            except sandbox.SandboxError as exc:
+                problems.append(f"{task} (no window): {exc}")
+
     if problems:
         # The session is deliberately NOT killed. Killing it would make every
         # surviving sandbox unaddressable by amux -- `kw` would answer

@@ -265,6 +265,29 @@ def sandbox_rows(workspace: str, task: str) -> list[dict]:
     ]
 
 
+def sandbox_tasks(workspace: str) -> list[str]:
+    """Tasks of a workspace that still have a microVM, read from the registry.
+
+    The registry, not live tmux windows, because `kg` without `--clean`
+    deliberately removes the window and keeps the VM -- after which the task
+    exists only here. A caller enumerating windows cannot reach it at all, so
+    such a task was orphaned by construction.
+
+    Same lesson as `_taken_names` and `pane_states` before it: enumerate the
+    durable record, not the live view.
+    """
+    seen: list[str] = []
+    for row in store.worktrees_for(workspace):
+        if (
+            row["runtime"] == DOCKER_SANDBOX
+            and row["sandbox_name"]
+            and row["runtime_status"] not in GONE_RUNTIME_STATUSES
+            and row["task"] not in seen
+        ):
+            seen.append(row["task"])
+    return seen
+
+
 def _retire(worktree_id: int, status: str, *, current: str) -> None:
     """Record that a row's VM is gone, without rewriting its merge history.
 
