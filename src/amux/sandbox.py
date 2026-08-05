@@ -645,6 +645,15 @@ class Sandbox:
             raise SandboxError("exec needs a command")
         return run("exec", self.name, *argv).stdout
 
+    def working_tree_status(self) -> str:
+        """Porcelain status of the clone inside the sandbox. Empty means clean.
+
+        This is what stands between `--clean` and destroying an agent's
+        uncommitted work, so a status that cannot be read is treated as dirty
+        by the caller rather than as clean.
+        """
+        return self.exec(["git", "status", "--porcelain"]).strip()
+
     def refresh(self) -> Sandbox:
         entry = find(self.name)
         if entry is None:

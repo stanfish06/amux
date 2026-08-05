@@ -458,3 +458,28 @@ def test_unchecked_commands_return_their_failure(fake_sbx):
     fake_sbx.respond("policy", "check", "network", stderr="nope\n", returncode=1)
     result = sandbox.run("policy", "check", "network", "x:1", check=False)
     assert not result.ok and result.message == "nope"
+
+
+# The real output of a *denial* on a host where `sbx policy init` HAS been run.
+# Captured from sbx v0.37.1. Note it goes to stdout, not stderr, and looks
+# nothing like the uninitialized-policy error.
+POLICY_DENIED = (
+    "Denied: localhost:47317\n"
+    "Governance: Local policy only\n"
+    "Context: global\n"
+    "Reason: no matching allow rule (default deny)\n"
+)
+
+
+def test_policy_check_handles_a_real_default_deny(fake_sbx):
+    """The live negative case: policy initialized, this port not allowed."""
+    fake_sbx.respond(
+        "policy", "check", "network", stdout=POLICY_DENIED, returncode=1
+    )
+    check = sandbox.check_network("localhost:47317")
+
+    assert not check.allowed
+    # Initialized -- so the remediation is "allow this port", not "run init".
+    assert check.initialized
+    assert check.detail == "Denied: localhost:47317"
+    assert "policy init" not in check.remediation

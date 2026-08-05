@@ -375,6 +375,11 @@ def remove_task(workspace: str, task: str) -> list[str]:
     for row in rows:
         if row["status"] == "removed" or not row["repo"]:
             continue
+        # A sandbox row has no host worktree (path=''), and `git worktree
+        # remove ""` is not a no-op worth relying on. Sandboxes are removed by
+        # `runtime.clean_task`, which has to check for uncommitted work first.
+        if not row["path"]:
+            continue
         # Per row: a task can span repos, and rows registered without one would
         # otherwise run `git -C ""` and fail silently under check=False.
         if _git(

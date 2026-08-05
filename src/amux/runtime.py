@@ -231,6 +231,93 @@ def stop_task(workspace: str, task: str) -> list[str]:
     return stopped
 
 
+def clean_task(workspace: str, task: str, *, force: bool = False) -> list[str]:
+    """Remove a task's sandboxes, preserving committed work first.
+
+    The order is the safety property. For each sandbox: check the working tree,
+    refuse if it is dirty and `force` was not given, fetch the committed branch
+    tip to a durable host ref, remove the sandbox, drop its host remote, revoke
+    its capability, and only then mark the row removed. A refused or failed
+    removal leaves the row exactly as it was -- a row marked removed while its
+    sandbox still holds work is both unreachable and invisible.
+
+    Returns the sandboxes removed. Raises `SandboxError` naming every sandbox
+    that refused, without having touched any of them.
+    """
+    rows = [
+        row
+        for row in store.worktrees_for(workspace, task)
+        if row["status"] == "active"
+        and row["runtime"] == DOCKER_SANDBOX
+        and row["sandbox_name"]
+    ]
+    if not rows:
+        return []
+
+    # Every dirty sandbox is found before anything is removed, so the refusal
+    # lists all of them at once rather than one per re-run.
+    if not force:
+        dirty = []
+        for row in rows:
+            status = _dirty_status(row["sandbox_name"])
+            if status:
+                dirty.append((row["sandbox_name"], status))
+        if dirty:
+            raise sandbox.SandboxError(_dirty_refusal(dirty))
+
+    removed: list[str] = []
+    for row in rows:
+        name = row["sandbox_name"]
+        # Before `sbx rm`, never after: once the sandbox is gone its commits are
+        # unreachable, and this ref is what makes them survive.
+        try:
+            worktree.fetch_sandbox_branch(row["repo"], name, row["branch"])
+        except worktree.WorktreeError as exc:
+            print(f"amux: {name}: no committed branch to preserve ({exc})")
+        try:
+            sandbox.remove(name, force=force)
+        except sandbox.SandboxError as exc:
+            # Left active on purpose: the sandbox is still there and still owns
+            # whatever it owns.
+            print(f"amux: could not remove sandbox {name}: {exc}")
+            continue
+        try:
+            worktree.remove_sandbox_remote(row["repo"], name)
+        except Exception as exc:  # noqa: BLE001
+            print(f"amux: could not remove remote for {name}: {exc}")
+        store.revoke_context_tokens_for_worktree(row["id"])
+        store.set_worktree_runtime(row["id"], runtime_status="removed")
+        store.set_worktree_status(row["id"], "removed")
+        removed.append(name)
+    return removed
+
+
+def _dirty_status(name: str) -> str:
+    """Uncommitted changes in a sandbox, or "" when it is clean.
+
+    A sandbox that cannot be asked counts as dirty. Treating an unanswerable
+    question as "clean" would delete work on exactly the sandboxes that are
+    already misbehaving.
+    """
+    try:
+        return sandbox.Sandbox(name=name).working_tree_status()
+    except sandbox.SandboxError as exc:
+        return f"could not read the working tree: {exc}"
+
+
+def _dirty_refusal(dirty: list[tuple[str, str]]) -> str:
+    lines = ["refusing to remove sandboxes with uncommitted work:"]
+    for name, status in dirty:
+        lines.append(f"  {name}:")
+        lines += [f"    {line}" for line in status.splitlines()[:20]]
+    lines.append(
+        "commit or discard the work inside the sandbox, or pass --force to "
+        "remove it anyway and lose those changes. Committed branch tips are "
+        "preserved on the host either way."
+    )
+    return "\n".join(lines)
+
+
 @dataclass(frozen=True)
 class SandboxConfig:
     """Everything `--runtime docker-sandbox` needs beyond the grid itself."""
