@@ -438,6 +438,17 @@ def remove_sandbox_remote(repo: str, sandbox_name: str) -> None:
 
 
 def latest_commit_subject(path: str) -> str:
+    """The subject of `path`'s last commit, or "" when there is no path.
+
+    The empty-path guard is the point. `git -C ""` is not an error: it is a
+    no-op that reports the *calling process's* checkout, so a sandbox row
+    (path='') would silently attribute whatever commit amux happened to be
+    sitting on to an agent that never made it. Callers gate on runtime too,
+    but this makes the whole class of mistake impossible rather than
+    remembered.
+    """
+    if not path:
+        return ""
     proc = _git(path, "log", "-1", "--format=%s", check=False)
     return proc.stdout.strip() if proc.returncode == 0 else ""
 

@@ -67,7 +67,15 @@ def respond_ls(fake_sbx, names):
 
 
 HOME = "/home/agent"
-HOME_PROBE = ("sh", "-lc", 'printf %s "$HOME"')
+# The exact identity probe bootstrap makes: $HOME, user and group in one round
+# trip. Reproduced rather than approximated so a change to it fails loudly here
+# instead of silently feeding shell output to a JSON parser.
+IDENTITY_PROBE = (
+    "sh",
+    "-lc",
+    'printf "%s\\n%s\\n%s" "$HOME" "$(id -un)" "$(id -gn)"',
+)
+IDENTITY = f"{HOME}\nagent\nagent"
 
 
 def ready(fake_sbx, names, *, codex_version=None):
@@ -85,7 +93,7 @@ def ready(fake_sbx, names, *, codex_version=None):
     fake_sbx.respond("create")
     fake_sbx.respond("cp")
     for name in names:
-        fake_sbx.respond("exec", name, *HOME_PROBE, stdout=HOME + "\n")
+        fake_sbx.respond("exec", name, *IDENTITY_PROBE, stdout=IDENTITY)
         if codex_version is not None:
             fake_sbx.respond(
                 "exec", name, "sh", "-lc", "codex --version 2>/dev/null",

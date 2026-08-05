@@ -2,6 +2,7 @@ import time
 
 from libtmux import Pane, Session, Window
 
+from amux import sandbox_client
 from amux.core import load_agent_pane
 from amux.shared import ALIAS
 
@@ -25,6 +26,25 @@ def _addr(agent: dict) -> str:
     return f"@{agent['label']} {agent['pane']}" if agent["name"] else agent["pane"]
 
 
+#: Appended to a state that its agent cannot fully report. ASCII, not an emoji:
+#: the monitor lays panels out in fixed columns and an emoji's width is not
+#: reliably one cell, so it misaligns the box borders.
+DEGRADED_MARK = "*"
+
+
+def state_to_string(agent: dict) -> str:
+    """An agent's state, marked when the agent cannot report all of them.
+
+    No seventh state: the vocabulary stays starting/busy/idle/needs-input/
+    stopped/dead and the marker rides alongside, so nothing that branches on
+    state has to learn a new value. But a degraded agent's state is never
+    rendered bare -- showing `idle` for an agent that physically cannot send
+    `busy` is a claim amux is not entitled to make.
+    """
+    state = agent.get("state") or "-"
+    return f"{state}{DEGRADED_MARK}" if agent.get("state_degraded") else state
+
+
 def context_to_string(ctx: dict) -> list[str]:
     """Concise agent-facing view of `core.build_context` output."""
     me = ctx["self"]
@@ -32,21 +52,31 @@ def context_to_string(ctx: dict) -> list[str]:
     lines = [
         f"you: {me['name']}  {me['agent']} @{me['label']} {me['pane']}  "
         f"{ALIAS['window']}:{me['task']}  {ALIAS['session']}:{me['workspace']}  "
-        f"{me['state']}{branch}  {me['cwd']}",
-        f"team @ {me['workspace']}",
+        f"{state_to_string(me)}{branch}  {me['cwd']}",
     ]
+    # Immediately after the identity line, and only for a non-host runtime, so
+    # host output stays byte-identical. Shape shared with the sandbox client.
+    runtime_line = sandbox_client.runtime_to_string(me)
+    if runtime_line:
+        lines.append(runtime_line)
+    if me.get("state_degraded"):
+        lines.append(
+            f"  note: {DEGRADED_MARK} marks a state this agent cannot fully "
+            f"report (no {', '.join(me['missing_kinds'])})"
+        )
+    lines.append(f"team @ {me['workspace']}")
     rows = [a for group in ctx["team"] for a in group["agents"]]
     wn = max(len(a["name"] or "-") for a in rows)
     wa = max(len(a["agent"]) for a in rows)
     wd = max(len(_addr(a)) for a in rows)
-    ws = max(len(a["state"]) for a in rows)
+    ws = max(len(state_to_string(a)) for a in rows)
     for i, group in enumerate(ctx["team"]):
         own = f" (your {ALIAS['window']})" if i == 0 else ""
         lines.append(f"  {group['task']}{own}")
         for a in group["agents"]:
             row = (
                 f"    {(a['name'] or '-'):<{wn}}  {a['agent']:<{wa}}  "
-                f"{_addr(a):<{wd}}  {a['state']:<{ws}}"
+                f"{_addr(a):<{wd}}  {state_to_string(a):<{ws}}"
             )
             if a["pane"] == me["pane"]:
                 row += " (you)"

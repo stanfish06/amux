@@ -6,9 +6,10 @@ from dataclasses import dataclass
 from libtmux import Pane, Server, Session, Window
 from libtmux.constants import PaneDirection
 
-from amux import events, store, worktree
+from amux import events, sandbox_hooks, store, worktree
 from amux.runtime import (
     AGENT_COMMANDS,
+    HOST,
     GridCreationError,
     HostRuntime,
     PaneSpec,
@@ -554,7 +555,50 @@ def _roster_entry(pane: Pane) -> dict:
         # `sandbox-<name>` remote, not from a host path.
         if wt["path"]:
             entry["last_commit"] = worktree.latest_commit_subject(wt["path"])
+        entry.update(runtime_fields(wt))
     return entry
+
+
+def runtime_fields(row) -> dict:
+    """Runtime identity for a roster entry, or {} for a host agent.
+
+    Empty for `host` on purpose: adding the keys unconditionally would change
+    every existing consumer's output for agents whose runtime has not changed.
+    """
+    runtime = (row["runtime"] if "runtime" in row.keys() else "") or HOST
+    if runtime == HOST:
+        return {}
+    missing = missing_state_kinds(row)
+    return {
+        "runtime": runtime,
+        "runtime_status": row["runtime_status"] or "",
+        "sandbox_name": row["sandbox_name"] or "",
+        "sandbox_id": row["sandbox_id"] or "",
+        # A degraded agent cannot report every state, so its resolved state is
+        # not authoritative and must never be presented as if it were.
+        "state_degraded": bool(missing),
+        "missing_kinds": list(missing),
+    }
+
+
+def missing_state_kinds(row) -> tuple[str, ...]:
+    """State kinds this execution's agent cannot report.
+
+    Derived rather than stored: it is a pure function of the agent and which
+    hook mechanism its image supports, so every reader computes the same answer
+    from one recorded fact instead of three of them storing a list.
+    """
+    mechanism = (
+        row["hook_mechanism"] if "hook_mechanism" in row.keys() else ""
+    ) or ""
+    if not mechanism:
+        # Nothing recorded: a host row, or an execution from before the
+        # mechanism was tracked. Claiming degradation we have not observed
+        # would be as wrong as hiding it.
+        return ()
+    return sandbox_hooks.missing_kinds(
+        row["agent"], hooks_supported=mechanism == "hooks"
+    )
 
 
 def build_context(server: Server, pane_id: str) -> dict:
