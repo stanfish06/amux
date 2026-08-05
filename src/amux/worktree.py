@@ -218,6 +218,42 @@ def setup_task(
         raise
 
 
+def _merge_source(row: dict) -> str:
+    """What `integrate` should merge for one execution row.
+
+    A host row's branch is already local. A sandbox row's is not: it lives in
+    the VM's clone and reaches the host only through the `sandbox-<name>`
+    remote, so it is fetched to a durable ref first. Uncommitted files in the
+    sandbox cannot cross that boundary, which is exactly the intended
+    behaviour -- only committed work is integrated.
+    """
+    if row.get("runtime") != "docker-sandbox":
+        return row["branch"]
+    sandbox_name = row.get("sandbox_name") or ""
+    if not sandbox_name:
+        raise WorktreeError(
+            f"sandbox row for '{row['name']}' has no sandbox name recorded; "
+            "its branch cannot be located"
+        )
+    return fetch_sandbox_branch(row["repo"], sandbox_name, row["branch"])
+
+
+def _record_failure(workspace: str, task: str, row: dict, text: str) -> None:
+    """Leave a task-scoped blocker so a failed integrate is visible to the team
+    rather than only to whoever happened to run the command."""
+    store.add_note(
+        workspace=workspace,
+        task=task,
+        pane=row["pane"],
+        agent=row["agent"],
+        worktree_id=row["id"],
+        repo=row["repo"],
+        scope="task",
+        kind="blocker",
+        text=text,
+    )
+
+
 def integrate(
     workspace: str,
     task: str,
@@ -243,25 +279,37 @@ def integrate(
     for row in rows:
         pane, name, branch = row["pane"], row["name"], row["branch"]
         wt_id, repo = row["id"], row["repo"]
+
+        # A host agent's branch is already in this repository. A sandboxed
+        # agent's lives inside its VM and reaches the host only through the
+        # remote `sbx create --clone` published, so it must be fetched first --
+        # and only committed work comes across, which is the point.
+        try:
+            source = _merge_source(row)
+        except WorktreeError as exc:
+            err = str(exc)
+            _record_failure(
+                workspace, task, row, f"integrate: cannot reach {name} ({branch}): {err}"
+            )
+            results.append(
+                MergeResult(pane=pane, name=name, branch=branch, ok=False, error=err)
+            )
+            continue
+
         before = _git(int_path, "rev-parse", "HEAD").stdout.strip()
         n_commits = int(
-            _git(int_path, "rev-list", "--count", f"HEAD..{branch}").stdout.strip()
+            _git(int_path, "rev-list", "--count", f"HEAD..{source}").stdout.strip()
             or "0"
         )
-        proc = _git(int_path, "merge", "--no-ff", branch, check=False)
+        proc = _git(int_path, "merge", "--no-ff", source, check=False)
         if proc.returncode != 0:
             _git(int_path, "merge", "--abort", check=False)
             err = proc.stderr.strip() or proc.stdout.strip()
-            store.add_note(
-                workspace=workspace,
-                task=task,
-                pane=pane,
-                agent=row["agent"],
-                worktree_id=wt_id,
-                repo=repo,
-                scope="task",
-                kind="blocker",
-                text=f"integrate: conflict merging {name} ({branch}): {err}",
+            _record_failure(
+                workspace,
+                task,
+                row,
+                f"integrate: conflict merging {name} ({branch}): {err}",
             )
             results.append(
                 MergeResult(pane=pane, name=name, branch=branch, ok=False, error=err)
@@ -325,6 +373,35 @@ def remove_task(workspace: str, task: str) -> list[str]:
 def sandbox_remote(sandbox_name: str) -> str:
     """The host-side remote `sbx create --clone` publishes for a sandbox."""
     return f"sandbox-{sandbox_name}"
+
+
+def sandbox_tracking_ref(sandbox_name: str, branch: str) -> str:
+    """Where a fetched sandbox branch lands on the host.
+
+    Namespaced under `refs/amux/` rather than `refs/heads/`: it is a record of
+    what a sandbox had committed at fetch time, not a branch anyone checks out,
+    and it must not collide with the identically named branch a *host* agent of
+    the same name would own. It is also what survives `sbx rm`, which is why
+    cleanup fetches before removing.
+    """
+    return f"refs/amux/sandboxes/{sandbox_name}/{branch}"
+
+
+def fetch_sandbox_branch(repo: str, sandbox_name: str, branch: str) -> str:
+    """Fetch a sandbox's committed branch to a durable local ref, and return it.
+
+    Raises `WorktreeError` with git's own message when the sandbox is stopped,
+    already removed, or has never committed the branch -- those are different
+    problems and the caller reports them rather than papering over them.
+    """
+    remote = sandbox_remote(sandbox_name)
+    ref = sandbox_tracking_ref(sandbox_name, branch)
+    proc = _git(
+        repo, "fetch", "--no-tags", remote, f"+{branch}:{ref}", check=False
+    )
+    if proc.returncode != 0:
+        raise WorktreeError(proc.stderr.strip() or proc.stdout.strip())
+    return ref
 
 
 def remove_sandbox_remote(repo: str, sandbox_name: str) -> None:
