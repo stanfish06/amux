@@ -205,3 +205,79 @@ def test_a_task_can_be_respawned_after_a_kill_without_clean(repo):
     assert set(paths) == {"%2"}
     assert Path(paths["%2"]).is_dir()
     assert sorted(statuses()) == ["active", "active"]
+
+
+# --- integrating early must not foreclose an agent ---
+#
+# `merged` is terminal: `integrate` selects on `active`, so a row marked merged
+# can never be integrated again by any command, `--agent <name>` included, and
+# recovery is a manual git merge. Marking a zero-commit agent merged therefore
+# both records work that never existed and shuts out the work it has not done
+# yet -- which makes integrating EARLY the expensive mistake, since any agent
+# idle during the first pass is permanently excluded.
+
+
+def commit_in(path, filename, text, message):
+    (Path(path) / filename).write_text(text)
+    git(path, "add", filename)
+    git(path, "commit", "-qm", message)
+
+
+def test_an_agent_with_no_commits_stays_integrable(repo):
+    """The defect, end to end: integrate early, then commit, then integrate."""
+    paths = worktree.setup_task(str(repo), "ws", "t0", [("%1", "claude", "alpha")])
+
+    (early,) = worktree.integrate("ws", "t0")
+    assert early.ok
+    assert early.commits == 0
+    # Reported as no-delta, exactly as before...
+    assert any("no changes" in n["text"] for n in store.query_notes(
+        workspace="ws", task="t0", limit=20))
+    # ...but NOT foreclosed.
+    assert statuses() == ["active"]
+
+    # The agent then does its work, as an agent that was merely idle would.
+    commit_in(paths["%1"], "late.txt", "real work\n", "work the agent did later")
+
+    (late,) = worktree.integrate("ws", "t0")
+
+    assert late.ok
+    assert late.commits == 1
+    assert statuses() == ["merged"]
+    int_path = task_root() / worktree.INTEGRATION_DIR
+    assert (int_path / "late.txt").read_text() == "real work\n"
+
+
+def test_an_agent_with_commits_is_still_marked_merged(repo):
+    """The counterpart: real work still terminates the row, so it is not
+    merged twice."""
+    paths = worktree.setup_task(str(repo), "ws", "t0", [("%1", "claude", "alpha")])
+    commit_in(paths["%1"], "f.txt", "x\n", "real work")
+
+    (result,) = worktree.integrate("ws", "t0")
+    assert result.ok and result.commits == 1
+    assert statuses() == ["merged"]
+
+    # And a second pass finds nothing active, as it should.
+    with pytest.raises(worktree.WorktreeError, match="no active worktrees"):
+        worktree.integrate("ws", "t0")
+
+
+def test_a_no_delta_pass_does_not_block_a_teammate(repo):
+    """A mixed pass: one agent has work, one does not. Neither outcome should
+    depend on the other."""
+    paths = worktree.setup_task(
+        str(repo), "ws", "t0", [("%1", "claude", "alpha"), ("%2", "codex", "beta")]
+    )
+    commit_in(paths["%2"], "beta.txt", "b\n", "beta work")
+
+    results = {r.name: r for r in worktree.integrate("ws", "t0")}
+    rows = {r["name"]: r["status"] for r in store.worktrees_for("ws", "t0")}
+
+    assert results["alpha"].commits == 0 and rows["alpha"] == "active"
+    assert results["beta"].commits == 1 and rows["beta"] == "merged"
+
+    # alpha can still contribute afterwards.
+    commit_in(paths["%1"], "alpha.txt", "a\n", "alpha work")
+    (second,) = worktree.integrate("ws", "t0")
+    assert second.name == "alpha" and second.commits == 1

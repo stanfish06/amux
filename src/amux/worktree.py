@@ -337,7 +337,19 @@ def integrate(
         shortstat = _git(
             int_path, "diff", "--shortstat", before, "HEAD"
         ).stdout.strip()
-        store.set_worktree_status(wt_id, "merged")
+        # Only when something was actually integrated. `merged` is a terminal
+        # status -- this function selects on `active` -- so marking a
+        # zero-commit agent merged records work that never existed AND
+        # permanently forecloses the work it has not done yet: no amux command
+        # can integrate it again, not even `--agent <name>`, and recovery is a
+        # manual git merge.
+        #
+        # That makes integrating EARLY the expensive mistake, since any agent
+        # idle during the first pass would be shut out. Leaving it active costs
+        # nothing: the result below still reports "0 commit(s), no changes", and
+        # a later pass picks up whatever the agent goes on to commit.
+        if n_commits:
+            store.set_worktree_status(wt_id, "merged")
         store.add_note(
             workspace=workspace,
             task=task,

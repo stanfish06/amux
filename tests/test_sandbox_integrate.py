@@ -135,6 +135,9 @@ def test_a_branch_with_no_delta_reports_no_changes(git_repo, task, clone):
     assert result.commits == 0
     assert result.shortstat == ""
     assert any("no changes" in n["text"] for n in notes())
+    # Not foreclosed: `merged` is terminal, and a sandboxed agent that had not
+    # committed yet must still be integrable once it does.
+    assert store.worktrees_for("ws", "t0")[0]["status"] == "active"
 
 
 def test_uncommitted_sandbox_files_are_not_integrated(git_repo, task, clone):
