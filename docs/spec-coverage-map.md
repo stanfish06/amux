@@ -207,10 +207,33 @@ reported success and left four VMs running.
 **Half of it is now fixed**, verified at source rather than taken from the
 report: `runtime.sandbox_rows` (`runtime.py:225-239`) selects on the *runtime*
 axis, with the leak named in its own docstring — *"`status` answers 'was this
-work merged'; `runtime_status` answers 'does a VM exist'"*. So cleanup and stop
-now reach merged rows, recovery works, and `worktree.py:289` is the only place
-left where the merge axis gates anything. The surviving consequence is narrower
-than the original: you cannot re-integrate, but you are no longer stranded.
+work merged'; `runtime_status` answers 'does a VM exist'"*. `worktree.py:289` is
+the only place left where the merge axis gates anything.
+
+**Measured, not read** (disposable repo, its own `XDG_STATE_HOME`, its own
+`-L amux-probe` socket, `python -m amux.cli` from this tree — not the installed
+binary, which predates the change and has no `doctor` subcommand):
+
+| Observation | Result |
+|---|---|
+| Pass 1, two host agents, one with a commit and one without | both merged: `jolly-lemur` 1 commit, `olive-bear` **0 commits, "no changes"** — and *both* rows moved `active` → `merged` |
+| Pass 2, `--all` | refuses: `amux: no active worktrees for task 't0' in workspace 'probe'`, rc=1 |
+| Pass 2, `--agent olive-bear` | refuses identically |
+| `kg --clean` on merged rows | succeeds, rows move `merged` → `removed` |
+| `runtime.sandbox_rows` on a `merged` sandbox row | returns it — cleanup and stop do reach merged rows |
+
+**Correction to an earlier claim in this document.** I wrote that the surviving
+consequence is "you cannot re-integrate, but you are no longer stranded". That
+is true of *microVMs* and false of *work*. A row is marked merged on the
+attempt, not on having contributed anything — so an agent that had not committed
+when someone ran `integrate` is marked merged with a zero-commit result, and its
+later commits cannot be integrated by any amux command: `--all` and
+`--agent <name>` both refuse, and the commit sits on its branch, absent from the
+integration branch. Measured above. Recovery is a manual `git merge`.
+
+So the accurate statement is: VMs are recoverable, and work committed after any
+integrate pass is not — which makes integrating early, before teammates have
+committed, the expensive mistake rather than integrating twice.
 
 Worth keeping both halves recorded, because as two separate quirks — "integrate
 won't re-run" and "cleanup leaked VMs" — they read as unrelated, and the thing
