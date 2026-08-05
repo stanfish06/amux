@@ -19,7 +19,8 @@ something other than the behaviour it named.
 | Tree equivalence | `git diff --stat f30c43b a45fc7d -- src tests tui docs Makefile pyproject.toml` is **empty**. `tui/` is included this time and was not in the first pass, because the R6 show half lives there |
 | Union suite | **800 passed** after the R6 restructure below (`f30c43b` itself is 799 passed / 1 failed, and that one failure is the predicted collision this re-run fixes) |
 | Specs | `openspec/changes/prototype-sandbox-agents-context-service/specs/{sandbox-agent-runtime,sandbox-context-bridge}/spec.md` |
-| Counted | 15 Requirements, 34 Scenarios (verified by `grep -c` on both files, not by trusting the scope) |
+| Counted | **15 Requirements, 35 Scenarios** (re-counted by `grep -c` on both files, not by adopting the number I was given) |
+| Count change | The spec gained a scenario *during* 6.3: clever-mole added R4's *"Agent commits after an integrate pass that found no delta"* in response to the foreclosure measured in §3. `sandbox-agent-runtime` went 16 → 17 scenarios. The map was first built against 34 |
 
 **Line numbers** are cited where verified by reading. Where a row cites
 `file:symbol` instead, the exact line was not confirmed — that is deliberate, so
@@ -40,10 +41,33 @@ no number in this document is invented.
 
 ## 1. Findings — read these first
 
-> **F1, F2 and F3 are FIXED as of `f30c43b`** — misty-panda `8786f6c` (Python)
+> **F4 is open. F1, F2 and F3 are FIXED as of `f30c43b`** — misty-panda `8786f6c` (Python)
 > and `dc487a7` (TUI). The findings are kept below as written, because they are
 > why 5.4 was un-ticked and because the fix is only legible against them. What
 > landed, and how it was verified, is in §3 R6.
+
+### F4. R4's new no-delta-then-commits scenario is uncovered
+
+*"Agent commits after an integrate pass that found no delta — **WHEN** an agent
+contributed no commits to an integrate pass and afterwards commits work on its
+assigned branch, **THEN** a later integrate reaches that agent and merges the new
+commits, because a pass that merged nothing MUST NOT record the agent as
+integrated."*
+
+Added to the spec during 6.3, because the behaviour it forbids is what §3's
+measurement found: `worktree.integrate` marks every row merged unconditionally,
+so a zero-commit agent is foreclosed and its later commits are unreachable.
+
+- Implementation: **none** — the fix is routed to misty-panda (do not mark merged
+  when `n_commits == 0`).
+- Test: **none.**
+- Mutation: not applicable until there is something to mutate.
+
+This is the honest state and is why the clause was worth adding: the defect was
+real before the scenario existed, and the map recorded it as *"a defect no
+scenario covers"*. It is now a scenario, and it is uncovered. When the fix lands,
+the mutation to name is *mark merged unconditionally again* → the new test must
+fail.
 
 ### F1. The monitor clause of "Runtime state is visible in existing amux views" has no implementation and no test
 
@@ -154,7 +178,7 @@ misty-panda real time.
 
 ---
 
-## 3. `sandbox-agent-runtime` — 7 Requirements, 16 Scenarios
+## 3. `sandbox-agent-runtime` — 7 Requirements, 17 Scenarios
 
 ### R1. Sandbox execution is explicit and optional
 
@@ -185,6 +209,7 @@ misty-panda real time.
 |---|---|---|---|
 | Sandbox branch integrates successfully | `worktree.integrate` sandbox path, `sandbox.git_remote` (`sandbox.py:203`), durable local ref | `test_a_committed_sandbox_branch_integrates`, `test_the_fetched_tip_is_kept_in_a_durable_local_ref`, `test_a_merge_commit_is_made_even_for_a_single_commit`, `test_host_and_sandbox_agents_integrate_in_one_pass` | Drop `--no-ff` → `test_a_merge_commit_is_made_even_for_a_single_commit` fails; skip the durable-ref write → its test fails |
 | Sandbox branch conflicts | conflict abort + blocker note in `worktree.integrate` | `test_a_conflicting_sandbox_branch_aborts_and_blocks`, `test_one_unreachable_sandbox_does_not_stop_the_others` | Remove the `merge --abort` → the test fails on a left-behind conflicted index; skip the blocker note → fails on the missing note |
+| **Agent commits after a no-delta pass** (added during 6.3) | **none** — `worktree.integrate` marks every row merged regardless of `n_commits`, so the agent is foreclosed. Fix routed | **none** | **F4 — no implementation, no test.** Once fixed: mark merged unconditionally again → the new test fails |
 | Sandbox has no committed work | no-delta and never-committed branches in `worktree.integrate` | `test_a_branch_with_no_delta_reports_no_changes`, `test_uncommitted_sandbox_files_are_not_integrated`, `test_a_sandbox_that_never_committed_the_branch_is_reported`, `test_a_stopped_or_removed_sandbox_is_reported_not_guessed` | Report `ok=True` with a fabricated shortstat for an empty delta → the first two fail |
 
 **Observed limitation, R4 (not a scenario failure).** `amux integrate <ws> <task>
