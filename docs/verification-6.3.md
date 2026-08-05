@@ -221,6 +221,12 @@ asking whose boundary is being frozen.
   built here. The packaging break was measured in both modes, but only
   `--onedir` was built by `make` and probed.
 - **Four-agent resource behaviour.** That is a 6.4 measurement.
+- **Anything about the monitor.** `amux monitor` was never run during this
+  verification. `monitor.py` is only a launcher; the renderer is the Ink TUI in
+  `tui/`, whose build output is gitignored (`tui/.gitignore`) and absent from the
+  integration worktree — so the command cannot start there. Only the monitor's
+  Python inputs are covered by tests. It is the one surface in this change that
+  nobody has run.
 
 Three defects in this change were reachable *only* by leaving the test suite —
 Codex hooks silently skipped without `--dangerously-bypass-hook-trust`,
