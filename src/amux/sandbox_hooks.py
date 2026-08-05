@@ -130,6 +130,9 @@ class AgentHooks:
     #: Config file that must switch hooks on before `settings_relpath` is read.
     enable_relpath: str | None = None
     paths_are_assumed: bool = True
+    #: Directory this agent discovers skills in, relative to `$HOME`. amux
+    #: installs its own skill here; the same pair the Makefile links on a host.
+    skills_relpath: str = ".claude/skills"
 
 
 #: Verified in `docker/sandbox-templates:claude-code-docker`, Claude Code
@@ -152,6 +155,7 @@ CODEX = AgentHooks(
     unmatched_events=CODEX_UNMATCHED_EVENTS,
     enable_relpath=".codex/config.toml",
     paths_are_assumed=False,
+    skills_relpath=".codex/skills",
 )
 
 HOOKS_BY_AGENT: dict[str, AgentHooks] = {CLAUDE.agent: CLAUDE, CODEX.agent: CODEX}

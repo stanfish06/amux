@@ -17,6 +17,7 @@ CONFIG_RELPATH = ".config/amux/context.json"
 CONFIG_MODE = "600"
 SHIM_MODE = "755"
 HOOK_MODE = "644"
+SKILL_MODE = "644"
 
 
 class BootstrapError(Exception):
@@ -60,6 +61,23 @@ class Installed:
 
 
 @dataclass(frozen=True)
+class SkillInstalled:
+    """Where amux's own skill landed, or why it did not.
+
+    A sandbox without the skill still works — the shim, its capability, and the
+    hooks are what make an agent functional — so `reason` carries the failure
+    instead of an exception, and spawning continues degraded.
+    """
+
+    path: str = ""
+    reason: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.path)
+
+
+@dataclass(frozen=True)
 class HooksInstalled:
     """The result of wiring one agent's hooks, including what it cannot report."""
 
@@ -95,6 +113,63 @@ def client_source() -> Path:
             f"pyinstaller --add-data <repo>/src/amux/{CLIENT_MODULE}:amux"
         )
     return source
+
+
+SKILL_NAME = "amux"
+SKILL_FILE = "SKILL.md"
+
+
+def skill_source() -> Path:
+    """amux's own skill document, to install into a sandbox.
+
+    Unlike the shim, this does not live in the package — `skills/amux/SKILL.md`
+    at the repository root is the single copy the host Makefile links into
+    `~/.claude/skills` and `~/.codex/skills`, and duplicating it under `src/`
+    would let the two drift. So look in both places amux actually runs from:
+    beside the package (where a PyInstaller `--add-data` unpacks it) and at the
+    repository root (a checkout or an editable install).
+    """
+    from amux import sandbox_client
+
+    package = Path(sandbox_client.__file__ or "").parent
+    relative = Path("skills") / SKILL_NAME / SKILL_FILE
+    candidates = (package / relative, package.parents[1] / relative)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise BootstrapError(
+        f"amux's own skill is missing: looked for {SKILL_FILE} at "
+        + ", ".join(str(c) for c in candidates)
+        + f". A packaged amux must ship it: pyinstaller --add-data "
+        f"<repo>/{relative}:{posixpath.join('amux', 'skills', SKILL_NAME)}"
+    )
+
+
+def install_skill(
+    ops: SandboxOps,
+    agent: str,
+    installed: Installed,
+    *,
+    source: Path | None = None,
+) -> SkillInstalled:
+    """Install amux's skill into the sandbox's skill directory for `agent`.
+
+    A sandboxed agent cannot read the host's skills — amux creates every sandbox
+    with `--no-share-skills` — yet this document is precisely what tells it which
+    commands cross the host boundary. Without it the agent has to discover the
+    boundary by tripping over it, so amux ships the skill the same way it ships
+    the shim: explicitly, as part of bootstrap.
+    """
+    try:
+        document = source or skill_source()
+        skills = sandbox_hooks.hooks_for(agent).skills_relpath
+        destination = posixpath.join(installed.home, skills, SKILL_NAME, SKILL_FILE)
+        who = _identity(ops, "")
+        _exec(ops, "", ["mkdir", "-p", posixpath.dirname(destination)])
+        _deliver(ops, "", document, destination, who, SKILL_MODE)
+        return SkillInstalled(path=destination)
+    except (BootstrapError, sandbox_hooks.HookMergeError) as exc:
+        return SkillInstalled(reason=str(exc))
 
 
 def stage_config_file(endpoint: str, token: str, *, directory: Path) -> Path:

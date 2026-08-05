@@ -535,6 +535,19 @@ class SandboxRuntime:
             handle, endpoint=self.config.client_endpoint, token=plaintext
         )
 
+        # Only when the host's skills are *not* shared in. With --share-skills the
+        # sandbox's skill directory is backed by the host's, and amux writing into
+        # it would push a file across the boundary the wrong way — into the user's
+        # own ~/.claude/skills, where `make install_skills` keeps a symlink into
+        # this repository.
+        if not self.config.resources.share_skills:
+            skill = sandbox_bootstrap.install_skill(handle, spec.agent, installed)
+            if not skill.ok:
+                print(
+                    f"amux: {spec.name} has no amux skill installed "
+                    f"({skill.reason}); it will not know the sandbox boundary"
+                )
+
         hooks = sandbox_bootstrap.install_hooks(handle, spec.agent, installed)
         acquired.hooks = hooks
         self.hooks[spec.pane] = hooks

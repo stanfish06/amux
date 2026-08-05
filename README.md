@@ -32,12 +32,13 @@ credentials, or Docker daemon outside its own clone. amux keeps every
 coordination concern on the host: workspace, task, roster, notes, events,
 worktrees, integration.
 
-> **Status.** The pieces are in — the `sbx` adapter and preflight
-> (`sandbox.py`), the host context service (`context_service.py`), the in-VM
-> client (`sandbox_client.py`), and hook bootstrap (`sandbox_bootstrap.py`) —
-> but the runtime is **not yet wired to the CLI**. Grid creation lands with task
-> 4.5 and the `--runtime` / `--cpus` / `--memory` / doctor flags with 5.5.
-> Anything below marked **(pending)** does not exist yet.
+> **Status.** Wired end to end and usable: `spw`/`spg` accept `--runtime
+> docker-sandbox` with `--cpus`, `--memory`, `--share-skills` and
+> `--context-port`, `amux doctor` checks the prerequisites without changing
+> anything, and `kg`/`kw` take `--clean` and `--force`. Still called a prototype
+> because the smoke test in `docs/sandbox-smoke-test.md` is a manual procedure
+> against a real authenticated host — an offline suite cannot verify hooks that
+> only fire inside a live VM.
 
 ## two rules that define the boundary
 
@@ -85,16 +86,22 @@ creates; `amux integrate` fetches that branch and merges it into the task
 integration worktree with `--no-ff`. It never imports a dirty working tree.
 
 ```sh
-amux spw myproj -p ~/Git/myproj --runtime docker-sandbox -a claude:2 -a codex:2  # (pending)
+amux spw myproj -p ~/Git/myproj --runtime docker-sandbox -a claude:2 -a codex:2
+amux doctor -p ~/Git/myproj        # check sbx, its version, and the network policy
 amux integrate myproj task0        # merge each sandbox's committed branch
 amux kg myproj task0               # stop the VMs, keep their state for reattach
-amux kg myproj task0 --clean       # remove them; refuses a dirty sandbox  (pending)
+amux kg myproj task0 --clean       # remove them; refuses a dirty sandbox
+amux kg myproj task0 --clean --force   # ...and accept losing uncommitted work
 ```
 
 ## more
 
 - `skills/amux/SKILL.md` — the agent-facing guide: what changes inside a
-  sandbox, the trust model, and troubleshooting.
+  sandbox, the trust model, and troubleshooting. Bootstrap installs it into every
+  sandbox alongside the shim, because `--no-share-skills` means a sandboxed agent
+  cannot read the copy on your host. With `--share-skills` amux leaves it alone —
+  your skill directory is shared in, and writing there would cross the boundary
+  the wrong way. On a host, `make install_skills` links this same file.
 - `docs/sandbox-smoke-test.md` — the manual verification procedure, run against
   a disposable repository on a real authenticated host.
 

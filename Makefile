@@ -30,10 +30,17 @@ dev:
 #   The `:amux` destination must stay. It is what makes the unpacked file land
 #   exactly where sandbox_client.__file__ points; changing it re-breaks shim
 #   installation with no build error at all.
+#
+# skills/amux/SKILL.md ships for the same reason and with the same two hazards:
+# bootstrap copies it into every sandbox as a file, and a packaged amux has no
+# repository root to find it in. It must land beside the package as
+# skills/amux/SKILL.md, which is the first place `sandbox_bootstrap.skill_source`
+# looks; the second is the repo root, which only exists in a checkout.
 build: dev
 	env -u PYTHONPATH $(VENV)/bin/pyinstaller $(PYINSTALLER_MODE) --name amux \
 		--paths src \
 		--add-data $(CURDIR)/src/amux/sandbox_client.py:amux \
+		--add-data $(CURDIR)/skills/amux/SKILL.md:amux/skills/amux \
 		--specpath build --workpath build --distpath dist \
 		-y src/amux/cli.py
 

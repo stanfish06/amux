@@ -40,10 +40,10 @@ def minted(monkeypatch):
     return records
 
 
-def make_runtime(**kwargs) -> runtime.SandboxRuntime:
+def make_runtime(*, resources: sandbox.Resources | None = None, **kwargs):
     return runtime.SandboxRuntime(
         runtime.SandboxConfig(
-            resources=sandbox.Resources(cpus=2, memory="4g"), port=47317
+            resources=resources or sandbox.Resources(cpus=2, memory="4g"), port=47317
         ),
         service_healthy=lambda: (True, "ok"),
         **kwargs,
@@ -390,6 +390,40 @@ def test_both_bootstrap_halves_run(git_repo, fake_sbx):
     assert hooks.location_verified is True
 
 
+def test_a_sandboxed_agent_gets_the_amux_skill(git_repo, fake_sbx):
+    """The third thing bootstrap installs. A sandbox is created with
+    `--no-share-skills`, so this document -- which is what tells an agent which
+    commands cross the host boundary -- reaches it only if amux delivers it."""
+    ready(fake_sbx, names_for(git_repo, "alpha"))
+    rt = make_runtime()
+    rt.prepare(
+        specs(("%1", "claude", "alpha")),
+        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+    )
+
+    delivered = [c[2].split(":", 1)[1] for c in fake_sbx.calls if c[0] == "cp"]
+    assert any(d.endswith("/.claude/skills/amux/SKILL.md") for d in delivered)
+
+
+def test_shared_skills_leaves_the_hosts_skill_directory_alone(git_repo, fake_sbx):
+    """With --share-skills the in-VM skill directory is backed by the host's own,
+    where `make install_skills` keeps a symlink into this repository. Writing
+    there would push a file across the boundary in the direction amux forbids."""
+    ready(fake_sbx, names_for(git_repo, "alpha"))
+    rt = make_runtime(
+        resources=sandbox.Resources(cpus=2, memory="4g", share_skills=True)
+    )
+    rt.prepare(
+        specs(("%1", "claude", "alpha")),
+        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+    )
+
+    delivered = [c[2].split(":", 1)[1] for c in fake_sbx.calls if c[0] == "cp"]
+    assert not any("skills" in d for d in delivered)
+    # The shim still goes in: sharing skills says nothing about the context client.
+    assert "/usr/local/bin/amux" in delivered
+
+
 def test_hook_installation_records_what_the_agent_cannot_report(git_repo, fake_sbx):
     """An old Codex has only the single `notify` slot. That is detected in the
     image, and the resulting gap is recorded rather than swallowed."""
@@ -422,6 +456,31 @@ def test_a_current_codex_image_is_not_degraded(git_repo, fake_sbx):
     assert hooks.mechanism == "hooks"
     assert not hooks.degraded
     assert hooks.settings_path.endswith(".codex/hooks.json")
+
+
+def test_a_sandbox_without_the_skill_is_announced_not_swallowed(
+    git_repo, fake_sbx, capsys, monkeypatch
+):
+    """A build that cannot ship the skill still spawns a working grid, so nothing
+    fails — which is exactly why it has to say so. Otherwise every agent quietly
+    loses the one document describing the boundary it must not cross."""
+    ready(fake_sbx, names_for(git_repo, "alpha"))
+    monkeypatch.setattr(
+        runtime.sandbox_bootstrap,
+        "install_skill",
+        lambda *a, **k: runtime.sandbox_bootstrap.SkillInstalled(
+            reason="amux's own skill is missing: looked for SKILL.md at ..."
+        ),
+    )
+    rt = make_runtime()
+    rt.prepare(
+        specs(("%1", "claude", "alpha")),
+        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+    )
+
+    out = capsys.readouterr().out
+    assert "alpha" in out and "no amux skill" in out
+    assert "boundary" in out
 
 
 def test_a_degraded_agent_is_announced_not_swallowed(git_repo, fake_sbx, capsys,
