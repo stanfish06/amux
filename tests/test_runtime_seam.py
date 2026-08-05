@@ -78,6 +78,9 @@ class RecordingRuntime:
     def preflight(self, agents, *, workspace, task, cwd):
         self.preflighted.append(list(agents))
 
+    def resumable_names(self, *, workspace, task, cwd):
+        return {}
+
     def rollback(self):
         return []
 

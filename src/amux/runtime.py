@@ -114,6 +114,18 @@ class Runtime(Protocol):
         socket: str,
     ) -> list[Launch]: ...
 
+    def resumable_names(
+        self, *, workspace: str | None, task: str | None, cwd: str | None
+    ) -> dict[str, list[str]]:
+        """Prior agent names this runtime could resume, keyed by agent kind.
+
+        `core` assigns pane names, and a resumable execution can only be found
+        by its name -- so if nothing steers a pane onto a prior name, resume
+        code is unreachable however correct it is. Returning {} means "always
+        draw a fresh name".
+        """
+        ...
+
     def rollback(self) -> list[str]:
         """Unwind everything `prepare` created. Returns cleanup failures."""
         ...
@@ -135,6 +147,15 @@ class HostRuntime:
         """Nothing to check: the host runtime has no external prerequisites,
         accepts any raw command as an agent, and already degrades to a shared
         directory when the target is not a repository."""
+
+    def resumable_names(
+        self, *, workspace: str | None, task: str | None, cwd: str | None
+    ) -> dict[str, list[str]]:
+        """Nothing. A host agent's worktree is gone once its task was cleaned,
+        and if it was not, its branch and directory still exist -- so reusing
+        the name would fail `worktree add` rather than resume anything. There is
+        no host equivalent of a stopped VM waiting to be re-entered."""
+        return {}
 
     def rollback(self) -> list[str]:
         """Nothing to unwind here. `setup_task` already rolls itself back, and
@@ -286,55 +307,163 @@ def stop_task(workspace: str, task: str) -> list[str]:
 def clean_task(workspace: str, task: str, *, force: bool = False) -> list[str]:
     """Remove a task's sandboxes, preserving committed work first.
 
-    The order is the safety property. For each sandbox: check the working tree,
-    refuse if it is dirty and `force` was not given, fetch the committed branch
-    tip to a durable host ref, remove the sandbox, drop its host remote, revoke
-    its capability, and only then mark the row removed. A refused or failed
-    removal leaves the row exactly as it was -- a row marked removed while its
-    sandbox still holds work is both unreachable and invisible.
+    Iterates distinct SANDBOXES, not rows. Reattachment leaves several rows
+    naming one sandbox -- the dead pane's and the live one's -- and iterating
+    rows removed that VM once and then tried to wake it again for the next row,
+    reporting a survivor it had already deleted. Worse, that refusal aborted the
+    remaining tasks, so a single stale row made a whole workspace permanently
+    un-cleanable: worse than the leak it replaced.
 
-    Returns the sandboxes removed. Raises `SandboxError` naming every sandbox
-    that refused, without having touched any of them.
+    The order per sandbox is the safety property: confirm it still exists, wake
+    it, establish whether it has a committed tip, preserve that tip, remove the
+    sandbox, drop its remote, revoke its capabilities, and only then retire its
+    rows. Refusals are raised, not printed, because the caller kills the tmux
+    session afterwards and a session killed over surviving VMs leaves them
+    unaddressable.
     """
-    rows = sandbox_rows(workspace, task)
-    if not rows:
+    by_sandbox: dict[str, list[dict]] = {}
+    for row in sandbox_rows(workspace, task):
+        by_sandbox.setdefault(row["sandbox_name"], []).append(row)
+    if not by_sandbox:
         return []
 
-    # Every dirty sandbox is found before anything is removed, so the refusal
-    # lists all of them at once rather than one per re-run.
+    # A sandbox amux has a row for but `sbx` does not know about is already
+    # gone -- removed by hand, or by an earlier pass that got part way. There is
+    # nothing to preserve and nothing to remove, so it is retired rather than
+    # reported as a survivor. Reporting it stranded is what made re-running
+    # `kw` fail identically forever.
+    gone = {name for name in by_sandbox if not sandbox.exists(name)}
+    for name in gone:
+        print(f"amux: {name} no longer exists; recording it as removed")
+        _retire_all(by_sandbox.pop(name))
+
+    live = list(by_sandbox.items())
     if not force:
-        dirty = []
-        for row in rows:
-            status = _dirty_status(row["sandbox_name"])
-            if status:
-                dirty.append((row["sandbox_name"], status))
+        dirty = [
+            (name, status) for name, _ in live if (status := _dirty_status(name))
+        ]
         if dirty:
             raise sandbox.SandboxError(_dirty_refusal(dirty))
 
     removed: list[str] = []
-    for row in rows:
-        name = row["sandbox_name"]
-        # Before `sbx rm`, never after: once the sandbox is gone its commits are
-        # unreachable, and this ref is what makes them survive.
+    stranded: list[str] = []
+    for name, rows in live:
+        branch = rows[0]["branch"]
+        repo = rows[0]["repo"]
+        handle = sandbox.Sandbox(name=name)
+        # Restored on every refusal below, not just one of them: inspecting a
+        # sandbox starts it, so any path that gives up after this point would
+        # otherwise leave a VM running that the registry still calls stopped.
+        was_stopped = any(r["runtime_status"] == "stopped" for r in rows)
+
+        def give_up(problem: str) -> None:
+            stranded.append(problem)
+            if was_stopped:
+                _restore_stopped(name)
+
         try:
-            worktree.fetch_sandbox_branch(row["repo"], name, row["branch"])
+            handle.wake()
+        except sandbox.SandboxError as exc:
+            give_up(
+                f"{name}: could not start it to read its committed work ({exc}); "
+                f"{branch} is NOT saved on the host"
+            )
+            continue
+
+        # Re-resolved AFTER waking, never taken from the row: `sbx stop` tears
+        # down both the published port and the host-side `sandbox-<name>`
+        # remote, and waking republishes on a DIFFERENT host port without
+        # restoring the remote. So a sandbox that has ever been stopped has no
+        # remote to fetch by name, while its commits sit perfectly reachable at
+        # the new port.
+        source = sandbox.git_url(name, repo)
+        if source is None:
+            give_up(
+                f"{name}: it is running but publishes no git port, so {branch} "
+                "cannot be read; it is NOT saved on the host"
+            )
+            continue
+
+        try:
+            tip = worktree.sandbox_branch_tip(repo, name, branch, source=source)
         except worktree.WorktreeError as exc:
-            print(f"amux: {name}: no committed branch to preserve ({exc})")
+            # Unreachable, so whether it holds commits is unknown. `--force`
+            # authorises losing *uncommitted* work; it does not authorise
+            # destroying commits nobody has managed to copy out.
+            give_up(
+                f"{name}: cannot read {branch} to preserve it ({exc}); "
+                "it is NOT saved on the host, so the sandbox was left in place"
+            )
+            continue
+
+        if tip is None:
+            print(f"amux: {name}: nothing committed on {branch} to preserve")
+        else:
+            try:
+                worktree.fetch_sandbox_branch(repo, name, branch, source=source)
+            except worktree.WorktreeError as exc:
+                give_up(
+                    f"{name}: {branch} is at {tip[:12]} but could not be fetched "
+                    f"({exc}); it is NOT saved on the host"
+                )
+                continue
+
         try:
             sandbox.remove(name, force=force)
         except sandbox.SandboxError as exc:
-            # Left active on purpose: the sandbox is still there and still owns
-            # whatever it owns.
-            print(f"amux: could not remove sandbox {name}: {exc}")
+            give_up(f"{name}: could not be removed ({exc})")
             continue
+
         try:
-            worktree.remove_sandbox_remote(row["repo"], name)
+            worktree.remove_sandbox_remote(repo, name)
         except Exception as exc:  # noqa: BLE001
             print(f"amux: could not remove remote for {name}: {exc}")
+        _retire_all(rows)
+        removed.append(name)
+
+    if stranded:
+        raise sandbox.SandboxError(_stranded_refusal(stranded, removed))
+    return removed
+
+
+def _retire_all(rows: list[dict]) -> None:
+    """Retire every row naming one sandbox, and revoke every capability.
+
+    All of them, because reattachment leaves the dead pane's row alongside the
+    live one and a token left valid on a retired row still authenticates.
+    """
+    for row in rows:
         store.revoke_context_tokens_for_worktree(row["id"])
         _retire(row["id"], "removed", current=row["status"])
-        removed.append(name)
-    return removed
+
+
+def _restore_stopped(name: str) -> None:
+    """Put a sandbox back to stopped, having woken it to inspect it.
+
+    Called from every refusal path, not just the `sbx rm` one: a VM left running
+    while the registry still calls it stopped burns memory and disagrees with
+    its own record, and the fetch-failure path reaches that state too.
+    """
+    try:
+        sandbox.stop(name)
+    except sandbox.SandboxError as exc:
+        print(
+            f"amux: {name} was started to inspect it and could not be stopped "
+            f"again ({exc}); it is running"
+        )
+
+
+def _stranded_refusal(stranded: list[str], removed: list[str]) -> str:
+    lines = ["some sandboxes could not be removed and are still on this host:"]
+    lines += [f"  {item}" for item in stranded]
+    if removed:
+        lines.append(f"removed: {', '.join(removed)}")
+    lines.append(
+        "The workspace has been left in place so amux can still address them. "
+        "Resolve the cause and re-run, or remove them yourself with "
+        "`sbx rm -f <name>` -- which discards any work still inside them."
+    )
+    return "\n".join(lines)
 
 
 def _dirty_status(name: str) -> str:
@@ -455,6 +584,34 @@ class SandboxRuntime:
             endpoint=self.config.policy_target,
             service_healthy=self._service_healthy,
         ).raise_if_failed()
+
+    def resumable_names(
+        self, *, workspace: str | None, task: str | None, cwd: str | None
+    ) -> dict[str, list[str]]:
+        """Prior agent names for this task whose microVM may still exist.
+
+        Keyed by agent kind on purpose: a sandbox holds the agent it was built
+        for, so handing a `codex` pane the name of a stopped `claude` sandbox
+        would reattach it to the wrong tool. Filtered by repository for the same
+        reason a sandbox name carries a repo digest -- workspace and task are
+        reusable labels and two checkouts must not adopt each other's VMs.
+
+        Oldest first, so a respawned grid lands on its prior names in roughly
+        the order it created them.
+        """
+        if not (workspace and task):
+            return {}
+        repo = worktree.repo_root(cwd) if cwd else None
+        by_agent: dict[str, list[str]] = {}
+        for row in sorted(
+            sandbox_rows(workspace, task), key=lambda r: r["created_ts"]
+        ):
+            if repo and row["repo"] != repo:
+                continue
+            if not row["name"]:
+                continue
+            by_agent.setdefault(row["agent"], []).append(row["name"])
+        return by_agent
 
     # --- creation ---
 

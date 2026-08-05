@@ -199,17 +199,33 @@ def _check_force(args) -> None:
 def _cmd_kw(server, args) -> int:
     session = _get_session(server, args.workspace)
     _check_force(args)
+    problems: list[str] = []
     for window in session.windows:
         task = window.name or ""
         if args.clean:
             # Sandboxes first: a refusal must abort before any host worktree is
             # removed, so a dirty sandbox does not cost the user the rest.
-            runtime.clean_task(args.workspace, task, force=args.force)
+            try:
+                runtime.clean_task(args.workspace, task, force=args.force)
+            except sandbox.SandboxError as exc:
+                # Collected rather than raised here: the other tasks' sandboxes
+                # should still be cleaned, and the user should see the whole
+                # picture once instead of one task per re-run.
+                problems.append(f"{task}: {exc}")
+                continue
             worktree.remove_task(args.workspace, task)
         else:
             # Stop, do not destroy: a sandbox keeps its disk and its provider
             # session so a later spawn can resume it as itself.
             runtime.stop_task(args.workspace, task)
+    if problems:
+        # The session is deliberately NOT killed. Killing it would make every
+        # surviving sandbox unaddressable by amux -- `kw` would answer
+        # "workspace not found" -- leaving `sbx rm -f` as the only way out.
+        raise sandbox.SandboxError(
+            f"{ALIAS['session']} '{args.workspace}' was left in place because "
+            "some sandboxes survived:\n" + "\n".join(problems)
+        )
     core.load_agent_space(session).terminate()
     print(f"killed {ALIAS['session']} '{args.workspace}'")
     return 0
@@ -220,7 +236,10 @@ def _cmd_kg(server, args) -> int:
     window = _get_window(session, args.task)
     _check_force(args)
     if args.clean:
-        runtime.clean_task(args.workspace, args.task, force=args.force)  # see `_cmd_kw`
+        # Deliberately unguarded: a refusal must propagate past the terminate()
+        # below, because killing the window would leave the surviving sandboxes
+        # with no amux command that can address them.
+        runtime.clean_task(args.workspace, args.task, force=args.force)
         worktree.remove_task(args.workspace, args.task)
     else:
         runtime.stop_task(args.workspace, args.task)  # see `_cmd_kw`

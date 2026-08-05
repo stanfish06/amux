@@ -782,3 +782,9 @@ State these alongside the results rather than leaving them implied.
   leave an orphaned `sbx exec` behind, and the next measurement then blocks on it
   and looks like a service bug. Two apparent concurrency failures in the first run
   of this guide were exactly that.
+- **Stop the context service even if you abandon the run.**
+  `context-service start` detaches deliberately, so it outlives the shell, the
+  test, and an aborted smoke test. It then squats the default port 47317 and
+  breaks anything that binds it — in the second run of this guide it survived to
+  the end and failed two of someone else's tests. `context-service stop` belongs
+  in your cleanup unconditionally, not only on the success path.

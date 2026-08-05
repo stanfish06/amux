@@ -537,3 +537,101 @@ def test_exec_user_none_is_exactly_todays_behaviour(fake_sbx):
     handle.exec(["id", "-un"], user=None)
 
     assert fake_sbx.calls == [["exec", "sb1", "id", "-un"]] * 2
+
+
+# --- the published git port ---
+#
+# `sbx stop` tears down both the published port AND the host-side
+# `sandbox-<name>` remote, and waking republishes on a DIFFERENT host port
+# without restoring the remote. So the remote recorded at create time is
+# unusable for any sandbox that has ever been stopped, while its commits sit
+# perfectly reachable at the new port. Every shape below was captured from a
+# live sandbox by happy-deer, not inferred.
+
+# `sbx ls --json` entry for a RUNNING sandbox.
+RUNNING_ENTRY = {
+    "name": "sb1",
+    "id": "sbx_1",
+    "ports": [
+        {
+            "host_ip": "127.0.0.1",
+            "host_port": 49175,
+            "sandbox_port": 9418,
+            "protocol": "tcp",
+        }
+    ],
+}
+# The same sandbox STOPPED: the `ports` key is ABSENT ENTIRELY, not empty.
+STOPPED_ENTRY = {"name": "sb1", "id": "sbx_1"}
+
+
+def test_the_git_url_is_built_from_the_current_published_port(fake_sbx):
+    fake_sbx.respond_json("ls", "--json", payload={"sandboxes": [RUNNING_ENTRY]})
+    assert sandbox.git_url("sb1", "/home/stan/Git/amux-p-repo") == (
+        "git://127.0.0.1:49175/amux-p-repo"
+    )
+
+
+def test_the_url_path_is_the_repo_basename_only(fake_sbx):
+    """Measured shape: `git://<host_ip>:<host_port>/<repo basename>`, no path."""
+    fake_sbx.respond_json("ls", "--json", payload={"sandboxes": [RUNNING_ENTRY]})
+    url = sandbox.git_url("sb1", "/deep/nested/path/to/myrepo/")
+    assert url is not None and url.endswith("/myrepo")
+    assert "/deep" not in url
+
+
+def test_a_stopped_sandbox_has_no_ports_key_at_all(fake_sbx):
+    """Not present-and-empty. `entry["ports"]` would raise for exactly the
+    sandboxes cleanup cares about most, so the accessor must use `.get`."""
+    assert "ports" not in STOPPED_ENTRY
+    assert sandbox.published_ports(STOPPED_ENTRY) == []
+    fake_sbx.respond_json("ls", "--json", payload={"sandboxes": [STOPPED_ENTRY]})
+    assert sandbox.git_url("sb1", "/repo") is None
+
+
+def test_the_host_port_is_reread_rather_than_remembered(fake_sbx):
+    """Waking republishes on a new host port; the old one is stale the moment
+    the sandbox stops."""
+    moved = {
+        **RUNNING_ENTRY,
+        "ports": [{**RUNNING_ENTRY["ports"][0], "host_port": 49176}],
+    }
+    fake_sbx.respond_json("ls", "--json", payload={"sandboxes": [moved]})
+    assert sandbox.git_url("sb1", "/repo") == "git://127.0.0.1:49176/repo"
+
+
+def test_only_the_git_daemon_port_is_used(fake_sbx):
+    """The sandbox-side port is stable at 9418; other published ports are not
+    git and must not be mistaken for it."""
+    noisy = {
+        **RUNNING_ENTRY,
+        "ports": [
+            {"host_ip": "127.0.0.1", "host_port": 8080, "sandbox_port": 3000,
+             "protocol": "tcp"},
+            {"host_ip": "127.0.0.1", "host_port": 49175, "sandbox_port": 9418,
+             "protocol": "tcp"},
+        ],
+    }
+    fake_sbx.respond_json("ls", "--json", payload={"sandboxes": [noisy]})
+    assert sandbox.git_url("sb1", "/repo") == "git://127.0.0.1:49175/repo"
+    assert sandbox.GIT_DAEMON_PORT == 9418
+
+
+def test_no_git_port_published_is_reported_as_unresolvable(fake_sbx):
+    entry = {
+        **RUNNING_ENTRY,
+        "ports": [{"host_ip": "127.0.0.1", "host_port": 8080,
+                   "sandbox_port": 3000, "protocol": "tcp"}],
+    }
+    fake_sbx.respond_json("ls", "--json", payload={"sandboxes": [entry]})
+    assert sandbox.git_url("sb1", "/repo") is None
+
+
+def test_an_absent_sandbox_has_no_url(fake_sbx):
+    fake_sbx.respond_json("ls", "--json", payload={"sandboxes": []})
+    assert sandbox.git_url("sb1", "/repo") is None
+
+
+def test_ports_survives_junk_entries(fake_sbx):
+    assert sandbox.published_ports({"ports": ["nonsense", None]}) == []
+    assert sandbox.published_ports({"ports": None}) == []
