@@ -277,3 +277,99 @@ def test_remove_task_skips_sandbox_rows(git_repo, fake_sbx):
     assert worktree.remove_task("ws", "t0") == []
     # Untouched, so a later clean_task can still refuse or preserve properly.
     assert rows()["alpha"]["status"] == "active"
+
+
+# --- the integrated task, which is the workflow the guide documents ---
+#
+# Every other cleanup test here uses an *active* row. That is exactly how this
+# leaked: `integrate` sets status='merged', and stop/clean filtered on 'active',
+# so the one case the documented workflow always reaches was the one case
+# neither path ever touched. The rows below are merged on purpose.
+
+
+def merge_rows():
+    for row in store.worktrees_for("ws", "t0"):
+        store.set_worktree_status(row["id"], "merged")
+
+
+def test_an_integrated_task_still_cleans_its_sandboxes(git_repo, fake_sbx):
+    """The leak: five microVMs survived `kw --clean --force` with no warning."""
+    names = names_for(git_repo, "alpha", "beta")
+    with_status(fake_sbx, names, {})
+    ready(fake_sbx, names)
+    build(git_repo, fake_sbx, "alpha", "beta")
+    merge_rows()
+
+    removed = runtime.clean_task("ws", "t0")
+
+    assert sorted(removed) == sorted(names)
+    for name in names:
+        assert fake_sbx.called_with("rm", name)
+
+
+def test_an_integrated_task_still_stops_its_sandboxes(git_repo, fake_sbx):
+    """Same root cause: `kg` never stopped a merged task's VMs, which is why
+    reattachment could not be measured at all."""
+    names = names_for(git_repo, "alpha")
+    ready(fake_sbx, names)
+    fake_sbx.respond("stop")
+    build(git_repo, fake_sbx, "alpha")
+    merge_rows()
+
+    assert runtime.stop_task("ws", "t0") == names
+    assert fake_sbx.called_with("stop", names[0])
+    assert rows()["alpha"]["runtime_status"] == "stopped"
+
+
+def test_cleaning_a_merged_row_does_not_rewrite_its_merge_history(git_repo, fake_sbx):
+    """The two axes stay independent: the work really was merged, and only the
+    VM went away. Overwriting `merged` with `removed` would lose that."""
+    names = names_for(git_repo, "alpha")
+    with_status(fake_sbx, names, {})
+    ready(fake_sbx, names)
+    build(git_repo, fake_sbx, "alpha")
+    merge_rows()
+
+    runtime.clean_task("ws", "t0")
+
+    assert rows()["alpha"]["status"] == "merged"
+    assert rows()["alpha"]["runtime_status"] == "removed"
+
+
+def test_an_active_row_is_still_marked_removed(git_repo, fake_sbx):
+    """The counterpart: an execution that never merged is finished by cleanup."""
+    names = names_for(git_repo, "alpha")
+    with_status(fake_sbx, names, {})
+    ready(fake_sbx, names)
+    build(git_repo, fake_sbx, "alpha")
+
+    runtime.clean_task("ws", "t0")
+
+    assert rows()["alpha"]["status"] == "removed"
+    assert rows()["alpha"]["runtime_status"] == "removed"
+
+
+def test_a_dirty_merged_sandbox_is_still_refused(git_repo, fake_sbx):
+    """Merging does not make uncommitted work in the VM disposable."""
+    names = names_for(git_repo, "alpha")
+    with_status(fake_sbx, names, {names[0]: DIRTY})
+    ready(fake_sbx, names)
+    build(git_repo, fake_sbx, "alpha")
+    merge_rows()
+
+    with pytest.raises(sandbox.SandboxError, match="refusing to remove"):
+        runtime.clean_task("ws", "t0")
+    assert not fake_sbx.called_with("rm")
+
+
+def test_a_removed_row_is_not_acted_on_twice(git_repo, fake_sbx):
+    """Cleanup is a fixed point: the second run has nothing left to do."""
+    names = names_for(git_repo, "alpha")
+    with_status(fake_sbx, names, {})
+    ready(fake_sbx, names)
+    build(git_repo, fake_sbx, "alpha")
+
+    assert runtime.clean_task("ws", "t0") == names
+    assert runtime.clean_task("ws", "t0") == []
+    assert runtime.stop_task("ws", "t0") == []
+    assert len([c for c in fake_sbx.calls if c[0] == "rm"]) == 1
