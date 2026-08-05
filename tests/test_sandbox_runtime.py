@@ -128,10 +128,12 @@ def test_mixed_grid_creates_one_capped_sandbox_per_pane(git_repo, fake_sbx):
             "--cpus", "2", "--memory", "4g", "--no-share-skills",
             agent, str(git_repo),
         ]
-    # Each pane attaches to its own sandbox rather than launching an agent.
+    # Each pane attaches to its own sandbox rather than creating a new one.
+    # Codex additionally needs its per-invocation hook-trust flag, without
+    # which it silently runs none of the hooks amux just installed.
     assert [l.keys for l in launches] == [
         (f"sbx run --name {names[0]}",),
-        (f"sbx run --name {names[1]}",),
+        (f"sbx run --name {names[1]} codex -- --dangerously-bypass-hook-trust",),
     ]
 
 

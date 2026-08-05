@@ -368,7 +368,28 @@ def test_allow_network_command_is_text_not_an_invocation(fake_sbx):
 
 def test_attach_omits_the_agent_so_a_sandbox_is_reattached_not_recreated():
     assert sandbox.attach_argv("sb1") == ("run", "--name", "sb1")
-    assert sandbox.attach_command("sb1") == "sbx run --name sb1"
+    assert sandbox.attach_argv("sb1", "claude") == ("run", "--name", "sb1")
+    assert sandbox.attach_command("sb1", "claude") == "sbx run --name sb1"
+
+
+def test_codex_attach_carries_the_hook_trust_flag():
+    """Codex silently skips hooks it has no persisted trust for, so without
+    this a sandboxed Codex reports no state at all and looks permanently idle.
+    Live-verified on codex 0.146.0; invisible to any offline behaviour test,
+    which is why the argv itself is pinned."""
+    assert sandbox.attach_argv("sb1", "codex") == (
+        "run", "--name", "sb1", "codex", "--", "--dangerously-bypass-hook-trust",
+    )
+    assert sandbox.attach_command("sb1", "codex") == (
+        "sbx run --name sb1 codex -- --dangerously-bypass-hook-trust"
+    )
+
+
+def test_claude_attach_does_not_carry_the_hook_trust_flag():
+    """The counterpart: it is a Codex-only workaround and must not spread to an
+    agent that does not need it."""
+    for agent in ("claude", ""):
+        assert sandbox.HOOK_TRUST_FLAG not in sandbox.attach_argv("sb1", agent)
 
 
 def test_stop_and_remove(fake_sbx):

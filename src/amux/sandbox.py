@@ -394,19 +394,45 @@ def create(
     return Sandbox(name=name, id=str(entry.get("id") or ""), entry=entry)
 
 
-def attach_argv(name: str) -> tuple[str, ...]:
+# Codex will not run a hook it has no persisted trust for -- and it does not
+# say so. Verified live on codex 0.146.0 with a positive control: with the flag
+# UserPromptSubmit and SessionEnd both fired; without it, identical hooks.json
+# and config.toml, zero hooks fired, no prompt, exit 0. Codex printed
+# "clamping SessionEnd hook timeout" in *both* runs, so it parses the document
+# either way and trust alone gates execution. Without this flag a sandboxed
+# Codex reads as permanently idle with nothing anywhere reporting why.
+#
+# The flag bypasses hook review for one invocation. That is acceptable here
+# ONLY because amux itself authors the sole hooks.json in the VM and the VM is
+# the isolation boundary. If amux ever lets a user supply hooks, this must be
+# revisited -- it would then be bypassing review of code amux did not write.
+#
+# Claude needs no equivalent.
+HOOK_TRUST_FLAG = "--dangerously-bypass-hook-trust"
+
+AGENT_ATTACH_ARGS: dict[str, tuple[str, ...]] = {"codex": (HOOK_TRUST_FLAG,)}
+
+
+def attach_argv(name: str, agent: str = "") -> tuple[str, ...]:
     """The pane command that attaches to an existing sandbox.
 
-    The AGENT positional is omitted deliberately: once the sandbox exists `sbx
-    run --name` reattaches to the agent already inside it, which is what makes
-    a stopped sandbox resumable rather than recreated.
+    The AGENT positional is omitted where possible: `sbx run --name` reattaches
+    to the agent already recorded in the sandbox's spec, which is what makes a
+    stopped sandbox resumable rather than recreated. It is named only when the
+    agent needs per-invocation arguments, since those go after `--` and `sbx`
+    has nothing to attach them to otherwise. Naming it does not recreate the
+    sandbox; the VM and its contents are still reused.
     """
-    return ("run", "--name", name)
+    args = ["run", "--name", name]
+    extra = AGENT_ATTACH_ARGS.get(agent, ())
+    if extra:
+        args += [agent, "--", *extra]
+    return tuple(args)
 
 
-def attach_command(name: str) -> str:
+def attach_command(name: str, agent: str = "") -> str:
     """`attach_argv` as a shell line, for sending to a tmux pane."""
-    return " ".join((SBX, *attach_argv(name)))
+    return " ".join((SBX, *attach_argv(name, agent)))
 
 
 def stop(name: str) -> None:

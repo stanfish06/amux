@@ -557,7 +557,7 @@ class SandboxRuntime:
         return Launch(
             pane=spec.pane,
             cwd="",  # the pane's working directory is inside the VM
-            keys=(sandbox.attach_command(name),),
+            keys=(sandbox.attach_command(name, spec.agent),),
         )
 
     @staticmethod
