@@ -665,11 +665,26 @@ class Sandbox:
             )
         run("cp", os.fspath(source), f"{self.name}:{destination}")
 
-    def exec(self, argv: Sequence[str]) -> str:
-        """Run a command inside the sandbox and return its stdout."""
+    def exec(self, argv: Sequence[str], *, user: str | None = None) -> str:
+        """Run a command inside the sandbox and return its stdout.
+
+        `user` selects the in-VM user (`sbx exec -u`). It exists for one
+        reason: `sbx cp` preserves the source file's mode but sets its owner to
+        the *host* uid, and offers no flag for either. A 0600 file therefore
+        lands owned by a uid that does not exist in the container, so the agent
+        cannot read its own capability and cannot chmod what it does not own.
+        The fix is a `chown` as root after each copy, which needs this.
+
+        `None` means exactly today's behaviour -- no `-u` at all -- rather than
+        naming a default user, because the agent account differs between the
+        Claude and Codex images and amux has no business guessing it. Root is
+        never a default: everything else amux runs in a sandbox runs as the
+        agent, and defaulting to root would make that the accident.
+        """
         if not argv:
             raise SandboxError("exec needs a command")
-        return run("exec", self.name, *argv).stdout
+        flags = ("-u", user) if user else ()
+        return run("exec", *flags, self.name, *argv).stdout
 
     def working_tree_status(self) -> str:
         """Porcelain status of the clone inside the sandbox. Empty means clean.

@@ -504,3 +504,36 @@ def test_policy_check_handles_a_real_default_deny(fake_sbx):
     assert check.initialized
     assert check.detail == "Denied: localhost:47317"
     assert "policy init" not in check.remediation
+
+
+def test_exec_can_run_as_another_user(fake_sbx):
+    """`sbx cp` sets the owner to the host uid, so the agent cannot read its
+    own capability until root chowns it. `-u` is what makes that possible."""
+    fake_sbx.respond("exec", stdout="")
+    sandbox.Sandbox(name="sb1").exec(["chown", "agent:agent", "/f"], user="root")
+
+    # The flag precedes the sandbox name, as `sbx exec [flags] SANDBOX CMD`.
+    assert fake_sbx.calls == [
+        ["exec", "-u", "root", "sb1", "chown", "agent:agent", "/f"]
+    ]
+
+
+def test_exec_runs_as_the_agent_by_default(fake_sbx):
+    """Root has to be asked for. Everything else amux runs in a sandbox should
+    run as the agent, and a root default would make that the accident."""
+    fake_sbx.respond("exec", stdout="")
+    sandbox.Sandbox(name="sb1").exec(["git", "status"])
+
+    (call,) = fake_sbx.calls
+    assert call == ["exec", "sb1", "git", "status"]
+    assert "-u" not in call
+
+
+def test_exec_user_none_is_exactly_todays_behaviour(fake_sbx):
+    """The protocol default. Explicit None must not differ from omitting it."""
+    fake_sbx.respond("exec", stdout="")
+    handle = sandbox.Sandbox(name="sb1")
+    handle.exec(["id", "-un"])
+    handle.exec(["id", "-un"], user=None)
+
+    assert fake_sbx.calls == [["exec", "sb1", "id", "-un"]] * 2
