@@ -189,14 +189,32 @@ misty-panda real time.
 
 **Observed limitation, R4 (not a scenario failure).** `amux integrate <ws> <task>
 --all` is one-shot per row: the first pass marks each agent record `merged`, and
-`worktree.integrate` selects `status == "active"`, so a second pass refuses with
-*"no active worktrees for task ..."*. clever-mole hit this running the 6.3
-integration on this change and completed the merge by hand with `git`. R4's
-scenarios are all satisfied — the spec requires the record be marked merged and
-says nothing about re-running — but the documented command cannot be re-run
-after any further change lands, and it shares its `status == "active"` filter
-with the cleanup-leak defect (`stop_task`/`clean_task` skipping merged rows and
-leaking their microVMs), which is what makes the pair bite together.
+`worktree.integrate` selects `status == "active"` (`worktree.py:289`), so a
+second pass refuses with *"no active worktrees for task ..."*. clever-mole hit
+this running the 6.3 integration on this change and finished the merge by hand
+with `git`. R4's scenarios are all satisfied — the spec requires the record be
+marked merged and says nothing about re-running — but the documented command
+cannot be re-run after any further change lands.
+
+**The adjacency, and its current state.** The same predicate was applied on two
+different axes, and that is what made the original pair dangerous: with
+`stop_task`/`clean_task` also filtering `status == "active"`, a merged row was
+untouchable from *both* directions — integrate refused it and cleanup silently
+skipped it — so its microVM was unreachable to amux entirely and only `sbx rm`
+could recover it. That is the state clever-mole hit: `kw --clean --force`
+reported success and left four VMs running.
+
+**Half of it is now fixed**, verified at source rather than taken from the
+report: `runtime.sandbox_rows` (`runtime.py:225-239`) selects on the *runtime*
+axis, with the leak named in its own docstring — *"`status` answers 'was this
+work merged'; `runtime_status` answers 'does a VM exist'"*. So cleanup and stop
+now reach merged rows, recovery works, and `worktree.py:289` is the only place
+left where the merge axis gates anything. The surviving consequence is narrower
+than the original: you cannot re-integrate, but you are no longer stranded.
+
+Worth keeping both halves recorded, because as two separate quirks — "integrate
+won't re-run" and "cleanup leaked VMs" — they read as unrelated, and the thing
+that connected them was one predicate copied onto the wrong axis.
 
 ### R5. Sandbox lifecycle follows amux lifecycle without silent data loss
 
