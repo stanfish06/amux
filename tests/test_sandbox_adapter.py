@@ -124,8 +124,19 @@ def test_resource_flags_disable_shared_skills_by_default():
 
 
 def test_shared_skills_are_opt_in():
+    """The absence below is only evidence if the flags were really produced --
+    an empty tuple would satisfy `not in` while proving nothing."""
     flags = sandbox.Resources(cpus=1, memory="1g", share_skills=True).create_flags()
+    assert flags == ("--cpus", "1", "--memory", "1g")
     assert "--no-share-skills" not in flags
+
+
+def test_shared_skills_opt_in_is_the_only_difference():
+    """Pin the pair: the opt-in changes exactly one thing and nothing else."""
+    off = sandbox.Resources(cpus=1, memory="1g").create_flags()
+    on = sandbox.Resources(cpus=1, memory="1g", share_skills=True).create_flags()
+    assert set(off) - set(on) == {"--no-share-skills"}
+    assert set(on) - set(off) == set()
 
 
 @pytest.mark.parametrize("memory", ["4g", "1024m", "512M", "8gb", "2gi", "16G"])
@@ -357,7 +368,28 @@ def test_allow_network_command_is_text_not_an_invocation(fake_sbx):
 
 def test_attach_omits_the_agent_so_a_sandbox_is_reattached_not_recreated():
     assert sandbox.attach_argv("sb1") == ("run", "--name", "sb1")
-    assert sandbox.attach_command("sb1") == "sbx run --name sb1"
+    assert sandbox.attach_argv("sb1", "claude") == ("run", "--name", "sb1")
+    assert sandbox.attach_command("sb1", "claude") == "sbx run --name sb1"
+
+
+def test_codex_attach_carries_the_hook_trust_flag():
+    """Codex silently skips hooks it has no persisted trust for, so without
+    this a sandboxed Codex reports no state at all and looks permanently idle.
+    Live-verified on codex 0.146.0; invisible to any offline behaviour test,
+    which is why the argv itself is pinned."""
+    assert sandbox.attach_argv("sb1", "codex") == (
+        "run", "--name", "sb1", "codex", "--", "--dangerously-bypass-hook-trust",
+    )
+    assert sandbox.attach_command("sb1", "codex") == (
+        "sbx run --name sb1 codex -- --dangerously-bypass-hook-trust"
+    )
+
+
+def test_claude_attach_does_not_carry_the_hook_trust_flag():
+    """The counterpart: it is a Codex-only workaround and must not spread to an
+    agent that does not need it."""
+    for agent in ("claude", ""):
+        assert sandbox.HOOK_TRUST_FLAG not in sandbox.attach_argv("sb1", agent)
 
 
 def test_stop_and_remove(fake_sbx):
@@ -447,3 +479,61 @@ def test_unchecked_commands_return_their_failure(fake_sbx):
     fake_sbx.respond("policy", "check", "network", stderr="nope\n", returncode=1)
     result = sandbox.run("policy", "check", "network", "x:1", check=False)
     assert not result.ok and result.message == "nope"
+
+
+# The real output of a *denial* on a host where `sbx policy init` HAS been run.
+# Captured from sbx v0.37.1. Note it goes to stdout, not stderr, and looks
+# nothing like the uninitialized-policy error.
+POLICY_DENIED = (
+    "Denied: localhost:47317\n"
+    "Governance: Local policy only\n"
+    "Context: global\n"
+    "Reason: no matching allow rule (default deny)\n"
+)
+
+
+def test_policy_check_handles_a_real_default_deny(fake_sbx):
+    """The live negative case: policy initialized, this port not allowed."""
+    fake_sbx.respond(
+        "policy", "check", "network", stdout=POLICY_DENIED, returncode=1
+    )
+    check = sandbox.check_network("localhost:47317")
+
+    assert not check.allowed
+    # Initialized -- so the remediation is "allow this port", not "run init".
+    assert check.initialized
+    assert check.detail == "Denied: localhost:47317"
+    assert "policy init" not in check.remediation
+
+
+def test_exec_can_run_as_another_user(fake_sbx):
+    """`sbx cp` sets the owner to the host uid, so the agent cannot read its
+    own capability until root chowns it. `-u` is what makes that possible."""
+    fake_sbx.respond("exec", stdout="")
+    sandbox.Sandbox(name="sb1").exec(["chown", "agent:agent", "/f"], user="root")
+
+    # The flag precedes the sandbox name, as `sbx exec [flags] SANDBOX CMD`.
+    assert fake_sbx.calls == [
+        ["exec", "-u", "root", "sb1", "chown", "agent:agent", "/f"]
+    ]
+
+
+def test_exec_runs_as_the_agent_by_default(fake_sbx):
+    """Root has to be asked for. Everything else amux runs in a sandbox should
+    run as the agent, and a root default would make that the accident."""
+    fake_sbx.respond("exec", stdout="")
+    sandbox.Sandbox(name="sb1").exec(["git", "status"])
+
+    (call,) = fake_sbx.calls
+    assert call == ["exec", "sb1", "git", "status"]
+    assert "-u" not in call
+
+
+def test_exec_user_none_is_exactly_todays_behaviour(fake_sbx):
+    """The protocol default. Explicit None must not differ from omitting it."""
+    fake_sbx.respond("exec", stdout="")
+    handle = sandbox.Sandbox(name="sb1")
+    handle.exec(["id", "-un"])
+    handle.exec(["id", "-un"], user=None)
+
+    assert fake_sbx.calls == [["exec", "sb1", "id", "-un"]] * 2

@@ -92,7 +92,7 @@ def test_preflight_passes_when_everything_is_in_place(git_repo, fake_sbx):
 
     assert result.ok, result.report()
     assert {c.name for c in result.checks} == {
-        "resources", "agents", "repository", "sbx", "docker",
+        "resources", "context-client", "agents", "repository", "sbx", "docker",
         "context-service", "network-policy",
     }
     assert_read_only(fake_sbx)
@@ -312,3 +312,62 @@ def test_report_shows_passes_and_failures(git_repo, fake_sbx):
     assert "[ok] repository" in text
     assert "[FAIL] network-policy" in text
     assert "fix:" in text
+
+
+# --- packaging ---
+
+
+def test_a_build_without_the_context_client_is_caught_before_anything_runs(
+    git_repo, fake_sbx, monkeypatch
+):
+    """A packaged amux resolves the shim differently from a source checkout. A
+    build that omitted it used to fail at bootstrap -- after the pane, the
+    sandbox and the token already existed."""
+    from amux import sandbox_bootstrap
+
+    def missing():
+        raise sandbox_bootstrap.BootstrapError(
+            "sandbox client source is missing at /nonexistent/sandbox_client.py"
+        )
+
+    monkeypatch.setattr(sandbox_bootstrap, "client_source", missing)
+    all_pass(fake_sbx)
+    result = run(git_repo, fake_sbx)
+
+    assert not result.ok
+    check = failed(result)["context-client"]
+    # The remediation names the packaging fault, not a generic bootstrap error.
+    assert "does not ship" in check.remediation
+    assert "source checkout" in check.remediation
+    # And nothing was created while finding out.
+    assert not fake_sbx.called_with("create")
+    assert_read_only(fake_sbx)
+
+
+def test_the_context_client_check_passes_in_a_source_checkout(git_repo, fake_sbx):
+    """The positive control: it really does resolve here, so the failure above
+    is evidence rather than a check that can only ever fail."""
+    all_pass(fake_sbx)
+    result = run(git_repo, fake_sbx)
+
+    check = next(c for c in result.checks if c.name == "context-client")
+    assert check.ok
+    assert check.detail.endswith("sandbox_client.py")
+
+
+def test_the_check_uses_the_bootstrap_resolver_not_its_own_idea_of_the_path(
+    git_repo, fake_sbx, monkeypatch
+):
+    """Whatever `client_source` resolves is the answer -- a second opinion here
+    would disagree with reality in exactly the frozen case that motivated it."""
+    from amux import sandbox_bootstrap
+
+    calls: list[int] = []
+    real = sandbox_bootstrap.client_source
+    monkeypatch.setattr(
+        sandbox_bootstrap, "client_source", lambda: (calls.append(1), real())[1]
+    )
+    all_pass(fake_sbx)
+    run(git_repo, fake_sbx)
+
+    assert calls, "preflight did not consult sandbox_bootstrap.client_source"

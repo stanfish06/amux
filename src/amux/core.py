@@ -6,8 +6,15 @@ from dataclasses import dataclass
 from libtmux import Pane, Server, Session, Window
 from libtmux.constants import PaneDirection
 
-from amux import events, store, worktree
-from amux.runtime import AGENT_COMMANDS, HostRuntime, PaneSpec, Runtime
+from amux import events, sandbox_hooks, store, worktree
+from amux.runtime import (
+    AGENT_COMMANDS,
+    HOST,
+    GridCreationError,
+    HostRuntime,
+    PaneSpec,
+    Runtime,
+)
 from amux.shared import ALIAS, DEFAULT_SOCKET
 
 AGENT_OPTION = "@amux_agent"
@@ -260,6 +267,25 @@ def _taken_names(session: Session) -> set[str]:
     return names
 
 
+def _rollback(runtime: Runtime) -> list[str]:
+    """Unwind a runtime's acquired resources, reporting failures rather than
+    raising them. A rollback runs while an error is already propagating, so it
+    must never be the thing that surfaces."""
+    try:
+        return list(runtime.rollback())
+    except Exception as exc:  # noqa: BLE001
+        return [f"runtime rollback: {exc}"]
+
+
+def _discard(what: str, teardown) -> str | None:
+    """Best-effort tmux teardown. Returns a problem description, or None."""
+    try:
+        teardown()
+    except Exception as exc:  # noqa: BLE001
+        return f"{what}: {exc}"
+    return None
+
+
 def _split_evenly(
     pane: Pane, n: int, direction: PaneDirection, cwd: str | None
 ) -> list[Pane]:
@@ -312,16 +338,21 @@ def _build_grid(
     # The runtime decides where each pane works and what it runs; everything
     # tmux-facing stays here so pane metadata and events are runtime-agnostic.
     socket = _socket_name(window)
-    launches = {
-        launch.pane: launch
-        for launch in runtime.prepare(
-            [PaneSpec(p.id or "", agent, name) for p, agent, name in panes_info],
-            workspace=workspace,
-            task=task,
-            cwd=cwd,
-            socket=socket,
-        )
-    }
+    try:
+        launches = {
+            launch.pane: launch
+            for launch in runtime.prepare(
+                [PaneSpec(p.id or "", agent, name) for p, agent, name in panes_info],
+                workspace=workspace,
+                task=task,
+                cwd=cwd,
+                socket=socket,
+            )
+        }
+    except Exception as exc:
+        # A grid is all-or-nothing: half a grid leaves sandboxes nothing will
+        # ever attach to and rows a later integrate would try to merge.
+        raise GridCreationError(exc, _rollback(runtime)) from exc
 
     for pane, agent, name in panes_info:
         launch = launches[pane.id or ""]
@@ -388,16 +419,27 @@ def spawn_agent_space(
     assert session is not None
     window = session.windows[0]
     window.rename_window(init_task_name)
-    grid = _build_grid(
-        window,
-        init_grid_nrows,
-        init_grid_ncols,
-        agents,
-        session_path,
-        workspace=session_name,
-        task=init_task_name,
-        runtime=runtime,
-    )
+    try:
+        grid = _build_grid(
+            window,
+            init_grid_nrows,
+            init_grid_ncols,
+            agents,
+            session_path,
+            workspace=session_name,
+            task=init_task_name,
+            runtime=runtime,
+        )
+    except BaseException as exc:
+        # This call created the session, so this call takes it away again: a
+        # failed spawn must not leave a workspace holding dead panes.
+        problem = _discard("kill session", lambda: session.cmd("kill-session"))
+        if problem:
+            if isinstance(exc, GridCreationError):
+                exc.add_cleanup_failure(problem)
+            else:
+                print(f"amux: {problem}")
+        raise
     return AgentSpace(
         session=session,
         agent_grids=[grid],
@@ -424,16 +466,27 @@ def spawn_agent_grid(
     window = session.new_window(
         window_name=window_name, start_directory=cwd, attach=False
     )
-    return _build_grid(
-        window,
-        nrows,
-        ncols,
-        agents,
-        cwd,
-        workspace=session.name or "",
-        task=window_name,
-        runtime=runtime,
-    )
+    try:
+        return _build_grid(
+            window,
+            nrows,
+            ncols,
+            agents,
+            cwd,
+            workspace=session.name or "",
+            task=window_name,
+            runtime=runtime,
+        )
+    except BaseException as exc:
+        # Only the window: the workspace pre-existed this call and other tasks
+        # are still running in it.
+        problem = _discard("kill task window", lambda: window.cmd("kill-window"))
+        if problem:
+            if isinstance(exc, GridCreationError):
+                exc.add_cleanup_failure(problem)
+            else:
+                print(f"amux: {problem}")
+        raise
 
 
 def load_agent_pane(pane: Pane, facts: events.PaneFacts | None = None) -> AgentPane:
@@ -494,8 +547,58 @@ def _roster_entry(pane: Pane) -> dict:
         entry["branch"] = wt["branch"]
         entry["worktree"] = wt["path"]
         entry["repo"] = wt["repo"]
-        entry["last_commit"] = worktree.latest_commit_subject(wt["path"])
+        # Only for a row that actually has a host worktree. A sandbox row
+        # carries path='', and `git -C ''` is a documented no-op that reports
+        # the *calling process's* checkout -- so an unguarded call here
+        # attributes the host's HEAD subject to a sandboxed agent that never
+        # made that commit. A sandbox's real commit arrives through its
+        # `sandbox-<name>` remote, not from a host path.
+        if wt["path"]:
+            entry["last_commit"] = worktree.latest_commit_subject(wt["path"])
+        entry.update(runtime_fields(wt))
     return entry
+
+
+def runtime_fields(row) -> dict:
+    """Runtime identity for a roster entry, or {} for a host agent.
+
+    Empty for `host` on purpose: adding the keys unconditionally would change
+    every existing consumer's output for agents whose runtime has not changed.
+    """
+    runtime = (row["runtime"] if "runtime" in row.keys() else "") or HOST
+    if runtime == HOST:
+        return {}
+    missing = missing_state_kinds(row)
+    return {
+        "runtime": runtime,
+        "runtime_status": row["runtime_status"] or "",
+        "sandbox_name": row["sandbox_name"] or "",
+        "sandbox_id": row["sandbox_id"] or "",
+        # A degraded agent cannot report every state, so its resolved state is
+        # not authoritative and must never be presented as if it were.
+        "state_degraded": bool(missing),
+        "missing_kinds": list(missing),
+    }
+
+
+def missing_state_kinds(row) -> tuple[str, ...]:
+    """State kinds this execution's agent cannot report.
+
+    Derived rather than stored: it is a pure function of the agent and which
+    hook mechanism its image supports, so every reader computes the same answer
+    from one recorded fact instead of three of them storing a list.
+    """
+    mechanism = (
+        row["hook_mechanism"] if "hook_mechanism" in row.keys() else ""
+    ) or ""
+    if not mechanism:
+        # Nothing recorded: a host row, or an execution from before the
+        # mechanism was tracked. Claiming degradation we have not observed
+        # would be as wrong as hiding it.
+        return ()
+    return sandbox_hooks.missing_kinds(
+        row["agent"], hooks_supported=mechanism == "hooks"
+    )
 
 
 def build_context(server: Server, pane_id: str) -> dict:
