@@ -114,6 +114,18 @@ class Runtime(Protocol):
         socket: str,
     ) -> list[Launch]: ...
 
+    def resumable_names(
+        self, *, workspace: str | None, task: str | None, cwd: str | None
+    ) -> dict[str, list[str]]:
+        """Prior agent names this runtime could resume, keyed by agent kind.
+
+        `core` assigns pane names, and a resumable execution can only be found
+        by its name -- so if nothing steers a pane onto a prior name, resume
+        code is unreachable however correct it is. Returning {} means "always
+        draw a fresh name".
+        """
+        ...
+
     def rollback(self) -> list[str]:
         """Unwind everything `prepare` created. Returns cleanup failures."""
         ...
@@ -135,6 +147,15 @@ class HostRuntime:
         """Nothing to check: the host runtime has no external prerequisites,
         accepts any raw command as an agent, and already degrades to a shared
         directory when the target is not a repository."""
+
+    def resumable_names(
+        self, *, workspace: str | None, task: str | None, cwd: str | None
+    ) -> dict[str, list[str]]:
+        """Nothing. A host agent's worktree is gone once its task was cleaned,
+        and if it was not, its branch and directory still exist -- so reusing
+        the name would fail `worktree add` rather than resume anything. There is
+        no host equivalent of a stopped VM waiting to be re-entered."""
+        return {}
 
     def rollback(self) -> list[str]:
         """Nothing to unwind here. `setup_task` already rolls itself back, and
@@ -532,6 +553,34 @@ class SandboxRuntime:
             endpoint=self.config.policy_target,
             service_healthy=self._service_healthy,
         ).raise_if_failed()
+
+    def resumable_names(
+        self, *, workspace: str | None, task: str | None, cwd: str | None
+    ) -> dict[str, list[str]]:
+        """Prior agent names for this task whose microVM may still exist.
+
+        Keyed by agent kind on purpose: a sandbox holds the agent it was built
+        for, so handing a `codex` pane the name of a stopped `claude` sandbox
+        would reattach it to the wrong tool. Filtered by repository for the same
+        reason a sandbox name carries a repo digest -- workspace and task are
+        reusable labels and two checkouts must not adopt each other's VMs.
+
+        Oldest first, so a respawned grid lands on its prior names in roughly
+        the order it created them.
+        """
+        if not (workspace and task):
+            return {}
+        repo = worktree.repo_root(cwd) if cwd else None
+        by_agent: dict[str, list[str]] = {}
+        for row in sorted(
+            sandbox_rows(workspace, task), key=lambda r: r["created_ts"]
+        ):
+            if repo and row["repo"] != repo:
+                continue
+            if not row["name"]:
+                continue
+            by_agent.setdefault(row["agent"], []).append(row["name"])
+        return by_agent
 
     # --- creation ---
 

@@ -267,6 +267,20 @@ def _taken_names(session: Session) -> set[str]:
     return names
 
 
+def _next_name(agent: str, resumable: dict[str, list[str]], taken: set[str]) -> str:
+    """A prior name for this agent kind if one is free, else a fresh one.
+
+    Only names not already worn by a live pane: a resumable row can outlive its
+    pane, but two panes must never share a name -- notes, events and worktrees
+    are addressed by it.
+    """
+    while resumable.get(agent):
+        candidate = resumable[agent].pop(0)
+        if candidate not in taken:
+            return candidate
+    return random_name(taken)
+
+
 def _rollback(runtime: Runtime) -> list[str]:
     """Unwind a runtime's acquired resources, reporting failures rather than
     raising them. A rollback runs while an error is already propagating, so it
@@ -313,6 +327,11 @@ def _build_grid(
         raise ValueError(f"{len(agents)} agents do not fit a {nrows}x{ncols} grid")
     runtime = runtime or HostRuntime()
     taken = _taken_names(window.session)
+    # A resumable execution can only be found by its name, so a respawn has to
+    # be steered onto its prior names or the runtime's reattach path is
+    # unreachable however correct it is: `kg` removes the pane, the name stops
+    # being taken, a fresh one is drawn, and the stopped VM is orphaned.
+    resumable = runtime.resumable_names(workspace=workspace, task=task, cwd=cwd)
     rows = _split_evenly(window.panes[0], nrows, PaneDirection.Below, cwd)
     agent_panes = []
     panes_info: list[tuple[Pane, str, str]] = []
@@ -321,7 +340,7 @@ def _build_grid(
         for j, pane in enumerate(cols):
             agent = agents[i * ncols + j]
             label = f"r{i}c{j}"
-            name = random_name(taken)
+            name = _next_name(agent, resumable, taken)
             taken.add(name)
             # Keep the name tag stable: block apps/prompts from re-titling the pane.
             pane.cmd("set-option", "-p", "allow-set-title", "off")
