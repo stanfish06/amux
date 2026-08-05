@@ -16,7 +16,8 @@ import hashlib
 import secrets
 import sqlite3
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from hmac import compare_digest
 from pathlib import Path
 from typing import Any, Literal
@@ -238,6 +239,29 @@ def _connect(db_path: Path | None = None) -> sqlite3.Connection:
     return conn
 
 
+@contextmanager
+def _session(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
+    """Open a connection and *close* it.
+
+    `with sqlite3.connect(...) as conn` commits; it does not close. Every call
+    here used that form, so each one leaked an open connection until the
+    garbage collector happened to finalise it — unbounded in the context
+    service, which is long-lived and calls the store per request.
+
+    The intermittent failure it caused is worth recording: closing a WAL
+    connection checkpoints the log back into the main database file. A test
+    that corrupted `context.db` and asserted the store was unopenable would
+    pass, then a leaked connection from an earlier call would be finalised at
+    an arbitrary moment, rewrite a valid header over the garbage, and the next
+    process would open it happily.
+    """
+    conn = _connect(db_path)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
 def _rows(
     conn: sqlite3.Connection, sql: str, params: tuple = ()
 ) -> list[dict[str, Any]]:
@@ -268,7 +292,7 @@ def schema_version(db_path: Path | None = None) -> int:
     not "stale". A version above `SCHEMA_VERSION` means a newer amux has been
     here and is left for the caller to judge: `_migrate` will not touch it.
     """
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         return int(conn.execute("PRAGMA user_version").fetchone()[0])
 
 
@@ -290,7 +314,7 @@ def add_event(
 ) -> int:
     """Record a state change. `worktree_id`/`repo` default to whatever worktree
     the pane fronts now, bounded by `worktree_since`."""
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         worktree_id, repo = _attribution(conn, pane, worktree_id, repo, worktree_since)
         cur = conn.execute(
             "INSERT INTO events"
@@ -329,14 +353,14 @@ def iter_events(
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
     sql += " ORDER BY ts, id"
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         return _rows(conn, sql, params)
 
 
 def latest_event(pane: str, db_path: Path | None = None) -> dict[str, Any] | None:
     """The pane's newest event, whichever incarnation wrote it. Callers bound it
     with `events.in_incarnation`."""
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         rows = _rows(
             conn,
             "SELECT * FROM events WHERE pane = ? ORDER BY ts DESC, id DESC LIMIT 1",
@@ -356,7 +380,7 @@ def events_for_panes(
     if since is not None:
         sql += " AND ts >= ?"
         params += (since,)
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         return _rows(conn, sql + " ORDER BY ts, id", params)
 
 
@@ -410,7 +434,7 @@ def add_note(
         raise ValueError(f"kind must be one of {NOTE_KINDS}, got '{kind}'")
     if not text.strip():
         raise ValueError("note text is empty")
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         worktree_id, repo = _attribution(conn, pane, worktree_id, repo)
         cur = conn.execute(
             "INSERT INTO notes"
@@ -462,7 +486,7 @@ def visible_notes(
         sql += " AND (repo = ? OR repo = '')"
         params += (repo,)
     sql, params = _page(sql, params, after, limit)
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         return _rows(conn, sql, params)
 
 
@@ -506,7 +530,7 @@ def query_notes(
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
     sql, params = _page(sql, params, after, limit)
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         return _rows(conn, sql, params)
 
 
@@ -538,7 +562,7 @@ def register_worktree(
     """
     if runtime not in RUNTIMES:
         raise ValueError(f"runtime must be one of {RUNTIMES}, got '{runtime}'")
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         cur = conn.execute(
             "INSERT INTO worktrees"
             " (pane, workspace, task, agent, name, path, branch, base_ref, repo,"
@@ -572,7 +596,7 @@ def worktree_for_pane(
     """The worktree a pane currently fronts. A pane id can head several rows once
     tmux recycles it, so active wins, then most recently created; `since` rules
     out rows the pane never owned."""
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         row = _pane_worktree(conn, pane, "*", since)
     return dict(row) if row else None
 
@@ -580,7 +604,7 @@ def worktree_for_pane(
 def worktree_by_id(
     worktree_id: int, db_path: Path | None = None
 ) -> dict[str, Any] | None:
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         rows = _rows(conn, "SELECT * FROM worktrees WHERE id = ?", (worktree_id,))
     return rows[0] if rows else None
 
@@ -600,14 +624,14 @@ def worktrees_for(
         sql += " AND repo = ?"
         params += (repo,)
     sql += " ORDER BY created_ts"
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         return _rows(conn, sql, params)
 
 
 def set_worktree_status(
     worktree_id: int, status: WorktreeStatus, db_path: Path | None = None
 ) -> None:
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         conn.execute(
             "UPDATE worktrees SET status = ? WHERE id = ?", (status, worktree_id)
         )
@@ -646,7 +670,7 @@ def mint_context_token(
             )
     now = time.time() if now is None else now
     token = secrets.token_urlsafe(32)
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         if conn.execute(
             "SELECT 1 FROM worktrees WHERE id = ?", (worktree_id,)
         ).fetchone() is None:
@@ -680,7 +704,7 @@ def context_token_record(
         return None
     now = time.time() if now is None else now
     digest = _hash_token(token)
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         rows = _rows(
             conn,
             "SELECT t.id, t.worktree_id, t.token_hash, t.permissions,"
@@ -711,7 +735,7 @@ def revoke_context_token(
     token_id: int, now: float | None = None, db_path: Path | None = None
 ) -> None:
     """Retire one capability. The row stays so an audit can see it existed."""
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         conn.execute(
             "UPDATE context_tokens SET revoked_ts = ?"
             " WHERE id = ? AND revoked_ts IS NULL",
@@ -725,7 +749,7 @@ def revoke_context_tokens_for_worktree(
     """Retire every capability an execution holds and return how many. Sandbox
     removal calls this: a removed sandbox must leave nothing that still
     authenticates."""
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         cur = conn.execute(
             "UPDATE context_tokens SET revoked_ts = ?"
             " WHERE worktree_id = ? AND revoked_ts IS NULL",
@@ -757,7 +781,7 @@ def set_worktree_runtime(
     if not given:
         return
     assignments = ", ".join(f"{k} = ?" for k in given)
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         conn.execute(
             f"UPDATE worktrees SET {assignments} WHERE id = ?",
             (*given.values(), worktree_id),
