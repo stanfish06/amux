@@ -394,19 +394,45 @@ def create(
     return Sandbox(name=name, id=str(entry.get("id") or ""), entry=entry)
 
 
-def attach_argv(name: str) -> tuple[str, ...]:
+# Codex will not run a hook it has no persisted trust for -- and it does not
+# say so. Verified live on codex 0.146.0 with a positive control: with the flag
+# UserPromptSubmit and SessionEnd both fired; without it, identical hooks.json
+# and config.toml, zero hooks fired, no prompt, exit 0. Codex printed
+# "clamping SessionEnd hook timeout" in *both* runs, so it parses the document
+# either way and trust alone gates execution. Without this flag a sandboxed
+# Codex reads as permanently idle with nothing anywhere reporting why.
+#
+# The flag bypasses hook review for one invocation. That is acceptable here
+# ONLY because amux itself authors the sole hooks.json in the VM and the VM is
+# the isolation boundary. If amux ever lets a user supply hooks, this must be
+# revisited -- it would then be bypassing review of code amux did not write.
+#
+# Claude needs no equivalent.
+HOOK_TRUST_FLAG = "--dangerously-bypass-hook-trust"
+
+AGENT_ATTACH_ARGS: dict[str, tuple[str, ...]] = {"codex": (HOOK_TRUST_FLAG,)}
+
+
+def attach_argv(name: str, agent: str = "") -> tuple[str, ...]:
     """The pane command that attaches to an existing sandbox.
 
-    The AGENT positional is omitted deliberately: once the sandbox exists `sbx
-    run --name` reattaches to the agent already inside it, which is what makes
-    a stopped sandbox resumable rather than recreated.
+    The AGENT positional is omitted where possible: `sbx run --name` reattaches
+    to the agent already recorded in the sandbox's spec, which is what makes a
+    stopped sandbox resumable rather than recreated. It is named only when the
+    agent needs per-invocation arguments, since those go after `--` and `sbx`
+    has nothing to attach them to otherwise. Naming it does not recreate the
+    sandbox; the VM and its contents are still reused.
     """
-    return ("run", "--name", name)
+    args = ["run", "--name", name]
+    extra = AGENT_ATTACH_ARGS.get(agent, ())
+    if extra:
+        args += [agent, "--", *extra]
+    return tuple(args)
 
 
-def attach_command(name: str) -> str:
+def attach_command(name: str, agent: str = "") -> str:
     """`attach_argv` as a shell line, for sending to a tmux pane."""
-    return " ".join((SBX, *attach_argv(name)))
+    return " ".join((SBX, *attach_argv(name, agent)))
 
 
 def stop(name: str) -> None:
@@ -478,6 +504,31 @@ def is_primary_checkout(repo: str | os.PathLike[str]) -> bool:
     return (Path(repo) / ".git").is_dir()
 
 
+def _client_source_check() -> Check:
+    """Whether the sandbox context client can actually be found in this build.
+
+    Asked through `sandbox_bootstrap.client_source()` rather than by inspecting
+    paths here, so this checks whatever that resolver really does -- it answers
+    differently for a source checkout and a frozen bundle, and preflight should
+    not hold a second opinion about which is right.
+    """
+    from amux import sandbox_bootstrap
+
+    try:
+        source = sandbox_bootstrap.client_source()
+    except Exception as exc:  # noqa: BLE001 - any resolver failure is the same fault
+        return Check(
+            "context-client",
+            False,
+            str(exc),
+            "this amux build does not ship the sandbox context client; "
+            "rebuild with it bundled (PyInstaller needs it added as data, since "
+            "a frozen bundle contains no .py source to fall back on) or run "
+            "amux from a source checkout",
+        )
+    return Check("context-client", True, str(source))
+
+
 def preflight(
     *,
     agents: Sequence[str],
@@ -509,6 +560,13 @@ def preflight(
         )
     except SandboxError as exc:
         checks.append(Check("resources", False, str(exc), "correct the resource flags"))
+
+    # The shim amux copies into every sandbox. Checked here because a packaged
+    # amux resolves it differently from a source checkout, and a build that
+    # omitted it fails at bootstrap -- after the pane, the sandbox and the
+    # token already exist. That is a packaging fault, so it says so rather than
+    # surfacing as a generic bootstrap error.
+    checks.append(_client_source_check())
 
     unsupported = sorted({a for a in agents if a not in SUPPORTED_AGENTS})
     checks.append(
@@ -639,11 +697,35 @@ class Sandbox:
             )
         run("cp", os.fspath(source), f"{self.name}:{destination}")
 
-    def exec(self, argv: Sequence[str]) -> str:
-        """Run a command inside the sandbox and return its stdout."""
+    def exec(self, argv: Sequence[str], *, user: str | None = None) -> str:
+        """Run a command inside the sandbox and return its stdout.
+
+        `user` selects the in-VM user (`sbx exec -u`). It exists for one
+        reason: `sbx cp` preserves the source file's mode but sets its owner to
+        the *host* uid, and offers no flag for either. A 0600 file therefore
+        lands owned by a uid that does not exist in the container, so the agent
+        cannot read its own capability and cannot chmod what it does not own.
+        The fix is a `chown` as root after each copy, which needs this.
+
+        `None` means exactly today's behaviour -- no `-u` at all -- rather than
+        naming a default user, because the agent account differs between the
+        Claude and Codex images and amux has no business guessing it. Root is
+        never a default: everything else amux runs in a sandbox runs as the
+        agent, and defaulting to root would make that the accident.
+        """
         if not argv:
             raise SandboxError("exec needs a command")
-        return run("exec", self.name, *argv).stdout
+        flags = ("-u", user) if user else ()
+        return run("exec", *flags, self.name, *argv).stdout
+
+    def working_tree_status(self) -> str:
+        """Porcelain status of the clone inside the sandbox. Empty means clean.
+
+        This is what stands between `--clean` and destroying an agent's
+        uncommitted work, so a status that cannot be read is treated as dirty
+        by the caller rather than as clean.
+        """
+        return self.exec(["git", "status", "--porcelain"]).strip()
 
     def refresh(self) -> Sandbox:
         entry = find(self.name)

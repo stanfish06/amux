@@ -584,13 +584,6 @@ created a fresh VM and silently lost the old one's state.
 
 ### Cleanup, including the refusals
 
-> **Not landed yet.** Safe sandbox cleanup — the dirty check, preserving the
-> committed tip, revoking the token, and the force flag that overrides the
-> refusal — is task 5.3. Task 5.5 deliberately did not add a `--force` flag to
-> `kg`/`kw`, because a flag whose help text promises to override a check that
-> does not exist is worse than no flag. Until 5.3 lands, remove a sandbox with
-> `sbx rm` yourself and expect `--clean` to handle only host worktrees.
-
 ```sh
 # A dirty sandbox must be REFUSED without an explicit force flag.
 sbx exec "$BOX_A" sh -lc 'cd ~/*/ && echo more >> uncommitted.txt'
@@ -611,11 +604,15 @@ amux kw "$WS" --clean --force
 amux kw "$WS" --clean --force          # second run: no-op, no error
 sbx ls --json                          # no smoke sandboxes
 git -C "$SMOKE" remote -v | grep sandbox && echo "PROBLEM: remote left behind" || echo "OK"
-git -C "$SMOKE" branch -a | grep "amux/$WS"   # branch tips preserved on purpose
+git -C "$SMOKE" branch -a | grep "amux/$WS"   # host branch tips preserved
+# A *sandbox* branch is not a local branch: its tip is fetched before removal
+# into a durable ref, which is what survives `sbx rm`.
+git -C "$SMOKE" for-each-ref --format='%(refname)' 'refs/amux/sandboxes/**'
 ```
 
 Branches are kept deliberately — cleanup removes worktrees and sandboxes, not
-commits.
+commits. Check that last command actually lists a ref per sandbox that had
+commits: it is the only copy of that work once the VM is gone.
 
 ### The capability must be dead
 

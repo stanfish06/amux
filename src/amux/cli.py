@@ -160,11 +160,29 @@ def _cmd_spg(server, args) -> int:
     return 0
 
 
+def _check_force(args) -> None:
+    """`--force` only overrides the dirty-sandbox refusal, which only `--clean`
+    can reach. Refused rather than ignored, for the same reason sandbox-only
+    spawn flags are: a flag that silently does nothing teaches the wrong thing
+    about what the command did."""
+    if args.force and not args.clean:
+        raise ValueError("--force only applies together with --clean")
+
+
 def _cmd_kw(server, args) -> int:
     session = _get_session(server, args.workspace)
-    if args.clean:
-        for window in session.windows:
-            worktree.remove_task(args.workspace, window.name or "")
+    _check_force(args)
+    for window in session.windows:
+        task = window.name or ""
+        if args.clean:
+            # Sandboxes first: a refusal must abort before any host worktree is
+            # removed, so a dirty sandbox does not cost the user the rest.
+            runtime.clean_task(args.workspace, task, force=args.force)
+            worktree.remove_task(args.workspace, task)
+        else:
+            # Stop, do not destroy: a sandbox keeps its disk and its provider
+            # session so a later spawn can resume it as itself.
+            runtime.stop_task(args.workspace, task)
     core.load_agent_space(session).terminate()
     print(f"killed {ALIAS['session']} '{args.workspace}'")
     return 0
@@ -173,8 +191,12 @@ def _cmd_kw(server, args) -> int:
 def _cmd_kg(server, args) -> int:
     session = _get_session(server, args.workspace)
     window = _get_window(session, args.task)
+    _check_force(args)
     if args.clean:
+        runtime.clean_task(args.workspace, args.task, force=args.force)  # see `_cmd_kw`
         worktree.remove_task(args.workspace, args.task)
+    else:
+        runtime.stop_task(args.workspace, args.task)  # see `_cmd_kw`
     core.load_agent_grid(window).terminate()
     print(f"killed {ALIAS['window']} '{args.task}' in '{args.workspace}'")
     return 0
@@ -486,6 +508,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="also remove the workspace's git worktrees (branches are kept)",
     )
+    p_kw.add_argument(
+        "--force",
+        action="store_true",
+        help="permit removing a sandbox with uncommitted work (implies data "
+        "loss; the committed tip is preserved first)",
+    )
     p_kw.set_defaults(func=_cmd_kw)
 
     p_kg = sub.add_parser("kg", help="kill an agent grid")
@@ -495,6 +523,12 @@ def main(argv: list[str] | None = None) -> int:
         "--clean",
         action="store_true",
         help="also remove the task's git worktrees (branches are kept)",
+    )
+    p_kg.add_argument(
+        "--force",
+        action="store_true",
+        help="permit removing a sandbox with uncommitted work (implies data "
+        "loss; the committed tip is preserved first)",
     )
     p_kg.set_defaults(func=_cmd_kg)
 

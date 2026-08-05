@@ -66,16 +66,42 @@ def respond_ls(fake_sbx, names):
     )
 
 
-def ready(fake_sbx, names):
-    """Script a fake `sbx` for a successful creation of `names`."""
+HOME = "/home/agent"
+# The exact identity probe bootstrap makes: $HOME, user and group in one round
+# trip. Reproduced rather than approximated so a change to it fails loudly here
+# instead of silently feeding shell output to a JSON parser.
+IDENTITY_PROBE = (
+    "sh",
+    "-lc",
+    'printf "%s\\n%s\\n%s" "$HOME" "$(id -un)" "$(id -gn)"',
+)
+IDENTITY = f"{HOME}\nagent\nagent"
+
+
+def ready(fake_sbx, names, *, codex_version=None):
+    """Script a fake `sbx` for a successful creation of `names`.
+
+    Bootstrap asks the VM real questions -- $HOME, the agent's version, whatever
+    hook document the image ships -- so the fake has to answer them distinctly
+    rather than returning one string for every `exec`. Registered
+    most-specific-first, since the fake matches on argv prefix and first match
+    wins.
+    """
     fake_sbx.respond("version", stdout=VERSION_LINE)
     fake_sbx.respond_json("diagnose", "-o", "json", payload={"checks": []})
     fake_sbx.respond("policy", "check", "network", stdout="allowed\n")
     fake_sbx.respond("create")
     fake_sbx.respond("cp")
-    # Bootstrap asks the VM for $HOME rather than assuming it, and the shim's
-    # `--help` probe must succeed; one stdout satisfies both.
-    fake_sbx.respond("exec", stdout="/home/agent\n")
+    for name in names:
+        fake_sbx.respond("exec", name, *IDENTITY_PROBE, stdout=IDENTITY)
+        if codex_version is not None:
+            fake_sbx.respond(
+                "exec", name, "sh", "-lc", "codex --version 2>/dev/null",
+                stdout=codex_version + "\n",
+            )
+    # Everything else: succeed silently. An image that ships no hook document is
+    # the expected case, so an empty `cat` must not look like a failure.
+    fake_sbx.respond("exec", stdout="")
     fake_sbx.respond("rm")
     respond_ls(fake_sbx, names)
 
@@ -110,10 +136,12 @@ def test_mixed_grid_creates_one_capped_sandbox_per_pane(git_repo, fake_sbx):
             "--cpus", "2", "--memory", "4g", "--no-share-skills",
             agent, str(git_repo),
         ]
-    # Each pane attaches to its own sandbox rather than launching an agent.
+    # Each pane attaches to its own sandbox rather than creating a new one.
+    # Codex additionally needs its per-invocation hook-trust flag, without
+    # which it silently runs none of the hooks amux just installed.
     assert [l.keys for l in launches] == [
         (f"sbx run --name {names[0]}",),
-        (f"sbx run --name {names[1]}",),
+        (f"sbx run --name {names[1]} codex -- --dangerously-bypass-hook-trust",),
     ]
 
 
@@ -324,3 +352,104 @@ def test_attachment_reattaches_rather_than_relaunching(git_repo, fake_sbx):
     assert "claude" not in launch.keys[0]
     # The pane's directory lives in the VM, so the host contributes none.
     assert launch.cwd == ""
+
+
+# --- both halves of bootstrap ---
+
+
+def test_both_bootstrap_halves_run(git_repo, fake_sbx):
+    """The shim and the capability alone give an agent a working `amux` that
+    never reports anything, because state events come from its own hooks. A
+    sandbox missing them reads permanently idle, and no offline test can catch
+    that from behaviour -- hooks only fire inside a live VM -- so the wiring
+    itself is what gets asserted."""
+    names = names_for(git_repo, "alpha")
+    ready(fake_sbx, names)
+    rt = make_runtime()
+    rt.prepare(
+        specs(("%1", "claude", "alpha")),
+        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+    )
+
+    # The client half: the shim and its config were delivered.
+    delivered = [c[2].split(":", 1)[1] for c in fake_sbx.calls if c[0] == "cp"]
+    assert "/usr/local/bin/amux" in delivered
+    assert any(d.endswith("/context.json") for d in delivered)
+
+    # The hooks half: the agent's own hook document was written. Asserted by the
+    # specific file, not by "some exec happened" -- a trivial probe satisfies
+    # that while the real install does nothing.
+    hooks = rt.hooks["%1"]
+    assert hooks.settings_path.endswith(".claude/settings.json")
+    assert any(hooks.settings_path in " ".join(c) for c in fake_sbx.calls)
+    assert hooks.mechanism == "hooks"
+    # True now that the hook locations have been checked against the real
+    # images. This asserted False while they were only assumed -- the flag
+    # exists so amux never claims a verification nobody performed, so it is
+    # worth failing when its meaning changes rather than accepting either value.
+    assert hooks.location_verified is True
+
+
+def test_hook_installation_records_what_the_agent_cannot_report(git_repo, fake_sbx):
+    """An old Codex has only the single `notify` slot. That is detected in the
+    image, and the resulting gap is recorded rather than swallowed."""
+    names = names_for(git_repo, "alpha")
+    ready(fake_sbx, names, codex_version="codex-cli 0.5.0")
+    rt = make_runtime()
+    rt.prepare(
+        specs(("%1", "codex", "alpha")),
+        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+    )
+    hooks = rt.hooks["%1"]
+    # The version was read from the image, not assumed...
+    assert hooks.agent_version == "codex-cli 0.5.0"
+    # ...and 0.5.0 predates the full hook surface, so it falls back.
+    assert hooks.mechanism == "notify"
+    assert hooks.degraded and hooks.missing_kinds
+
+
+def test_a_current_codex_image_is_not_degraded(git_repo, fake_sbx):
+    """The fallback must be chosen by detection, not applied to every Codex."""
+    names = names_for(git_repo, "alpha")
+    ready(fake_sbx, names, codex_version="codex-cli 0.146.0")
+    rt = make_runtime()
+    rt.prepare(
+        specs(("%1", "codex", "alpha")),
+        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+    )
+    hooks = rt.hooks["%1"]
+    assert hooks.agent_version == "codex-cli 0.146.0"
+    assert hooks.mechanism == "hooks"
+    assert not hooks.degraded
+    assert hooks.settings_path.endswith(".codex/hooks.json")
+
+
+def test_a_degraded_agent_is_announced_not_swallowed(git_repo, fake_sbx, capsys,
+                                                     monkeypatch):
+    names = names_for(git_repo, "alpha")
+    ready(fake_sbx, names)
+
+    real = runtime.sandbox_bootstrap.install_hooks
+    degraded = runtime.sandbox_bootstrap.HooksInstalled(
+        agent="codex",
+        settings_path="/home/agent/.codex/config.toml",
+        missing_kinds=("busy", "notify"),
+        location_verified=True,
+        agent_version="codex-cli 0.5.0",
+        mechanism="notify",
+    )
+    monkeypatch.setattr(
+        runtime.sandbox_bootstrap, "install_hooks", lambda *a, **k: degraded
+    )
+    assert real is not runtime.sandbox_bootstrap.install_hooks
+
+    rt = make_runtime()
+    rt.prepare(
+        specs(("%1", "codex", "alpha")),
+        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+    )
+    out = capsys.readouterr().out
+    assert "cannot report" in out
+    assert "busy" in out and "notify" in out
+    assert "codex-cli 0.5.0" in out
+    assert rt.hooks["%1"].degraded

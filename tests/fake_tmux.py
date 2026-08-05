@@ -50,6 +50,10 @@ class FakeWindow:
         self.panes.append(pane)
         return pane
 
+    def cmd(self, *args: str) -> FakeResult:
+        self.server.log.append(("window-cmd", self.name, *args))
+        return FakeResult()
+
 
 class FakePane:
     def __init__(self, window: FakeWindow, current_path: str = "/pane/current/path"):
