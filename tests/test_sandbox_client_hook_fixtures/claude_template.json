@@ -1,6 +1,6 @@
 {
-  "model": "claude-opus-4-5",
-  "permissions": {
-    "allow": ["Bash(git:*)"]
-  }
+  "themeId": 1,
+  "alwaysThinkingEnabled": true,
+  "defaultMode": "bypassPermissions",
+  "bypassPermissionsModeAccepted": true
 }
