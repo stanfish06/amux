@@ -423,6 +423,25 @@ def sandbox_tracking_ref(sandbox_name: str, branch: str) -> str:
     return f"refs/amux/sandboxes/{sandbox_name}/{branch}"
 
 
+def sandbox_branch_tip(repo: str, sandbox_name: str, branch: str) -> str | None:
+    """The commit the sandbox has on `branch`, or None if it has no such branch.
+
+    Raises `WorktreeError` when the remote cannot be reached at all, which is a
+    different thing from having nothing to preserve and must not be treated the
+    same way: "this agent never committed" is safe to remove, while "we could
+    not ask" means its commits might be about to be destroyed.
+
+    `ls-remote` rather than parsing a failed fetch's stderr: the exit code
+    separates unreachable from absent, and empty output means the branch simply
+    is not there.
+    """
+    proc = _git(repo, "ls-remote", sandbox_remote(sandbox_name), branch, check=False)
+    if proc.returncode != 0:
+        raise WorktreeError(proc.stderr.strip() or proc.stdout.strip())
+    out = proc.stdout.strip()
+    return out.split()[0] if out else None
+
+
 def fetch_sandbox_branch(repo: str, sandbox_name: str, branch: str) -> str:
     """Fetch a sandbox's committed branch to a durable local ref, and return it.
 

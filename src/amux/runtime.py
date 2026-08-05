@@ -286,47 +286,90 @@ def stop_task(workspace: str, task: str) -> list[str]:
 def clean_task(workspace: str, task: str, *, force: bool = False) -> list[str]:
     """Remove a task's sandboxes, preserving committed work first.
 
-    The order is the safety property. For each sandbox: check the working tree,
-    refuse if it is dirty and `force` was not given, fetch the committed branch
-    tip to a durable host ref, remove the sandbox, drop its host remote, revoke
-    its capability, and only then mark the row removed. A refused or failed
-    removal leaves the row exactly as it was -- a row marked removed while its
-    sandbox still holds work is both unreachable and invisible.
+    The order is the safety property. For each sandbox: wake it if stopped,
+    establish whether it has a committed tip, preserve that tip on the host,
+    remove the sandbox, drop its host remote, revoke its capability, and only
+    then mark the row removed.
 
-    Returns the sandboxes removed. Raises `SandboxError` naming every sandbox
-    that refused, without having touched any of them.
+    Two kinds of refusal, both of which leave their row untouched and both of
+    which are raised rather than printed:
+
+    - uncommitted work without `force` -- found for every sandbox before
+      anything is removed, so one re-run shows the whole problem;
+    - anything that would abandon a VM or lose commits -- an unreadable tip, or
+      a sandbox `sbx rm` will not take. These are collected as work proceeds,
+      because the sandboxes that *can* be cleaned should be.
+
+    Raising matters beyond the exit code: the caller kills the tmux session
+    afterwards, and a session killed over abandoned VMs leaves them
+    unaddressable by any amux command.
     """
     rows = sandbox_rows(workspace, task)
     if not rows:
         return []
 
-    # Every dirty sandbox is found before anything is removed, so the refusal
-    # lists all of them at once rather than one per re-run.
     if not force:
-        dirty = []
-        for row in rows:
-            status = _dirty_status(row["sandbox_name"])
-            if status:
-                dirty.append((row["sandbox_name"], status))
+        dirty = [
+            (row["sandbox_name"], status)
+            for row in rows
+            if (status := _dirty_status(row["sandbox_name"]))
+        ]
         if dirty:
             raise sandbox.SandboxError(_dirty_refusal(dirty))
 
     removed: list[str] = []
+    stranded: list[str] = []
     for row in rows:
         name = row["sandbox_name"]
-        # Before `sbx rm`, never after: once the sandbox is gone its commits are
-        # unreachable, and this ref is what makes them survive.
+        handle = sandbox.Sandbox(name=name)
+
+        # The `sandbox-<name>` remote is served from inside the VM, so a stopped
+        # sandbox's tip is unreadable until it is running. Waking it first is
+        # what makes "preserve before removing" true rather than aspirational.
         try:
-            worktree.fetch_sandbox_branch(row["repo"], name, row["branch"])
+            handle.wake()
+        except sandbox.SandboxError as exc:
+            stranded.append(
+                f"{name}: could not start it to read its committed work ({exc}); "
+                "its branch tip is NOT saved on the host"
+            )
+            continue
+
+        try:
+            tip = worktree.sandbox_branch_tip(row["repo"], name, row["branch"])
         except worktree.WorktreeError as exc:
-            print(f"amux: {name}: no committed branch to preserve ({exc})")
+            # Unreachable, so whether it holds commits is unknown. `--force`
+            # authorises losing *uncommitted* work; it does not authorise
+            # destroying commits nobody has managed to copy out.
+            stranded.append(
+                f"{name}: cannot read {row['branch']} to preserve it ({exc}); "
+                "its branch tip is NOT saved on the host, so it was left in place"
+            )
+            continue
+
+        if tip is None:
+            print(f"amux: {name}: nothing committed on {row['branch']} to preserve")
+        else:
+            try:
+                worktree.fetch_sandbox_branch(row["repo"], name, row["branch"])
+            except worktree.WorktreeError as exc:
+                stranded.append(
+                    f"{name}: {row['branch']} is at {tip[:12]} but could not be "
+                    f"fetched ({exc}); it is NOT saved on the host"
+                )
+                continue
+
         try:
             sandbox.remove(name, force=force)
         except sandbox.SandboxError as exc:
-            # Left active on purpose: the sandbox is still there and still owns
-            # whatever it owns.
-            print(f"amux: could not remove sandbox {name}: {exc}")
+            # The VM is still there and still owns whatever it owns, so the row
+            # stays addressable. Reported, never silently skipped: this is the
+            # shape that let a whole workspace of microVMs be abandoned while
+            # amux said "killed".
+            stranded.append(f"{name}: could not be removed ({exc})")
+            _restore_stopped(row, handle)
             continue
+
         try:
             worktree.remove_sandbox_remote(row["repo"], name)
         except Exception as exc:  # noqa: BLE001
@@ -334,7 +377,41 @@ def clean_task(workspace: str, task: str, *, force: bool = False) -> list[str]:
         store.revoke_context_tokens_for_worktree(row["id"])
         _retire(row["id"], "removed", current=row["status"])
         removed.append(name)
+
+    if stranded:
+        raise sandbox.SandboxError(_stranded_refusal(stranded, removed))
     return removed
+
+
+def _restore_stopped(row: dict, handle: sandbox.Sandbox) -> None:
+    """Put a sandbox back to stopped if this call is what woke it.
+
+    Inspecting a sandbox starts it, so a refused removal would otherwise leave
+    a VM running that the registry still calls stopped -- burning memory and
+    disagreeing with its own record.
+    """
+    if row["runtime_status"] != "stopped":
+        return
+    try:
+        sandbox.stop(row["sandbox_name"])
+    except sandbox.SandboxError as exc:
+        print(
+            f"amux: {row['sandbox_name']} was started to inspect it and could "
+            f"not be stopped again ({exc}); it is running"
+        )
+
+
+def _stranded_refusal(stranded: list[str], removed: list[str]) -> str:
+    lines = ["some sandboxes could not be removed and are still on this host:"]
+    lines += [f"  {item}" for item in stranded]
+    if removed:
+        lines.append(f"removed: {', '.join(removed)}")
+    lines.append(
+        "The workspace has been left in place so amux can still address them. "
+        "Resolve the cause and re-run, or remove them yourself with "
+        "`sbx rm -f <name>` -- which discards any work still inside them."
+    )
+    return "\n".join(lines)
 
 
 def _dirty_status(name: str) -> str:

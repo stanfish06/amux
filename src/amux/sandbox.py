@@ -718,6 +718,17 @@ class Sandbox:
         flags = ("-u", user) if user else ()
         return run("exec", *flags, self.name, *argv).stdout
 
+    def wake(self) -> None:
+        """Ensure the VM is running, starting it if it is stopped.
+
+        There is no `sbx start`; `sbx exec` starts a stopped sandbox before
+        running its command, so the cheapest true command doubles as a start.
+        Needed because the host-side `sandbox-<name>` git remote is served from
+        inside the VM: a stopped sandbox's committed tip cannot be read at all,
+        so cleanup would destroy commits it never managed to preserve.
+        """
+        self.exec(["true"])
+
     def working_tree_status(self) -> str:
         """Porcelain status of the clone inside the sandbox. Empty means clean.
 
