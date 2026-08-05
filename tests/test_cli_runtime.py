@@ -295,12 +295,29 @@ def test_doctor_rejects_a_secondary_worktree_with_the_reason(capsys, fake_sbx, g
 # --- context-service ---
 
 
+@pytest.fixture
+def private_default_port(monkeypatch):
+    """Give the flagless `context-service` path a port of its own.
+
+    These tests exercise `start` with no `--port`, which is the interesting
+    path — but the *default* port is a global resource, so any service holding
+    it fails them for reasons that have nothing to do with amux. That is not
+    hypothetical: a leaked `-m amux.context_service serve --port 47317` from
+    another worktree squatted it and failed both of these while the tree was
+    clean. `AMUX_CONTEXT_PORT` is read by `ServiceConfig.from_env`, and the
+    spawned child inherits the environment, so the flagless path stays exactly
+    as flagless while the port stops being shared.
+    """
+    monkeypatch.setenv(context_service.ENV_PORT, str(_PRIVATE_PORT))
+    return _PRIVATE_PORT
+
+
 def test_context_service_status_when_nothing_runs(capsys):
     assert cli.main(["context-service", "status"]) == 0
     assert "not running" in capsys.readouterr().out
 
 
-def test_context_service_start_status_stop(capsys, isolate_state):
+def test_context_service_start_status_stop(capsys, isolate_state, private_default_port):
     assert cli.main(["context-service", "start"]) == 0
     started = capsys.readouterr().out
     assert "running" in started
@@ -317,7 +334,21 @@ def test_context_service_start_status_stop(capsys, isolate_state):
     assert context_service.read_runfile(context_service.ServiceConfig()) is None
 
 
-def test_context_service_start_is_idempotent(capsys, isolate_state):
+@pytest.fixture(autouse=True)
+def _no_leaked_service(isolate_state):
+    """Stop whatever a test in this file started, however it ended.
+
+    `start` spawns a detached process that outlives the test; a failure before
+    the explicit `stop` leaves it holding a port for every later run.
+    """
+    yield
+    try:
+        context_service.stop(context_service.ServiceConfig())
+    except Exception:
+        pass
+
+
+def test_context_service_start_is_idempotent(capsys, isolate_state, private_default_port):
     try:
         assert cli.main(["context-service", "start"]) == 0
         first = context_service.read_runfile(context_service.ServiceConfig())
@@ -357,6 +388,9 @@ def test_the_cli_and_the_module_report_the_same_state(capsys, isolate_state):
 # it: reading a port from a socket and closing it is a cross-test TOCTOU (note
 # #50).
 BINDABLE_PORT = 47402
+# Also below the ephemeral range, and not the shipped default, so a service on
+# 47317 -- anyone's -- cannot affect these tests.
+_PRIVATE_PORT = 47403
 
 
 def _bindable_port() -> int:

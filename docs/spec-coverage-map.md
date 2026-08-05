@@ -14,10 +14,10 @@ something other than the behaviour it named.
 | | |
 |---|---|
 | Integration branch | `amux/amux/docker/integration` |
-| Pinned SHA | **`f30c43b`** (R6 rows re-run; the rest of the map was first built against `efe8672`) |
-| Mapped and mutated from | `amux/amux/docker/swift-crane` @ `a45fc7d` |
-| Tree equivalence | `git diff --stat f30c43b a45fc7d -- src tests tui docs Makefile pyproject.toml` is **empty**. `tui/` is included this time and was not in the first pass, because the R6 show half lives there |
-| Union suite | **800 passed** after the R6 restructure below (`f30c43b` itself is 799 passed / 1 failed, and that one failure is the predicted collision this re-run fixes) |
+| Pinned SHA | **`dc44dd0`** (F4 re-run; R6 rows against `f30c43b`; the rest first built against `efe8672`) |
+| Mapped and mutated from | `amux/amux/docker/swift-crane` @ `c8b600e` |
+| Tree equivalence | `git diff --stat dc44dd0 c8b600e -- src tests tui docs Makefile pyproject.toml` is **empty**. `tui/` is included this time and was not in the first pass, because the R6 show half lives there |
+| Union suite | **803 passed** |
 | Specs | `openspec/changes/prototype-sandbox-agents-context-service/specs/{sandbox-agent-runtime,sandbox-context-bridge}/spec.md` |
 | Counted | **15 Requirements, 35 Scenarios** (re-counted by `grep -c` on both files, not by adopting the number I was given) |
 | Count change | The spec gained a scenario *during* 6.3: clever-mole added R4's *"Agent commits after an integrate pass that found no delta"* in response to the foreclosure measured in §3. `sandbox-agent-runtime` went 16 → 17 scenarios. The map was first built against 34 |
@@ -41,12 +41,13 @@ no number in this document is invented.
 
 ## 1. Findings — read these first
 
-> **F4 is open. F1, F2 and F3 are FIXED as of `f30c43b`** — misty-panda `8786f6c` (Python)
+> **F1, F2 and F3 fixed as of `f30c43b`; F4 fixed as of `dc44dd0`. All four
+> findings are closed, each with the mutation that proves its fix** — misty-panda `8786f6c` (Python)
 > and `dc487a7` (TUI). The findings are kept below as written, because they are
 > why 5.4 was un-ticked and because the fix is only legible against them. What
 > landed, and how it was verified, is in §3 R6.
 
-### F4. R4's new no-delta-then-commits scenario is uncovered
+### F4. R4's no-delta-then-commits scenario — **FIXED and covered**
 
 *"Agent commits after an integrate pass that found no delta — **WHEN** an agent
 contributed no commits to an integrate pass and afterwards commits work on its
@@ -58,16 +59,21 @@ Added to the spec during 6.3, because the behaviour it forbids is what §3's
 measurement found: `worktree.integrate` marks every row merged unconditionally,
 so a zero-commit agent is foreclosed and its later commits are unreachable.
 
-- Implementation: **none** — the fix is routed to misty-panda (do not mark merged
-  when `n_commits == 0`).
-- Test: **none.**
-- Mutation: not applicable until there is something to mutate.
+- Implementation: `worktree.py:351` — `if n_commits: store.set_worktree_status(wt_id, "merged")` (misty-panda `da2fc49`). The no-delta report at `:364` is unchanged, so `0 commit(s), no changes` still prints.
+- Test: four assertions across two files — `test_an_agent_with_no_commits_stays_integrable`, `test_a_no_delta_pass_does_not_block_a_teammate` and `test_an_agent_with_commits_is_still_marked_merged` in `tests/test_worktree_setup_split.py`, plus an assertion added to `test_a_branch_with_no_delta_reports_no_changes` in `tests/test_sandbox_integrate.py:126`.
+- **Mutation executed:** drop the `if n_commits:` guard → **3 of the 4 fail**
+  (`test_an_agent_with_no_commits_stays_integrable`,
+  `test_a_no_delta_pass_does_not_block_a_teammate`,
+  `test_a_branch_with_no_delta_reports_no_changes`).
 
-This is the honest state and is why the clause was worth adding: the defect was
-real before the scenario existed, and the map recorded it as *"a defect no
-scenario covers"*. It is now a scenario, and it is uncovered. When the fix lands,
-the mutation to name is *mark merged unconditionally again* → the new test must
-fail.
+The fourth, `test_an_agent_with_commits_is_still_marked_merged`, correctly does
+*not* fail: it asserts that an agent **with** commits is still marked merged,
+which the mutation preserves. Its survival is the counterpart holding, not
+vacuity — the same distinction M2 turned on.
+
+That answers the reason this was re-checked rather than accepted: a test arriving
+in the same commit as its fix has never been seen red. This one can be made red,
+by the mutation named before the fix existed.
 
 ### F1. The monitor clause of "Runtime state is visible in existing amux views" has no implementation and no test
 
@@ -209,7 +215,7 @@ misty-panda real time.
 |---|---|---|---|
 | Sandbox branch integrates successfully | `worktree.integrate` sandbox path, `sandbox.git_remote` (`sandbox.py:203`), durable local ref | `test_a_committed_sandbox_branch_integrates`, `test_the_fetched_tip_is_kept_in_a_durable_local_ref`, `test_a_merge_commit_is_made_even_for_a_single_commit`, `test_host_and_sandbox_agents_integrate_in_one_pass` | Drop `--no-ff` → `test_a_merge_commit_is_made_even_for_a_single_commit` fails; skip the durable-ref write → its test fails |
 | Sandbox branch conflicts | conflict abort + blocker note in `worktree.integrate` | `test_a_conflicting_sandbox_branch_aborts_and_blocks`, `test_one_unreachable_sandbox_does_not_stop_the_others` | Remove the `merge --abort` → the test fails on a left-behind conflicted index; skip the blocker note → fails on the missing note |
-| **Agent commits after a no-delta pass** (added during 6.3) | **none** — `worktree.integrate` marks every row merged regardless of `n_commits`, so the agent is foreclosed. Fix routed | **none** | **F4 — no implementation, no test.** Once fixed: mark merged unconditionally again → the new test fails |
+| **Agent commits after a no-delta pass** (added during 6.3) | `worktree.py:351` guards the merged mark on `n_commits` (`da2fc49`); the no-delta report at `:364` is unchanged | `test_an_agent_with_no_commits_stays_integrable`, `test_a_no_delta_pass_does_not_block_a_teammate`, `test_an_agent_with_commits_is_still_marked_merged` (`test_worktree_setup_split.py`), plus an added assertion in `test_a_branch_with_no_delta_reports_no_changes` | **Executed:** drop the `if n_commits:` guard → 3 of 4 fail; the with-commits counterpart correctly survives |
 | Sandbox has no committed work | no-delta and never-committed branches in `worktree.integrate` | `test_a_branch_with_no_delta_reports_no_changes`, `test_uncommitted_sandbox_files_are_not_integrated`, `test_a_sandbox_that_never_committed_the_branch_is_reported`, `test_a_stopped_or_removed_sandbox_is_reported_not_guessed` | Report `ok=True` with a fabricated shortstat for an empty delta → the first two fail |
 
 **Observed limitation, R4 (not a scenario failure).** `amux integrate <ws> <task>
