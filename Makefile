@@ -12,12 +12,29 @@ PYINSTALLER_MODE := --onedir
 AMUX_BIN := $(CURDIR)/dist/amux/amux
 endif
 
+VENV := $(CURDIR)/.venv
+PY := $(VENV)/bin/python
+
+# The sandbox context client is read as a FILE at runtime and copied into a
+# sandbox, so it must ship as data: PyInstaller compiles modules into the PYZ
+# and keeps no source, and without this every sandbox spawn from a packaged
+# amux dies installing the shim. Destination `amux` is load-bearing — it puts
+# the file at exactly the path PyInstaller reports as sandbox_client.__file__,
+# so the module resolves itself with no frozen-specific code. Moving the
+# destination breaks that silently, with no build error; sandbox preflight
+# checks the shim resolves for exactly that reason.
+#
+# The path must be ABSOLUTE: --add-data resolves relative to --specpath, which
+# is `build` below, so a relative source path fails the build outright.
+SHIM_DATA := $(CURDIR)/src/amux/sandbox_client.py:amux
+
 dev:
-	pipenv run pip install -e ".[dev]"
+	uv sync --extra dev
 
 build: dev
-	pipenv run env -u PYTHONPATH pyinstaller $(PYINSTALLER_MODE) --name amux \
+	env -u PYTHONPATH $(PY) -m PyInstaller $(PYINSTALLER_MODE) --name amux \
 		--paths src \
+		--add-data "$(SHIM_DATA)" \
 		--specpath build --workpath build --distpath dist \
 		-y src/amux/cli.py
 
