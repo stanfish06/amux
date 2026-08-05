@@ -383,10 +383,11 @@ def test_both_bootstrap_halves_run(git_repo, fake_sbx):
     assert hooks.settings_path.endswith(".claude/settings.json")
     assert any(hooks.settings_path in " ".join(c) for c in fake_sbx.calls)
     assert hooks.mechanism == "hooks"
-    # False on purpose, and honest: the image's real hook location has not been
-    # inspected in a live VM yet (that is 6.4). Recording "assumed" beats
-    # claiming a verification nobody performed.
-    assert hooks.location_verified is False
+    # True now that the hook locations have been checked against the real
+    # images. This asserted False while they were only assumed -- the flag
+    # exists so amux never claims a verification nobody performed, so it is
+    # worth failing when its meaning changes rather than accepting either value.
+    assert hooks.location_verified is True
 
 
 def test_hook_installation_records_what_the_agent_cannot_report(git_repo, fake_sbx):

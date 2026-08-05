@@ -504,6 +504,31 @@ def is_primary_checkout(repo: str | os.PathLike[str]) -> bool:
     return (Path(repo) / ".git").is_dir()
 
 
+def _client_source_check() -> Check:
+    """Whether the sandbox context client can actually be found in this build.
+
+    Asked through `sandbox_bootstrap.client_source()` rather than by inspecting
+    paths here, so this checks whatever that resolver really does -- it answers
+    differently for a source checkout and a frozen bundle, and preflight should
+    not hold a second opinion about which is right.
+    """
+    from amux import sandbox_bootstrap
+
+    try:
+        source = sandbox_bootstrap.client_source()
+    except Exception as exc:  # noqa: BLE001 - any resolver failure is the same fault
+        return Check(
+            "context-client",
+            False,
+            str(exc),
+            "this amux build does not ship the sandbox context client; "
+            "rebuild with it bundled (PyInstaller needs it added as data, since "
+            "a frozen bundle contains no .py source to fall back on) or run "
+            "amux from a source checkout",
+        )
+    return Check("context-client", True, str(source))
+
+
 def preflight(
     *,
     agents: Sequence[str],
@@ -535,6 +560,13 @@ def preflight(
         )
     except SandboxError as exc:
         checks.append(Check("resources", False, str(exc), "correct the resource flags"))
+
+    # The shim amux copies into every sandbox. Checked here because a packaged
+    # amux resolves it differently from a source checkout, and a build that
+    # omitted it fails at bootstrap -- after the pane, the sandbox and the
+    # token already exist. That is a packaging fault, so it says so rather than
+    # surfacing as a generic bootstrap error.
+    checks.append(_client_source_check())
 
     unsupported = sorted({a for a in agents if a not in SUPPORTED_AGENTS})
     checks.append(
