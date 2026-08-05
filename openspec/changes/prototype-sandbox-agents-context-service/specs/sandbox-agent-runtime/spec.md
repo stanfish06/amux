@@ -56,6 +56,10 @@ Sandboxed agents SHALL perform Git operations inside their private clones. Befor
 - **WHEN** the sandbox branch has no commits beyond the task base or contains only uncommitted changes
 - **THEN** amux does not report those files as integrated and explains whether the agent must commit or there is no branch delta
 
+#### Scenario: Agent commits after an integrate pass that found no delta
+- **WHEN** an agent contributed no commits to an integrate pass and afterwards commits work on its assigned branch
+- **THEN** a later integrate reaches that agent and merges the new commits, because a pass that merged nothing MUST NOT record the agent as integrated
+
 ### Requirement: Sandbox lifecycle follows amux lifecycle without silent data loss
 Killing a sandbox-backed task or workspace without `--clean` SHALL stop its sandboxes while preserving their VM state and committed branches. Cleaning SHALL preserve committed branch tips on the host before removing sandboxes and revoking context credentials. If a sandbox contains uncommitted changes, cleanup MUST refuse unless the user supplies an explicit force option that describes the data loss.
 
