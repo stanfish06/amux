@@ -12,7 +12,7 @@ import http.client
 import json
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pytest
@@ -337,16 +337,22 @@ def _pane_line(pane: str, name: str, workspace: str, task: str, state: str) -> s
 
 
 def test_state_reports_the_panes_in_the_callers_workspace(events_probe, crane):
+    # Three panes, because there are three shapes to guard and two of them are
+    # protected by different checks: %1 has a sandbox row, %2 has a *host* row,
+    # and %3 has no row at all.
+    events_probe.agent("%2", "host-agent", runtime="host", runtime_status="",
+                       sandbox_name="", sandbox_id="")
     events_probe.events_tmux.listing = [
         _pane_line("%1", "swift-crane", "proj", "fix", "busy"),
-        _pane_line("%2", "happy-deer", "proj", "fix", "idle"),
+        _pane_line("%2", "host-agent", "proj", "fix", "idle"),
+        _pane_line("%3", "no-row", "proj", "fix", "idle"),
     ]
     status, payload = events_probe.get("/v1/events/state", crane)
     assert status == 200
-    assert [p["pane"] for p in payload["panes"]] == ["%1", "%2"]
-    assert [p["state"] for p in payload["panes"]] == ["busy", "idle"]
-    # Shaped exactly like the native call.
-    assert set(payload["panes"][0]) == {
+    assert [p["pane"] for p in payload["panes"]] == ["%1", "%2", "%3"]
+    assert [p["state"] for p in payload["panes"]] == ["busy", "idle", "idle"]
+
+    native = {
         "pane",
         "kind",
         "workspace",
@@ -357,6 +363,31 @@ def test_state_reports_the_panes_in_the_callers_workspace(events_probe, crane):
         "state",
         "last_event",
     }
+    # %2 has a host execution row, so this guards `core.runtime_fields`
+    # returning {} for `runtime == host` -- the check that keeps host monitor
+    # output byte-identical.
+    assert set(payload["panes"][1]) == native
+    # %3 has no row at all, which is a *different* check:
+    # `events.runtime_identity` returning {} before it ever reaches
+    # `runtime_fields`. A pane amux never registered -- someone else's shell --
+    # must also gain nothing.
+    assert set(payload["panes"][2]) == native
+
+    # %1 does have a sandbox row, so it carries the runtime identity on top.
+    # These six come from `core.runtime_fields`, which `events.runtime_identity`
+    # delegates to precisely so the monitor and `ctx` name them identically.
+    runtime_identity = {
+        "runtime",
+        "runtime_status",
+        "sandbox_name",
+        "sandbox_id",
+        "state_degraded",
+        "missing_kinds",
+    }
+    assert set(payload["panes"][0]) == native | runtime_identity
+    assert payload["panes"][0]["runtime"] == "docker-sandbox"
+    assert payload["panes"][0]["sandbox_name"] == "amux-proj-fix-swift-crane"
+    assert isinstance(payload["panes"][0]["state_degraded"], bool)
     assert payload["panes"] == [
         p for p in events.pane_states("amux-root") if p["workspace"] == "proj"
     ]
@@ -382,6 +413,21 @@ def test_state_needs_the_read_capability(events_probe):
 # --- GET /v1/events/wait ---
 
 
+def _generous_cap(events_probe):
+    """Let a threaded release test wait far longer than the fixture's cap.
+
+    The fixture caps `max_wait_s` at 2s to keep `test_wait_never_exceeds_the
+    _configured_cap` quick, but these two tests need the poll to still be open
+    when the main thread changes the state — and under full-suite load, with
+    other files spawning real subprocesses, 2s of scheduling is reachable. That
+    made them pass alone and in-file while failing about one full run in ten,
+    which is the worst way for a test to be wrong. The cap is incidental to what
+    they assert; the release is the point.
+    """
+    service = events_probe.handle.service
+    service.config = replace(service.config, max_wait_s=30.0)
+
+
 def test_wait_returns_at_once_when_the_pane_is_already_there(events_probe, crane):
     events_probe.events_tmux.facts["%1"] = events.PaneFacts(
         alive=True, kind="amux", created=1000.0, state_option="idle"
@@ -399,11 +445,12 @@ def test_wait_is_released_by_a_sandbox_event(events_probe, crane):
     events_probe.events_tmux.facts["%1"] = events.PaneFacts(
         alive=True, kind="amux", created=1000.0, state_option="busy"
     )
+    _generous_cap(events_probe)
     answer: dict = {}
 
     def waiter() -> None:
         answer["result"] = events_probe.get(
-            "/v1/events/wait?pane=%251&timeout=5&states=needs-input", crane, timeout=20
+            "/v1/events/wait?pane=%251&timeout=25&states=needs-input", crane, timeout=40
         )
 
     thread = threading.Thread(target=waiter)
@@ -428,11 +475,12 @@ def test_wait_sees_a_native_write_too(events_probe, crane):
     events_probe.events_tmux.facts["%1"] = events.PaneFacts(
         alive=True, kind="amux", created=1000.0, state_option="busy"
     )
+    _generous_cap(events_probe)
     answer: dict = {}
 
     def waiter() -> None:
         answer["result"] = events_probe.get(
-            "/v1/events/wait?pane=%251&timeout=5&states=idle", crane, timeout=20
+            "/v1/events/wait?pane=%251&timeout=25&states=idle", crane, timeout=40
         )
 
     thread = threading.Thread(target=waiter)

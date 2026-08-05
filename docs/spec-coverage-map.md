@@ -14,10 +14,10 @@ something other than the behaviour it named.
 | | |
 |---|---|
 | Integration branch | `amux/amux/docker/integration` |
-| Pinned SHA | **`efe8672`** |
-| Mapped and mutated from | `amux/amux/docker/swift-crane` @ `05b69b6` |
-| Tree equivalence | `git diff --stat efe8672 05b69b6 -- src tests docs Makefile pyproject.toml` is **empty** — the two trees are byte-identical for everything mapped here, so line numbers and mutation results below hold for `efe8672` |
-| Union suite | **771 passed** (measured at `05b69b6`; cite clever-mole's run on `efe8672` as the 6.3 number — they agree at time of writing) |
+| Pinned SHA | **`f30c43b`** (R6 rows re-run; the rest of the map was first built against `efe8672`) |
+| Mapped and mutated from | `amux/amux/docker/swift-crane` @ `a45fc7d` |
+| Tree equivalence | `git diff --stat f30c43b a45fc7d -- src tests tui docs Makefile pyproject.toml` is **empty**. `tui/` is included this time and was not in the first pass, because the R6 show half lives there |
+| Union suite | **800 passed** after the R6 restructure below (`f30c43b` itself is 799 passed / 1 failed, and that one failure is the predicted collision this re-run fixes) |
 | Specs | `openspec/changes/prototype-sandbox-agents-context-service/specs/{sandbox-agent-runtime,sandbox-context-bridge}/spec.md` |
 | Counted | 15 Requirements, 34 Scenarios (verified by `grep -c` on both files, not by trusting the scope) |
 
@@ -39,6 +39,11 @@ no number in this document is invented.
 ---
 
 ## 1. Findings — read these first
+
+> **F1, F2 and F3 are FIXED as of `f30c43b`** — misty-panda `8786f6c` (Python)
+> and `dc487a7` (TUI). The findings are kept below as written, because they are
+> why 5.4 was un-ticked and because the fix is only legible against them. What
+> landed, and how it was verified, is in §3 R6.
 
 ### F1. The monitor clause of "Runtime state is visible in existing amux views" has no implementation and no test
 
@@ -111,6 +116,35 @@ integration worktree.
 | M2 | Both `store.revoke_context_tokens_for_worktree` call sites in `runtime.py` neutered | **0 tests fail.** Mis-targeted, not a finding — see M2′. |
 | M2′ | *All* revocation neutered: both plural sites **and** `store.revoke_context_token` (`runtime.py:621`) | **3 tests fail**, one per call site — `test_rollback_revokes_every_capability` (621, rollback), `test_a_clean_sandbox_is_removed_and_its_row_marked` (288, cleanup), `test_resuming_supersedes_the_previous_row` (593, resume). Every revocation path is covered. |
 
+### R6 re-run mutations (`f30c43b`)
+
+| # | Mutation | Result |
+|---|---|---|
+| M-R6a | `core.runtime_fields` stops returning `{}` for `runtime == host`, so host rows gain runtime keys | **4 tests fail** — `test_a_host_agent_monitor_row_is_unchanged`, `test_a_mixed_grid_distinguishes_its_agents`, `test_a_host_row_contributes_nothing`, and `test_state_reports_the_panes_in_the_callers_workspace` |
+| M-R6b | `runtime_aware_state` drops the `runtime != "host"` gate, so a host row with a stale `runtime_status` reports `stopped` | **3 tests fail**, incl. `test_a_host_agent_is_never_reported_stopped` |
+| M-R6c | `events.runtime_identity` stops short-circuiting on a missing row, so a pane amux never registered gains runtime keys | **2 tests fail** — mine and `test_a_pane_with_no_execution_row_is_unchanged` |
+
+The re-run also surfaced a **pre-existing latent flake in my own 2.4 tests**,
+not caused by anything in `f30c43b`: `test_wait_is_released_by_a_sandbox_event`
+failed once in a full run while passing 5/5 alone and 2/2 in-file. The fixture
+caps `max_wait_s` at 2s to keep the cap test quick, so under full-suite load —
+other files spawning real subprocesses — the server could expire the poll before
+the main thread changed the state. Both threaded release tests now raise the cap
+locally; the cap is incidental to what they assert. Three consecutive full runs
+at 800 after the change.
+
+M-R6a's first run was contaminated and is worth recording. I used `git stash`
+to set the mutation aside, which stashed the *mutated* file along with my test
+edit, so the pop reintroduced the mutant and the run had executed against
+reverted tests. Re-run cleanly under the copy-mutate-restore protocol, the
+result changed: my own guard did **not** fail, because `%2` had no execution
+row at all, so `runtime_identity` returned `{}` at its `row is None` check and
+never reached the code I mutated. My assertion was guarding the *no-row* case
+while I described it as guarding host output. The test now covers three pane
+shapes — sandbox row, host row, no row — and M-R6a/M-R6c each kill it for the
+right reason. Two adjacent checks that look like one is the same class as
+`events.py:623-624`.
+
 M2 is worth keeping in the record. It looked like a vacuity finding and was
 not: rollback revokes by token id, not by worktree, so the untouched call site
 kept the test honestly green. A mutation that fails to fail is a claim about the
@@ -127,7 +161,7 @@ misty-panda real time.
 | Scenario | Implementation | Test | Mutation |
 |---|---|---|---|
 | Existing command keeps host behavior | `runtime.HOST` (`runtime.py:28`), `HostRuntime.kind` (`runtime.py:125`), default in `core.spawn_agent_grid` (`core.py:314`), `cli._resolve_runtime` returns `None` for host (`cli.py:78`) | `test_host_grid_snapshot.py` — 5 golden tests pinning full tmux mutation order, pane metadata, hook wiring, worktree layout, registry rows and send-keys order, captured **before** the runtime refactor; plus `test_build_grid_defaults_to_the_host_runtime` | Make `_resolve_runtime` return a `SandboxRuntime` when `--runtime` is absent → every golden test fails on tmux call order and worktree layout |
-| User selects sandbox execution | `SandboxRuntime` (`runtime.py:377`), `cli._resolve_runtime` (`cli.py:78-105`) | `test_mixed_grid_creates_one_capped_sandbox_per_pane`, `test_the_sandbox_runtime_is_built_with_the_flags_as_given` | Make `_resolve_runtime` ignore `--runtime docker-sandbox` and return `None` → both fail (no `sbx create` recorded) |
+| User selects sandbox execution | `SandboxRuntime` (`runtime.py:377`), `cli._resolve_runtime` (`cli.py:78-105`), and `cli._workspace_dir` resolving `spg`'s documented `-p` default from the registry before preflight sees it | `test_mixed_grid_creates_one_capped_sandbox_per_pane`, `test_the_sandbox_runtime_is_built_with_the_flags_as_given`; plus 5 tests added after note #78 finding 3: `test_spg_without_a_path_resolves_the_workspace_directory`, `test_spg_resolves_a_primary_checkout_not_an_agent_worktree`, `test_spg_with_an_explicit_path_still_wins`, `test_spg_without_a_path_or_a_registry_row_passes_none`, `test_spg_prefers_the_most_recent_repository_for_the_workspace` | Make `_resolve_runtime` ignore `--runtime docker-sandbox` and return `None` → both original tests fail (no `sbx create` recorded); revert `cwd` to `args.path` → 3 of the 5 `spg` tests fail (**executed, red-green verified at `68768c5`**) |
 | Unsupported agent is rejected | `sandbox.SUPPORTED_AGENTS` (`sandbox.py:50`), rejection in `create_argv` (`sandbox.py:367`), preflight `agents` check | `test_preflight_refuses_an_unsupported_agent`, `test_unsupported_agent_is_named`, `test_create_argv_rejects_unsupported_agents`, `test_a_failed_grid_leaves_no_task_window` | Add `"shell"` to `SUPPORTED_AGENTS` → the three rejection tests fail; delete the preflight check but keep the `create_argv` one → the *before any pane* ordering tests fail |
 
 ### R2. Sandbox prerequisites are checked before mutation
@@ -153,6 +187,17 @@ misty-panda real time.
 | Sandbox branch conflicts | conflict abort + blocker note in `worktree.integrate` | `test_a_conflicting_sandbox_branch_aborts_and_blocks`, `test_one_unreachable_sandbox_does_not_stop_the_others` | Remove the `merge --abort` → the test fails on a left-behind conflicted index; skip the blocker note → fails on the missing note |
 | Sandbox has no committed work | no-delta and never-committed branches in `worktree.integrate` | `test_a_branch_with_no_delta_reports_no_changes`, `test_uncommitted_sandbox_files_are_not_integrated`, `test_a_sandbox_that_never_committed_the_branch_is_reported`, `test_a_stopped_or_removed_sandbox_is_reported_not_guessed` | Report `ok=True` with a fabricated shortstat for an empty delta → the first two fail |
 
+**Observed limitation, R4 (not a scenario failure).** `amux integrate <ws> <task>
+--all` is one-shot per row: the first pass marks each agent record `merged`, and
+`worktree.integrate` selects `status == "active"`, so a second pass refuses with
+*"no active worktrees for task ..."*. clever-mole hit this running the 6.3
+integration on this change and completed the merge by hand with `git`. R4's
+scenarios are all satisfied — the spec requires the record be marked merged and
+says nothing about re-running — but the documented command cannot be re-run
+after any further change lands, and it shares its `status == "active"` filter
+with the cleanup-leak defect (`stop_task`/`clean_task` skipping merged rows and
+leaking their microVMs), which is what makes the pair bite together.
+
 ### R5. Sandbox lifecycle follows amux lifecycle without silent data loss
 
 | Scenario | Implementation | Test | Mutation |
@@ -166,8 +211,8 @@ misty-panda real time.
 | Scenario | Implementation | Test | Mutation |
 |---|---|---|---|
 | User inspects a mixed installation — **`ctx` and list halves** | `core.runtime_fields` (`core.py:562-580`), `utils.context_to_string` runtime line (`utils.py:57-61`), shared shape via `sandbox_client.runtime_to_string` | `test_runtime_visibility.py` — 16 tests: `test_the_runtime_line_shape_is_exactly_the_agreed_one`, `test_the_host_renderer_uses_that_same_function`, `test_a_host_agent_gets_no_runtime_line`, `test_a_sandbox_row_contributes_its_runtime_identity`, `test_a_host_row_contributes_nothing`, `test_lifecycle_states_are_carried_through`, `test_a_degraded_state_is_marked_not_renamed` | Return the runtime keys for host rows too → `test_a_host_agent_gets_no_runtime_line` and `test_a_host_row_contributes_nothing` fail; change the line format → the shape test fails |
-| User inspects a mixed installation — **monitor half** | **none** | **none** | **F1 — no implementation, no test, no mutation** |
-| (same requirement) `stopped` state resolution | **none** | **none** | **F2 — no implementation** |
+| **monitor half — RESOLVE** | `events.pane_states` now takes the registry in one query (`events.py:407`) and spreads `**runtime_identity(rows.get(pane))` into each entry (`events.py:436`); `runtime_identity` delegates to `core.runtime_fields` so the monitor and `ctx` name the fields identically (`events.py:442-454`); `runtime_aware_state` folds VM lifecycle into the pane state, gated on `runtime != host` (`events.py:457-476`); `AgentState` gains `stopped` (`events.py:20`) | `test_monitor_runtime.py` — 11 tests, incl. `test_a_sandbox_agent_is_distinguishable_in_the_monitor`, `test_a_host_agent_monitor_row_is_unchanged`, `test_a_pane_with_no_execution_row_is_unchanged`, `test_a_stopped_sandbox_reads_as_stopped_not_idle`, `test_a_host_agent_is_never_reported_stopped`, `test_the_monitor_and_ctx_agree_about_runtime_identity`; plus `test_state_reports_the_panes_in_the_callers_workspace` pinning all three pane shapes through `GET /v1/events/state` | **Three executed, all kill tests.** See §2 M-R6a/b/c |
+| **monitor half — SHOW** | `tui/src/types.ts` (`stopped` in `AgentState`, with a comment that it has no event kind and comes from the execution row), `theme.ts` (`[STOP ]`, cyan, dim), `useAmuxState.ts:32` (`stopped: 0`, so the NaN bucket is gone), `Header.tsx` (`as const satisfies` + inline `Exclude` guard, additionally excluding `unknown` because it is the TUI's own fallback and legitimately has no header bucket) | The `Exclude` guard is the coverage: it is a compile-time assertion that every `AgentState` has a header bucket. No runtime test exists — `tui/` has no test runner, no test file, and nothing cross-checking `METRICS` against `STATE_STYLE` | Remove the `stopped` entry from `METRICS` → `tsc` fails naming the missing state. **Verified by clever-mole on the pinned TypeScript 5.9.3, by mutation not by claim.** Label: *implemented; state-bucket coverage compiler-enforced; **rendering never executed*** — type-checking the TUI is not running it, and nobody has run the monitor |
 
 ### R7. Prototype behavior is verifiable without a live provider session
 
@@ -258,8 +303,13 @@ Everything else in this map is proven offline.
 
 ## 6. Expected to go stale first
 
-1. **F1/F2** — if misty-panda implements the monitor half, R6's rows change and
-   F3 resolves with them.
+1. ~~**F1/F2** — if misty-panda implements the monitor half, R6's rows change and
+   F3 resolves with them.~~ **Happened**: fixed in `8786f6c`/`dc487a7`, R6 rows
+   re-run against `f30c43b`, F3 resolved with them.
+1. The cleanup-leak fix (`stop_task`/`clean_task` selecting `status == "active"`
+   and so leaking every microVM of an integrated task) is still outstanding, and
+   it lands in `runtime.py:288`/`:593` — the same lines several R5 and R14 rows
+   cite.
 2. Any row citing `runtime.py` line numbers (`208`, `239-288`, `593`, `621`) —
    these are the newest code in the change.
 3. `cli.py:163-169` (`_check_force`) — landed in 5.3, the most recent CLI edit.
