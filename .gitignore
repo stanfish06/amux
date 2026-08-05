@@ -3,7 +3,7 @@ build/
 dist/
 *.egg-info/
 __pycache__/
-tests/
+.venv/
 result
 docs/
 worktrees/

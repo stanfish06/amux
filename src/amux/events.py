@@ -106,6 +106,23 @@ def _wait_channel(pane: str) -> str:
     return f"amux-state-{pane.lstrip('%')}"
 
 
+def publish_state(pane: str, state: AgentState, socket: str) -> None:
+    """Set a pane's state option and wake anything waiting on it.
+
+    Split out of `emit` because the context service needs exactly this and not
+    the store write beside it: `emit` attributes an event to whichever worktree
+    the pane fronts *now*, which is right for a hook running inside that pane
+    and wrong for a capability token, whose pane id tmux may since have
+    recycled onto a different agent. The service writes the event itself with
+    the identity its token is bound to, then calls this to move the pane.
+
+    Both halves stay here so there is one place that knows the option name and
+    the wait channel.
+    """
+    _tmux(socket, "set-option", "-p", "-t", pane, STATE_OPTION, state)
+    _tmux(socket, "wait-for", "-S", _wait_channel(pane))
+
+
 def _scope_from_registry(pane: str) -> tuple[str, str]:
     """Fallback for a pane tmux no longer has: the worktree it fronted.
     Unbounded on purpose — a gone pane has no session to date rows against."""
@@ -161,8 +178,7 @@ def emit(
         detail=detail,
         worktree_since=facts.boundary,
     )
-    _tmux(socket, "set-option", "-p", "-t", pane, STATE_OPTION, event.state)
-    _tmux(socket, "wait-for", "-S", _wait_channel(pane))
+    publish_state(pane, event.state, socket)
     return event
 
 

@@ -12,12 +12,28 @@ PYINSTALLER_MODE := --onedir
 AMUX_BIN := $(CURDIR)/dist/amux/amux
 endif
 
-dev:
-	pipenv run pip install -e ".[dev]"
+VENV := $(CURDIR)/.venv
 
+dev:
+	uv sync --extra dev
+
+# The sandbox shim must ship as DATA, not just as a compiled module. PyInstaller
+# puts amux's modules in the archive inside the executable and no .py on disk, but
+# `docker-sandbox` spawning copies sandbox_client.py into the microVM as a file --
+# so without this a packaged amux dies at shim installation on every sandbox spawn.
+# Affects --onefile and --onedir alike, so both get it from PYINSTALLER_MODE.
+#
+# Two things this line cannot get wrong quietly:
+#   $(CURDIR) is required. --add-data resolves a relative source against
+#   --specpath, which is `build` below, so the relative form fails the build with
+#   "Unable to find build/src/amux/sandbox_client.py".
+#   The `:amux` destination must stay. It is what makes the unpacked file land
+#   exactly where sandbox_client.__file__ points; changing it re-breaks shim
+#   installation with no build error at all.
 build: dev
-	pipenv run env -u PYTHONPATH pyinstaller $(PYINSTALLER_MODE) --name amux \
+	env -u PYTHONPATH $(VENV)/bin/pyinstaller $(PYINSTALLER_MODE) --name amux \
 		--paths src \
+		--add-data $(CURDIR)/src/amux/sandbox_client.py:amux \
 		--specpath build --workpath build --distpath dist \
 		-y src/amux/cli.py
 
