@@ -15,6 +15,7 @@ import json
 import logging
 import socket
 import sqlite3
+import time
 from dataclasses import dataclass
 
 import pytest
@@ -88,6 +89,23 @@ class Client:
     def messages(self) -> list[str]:
         return [r.getMessage() for r in self.records]
 
+    def wait_for_log(self, needle: str, timeout: float = 5.0) -> str:
+        """Block until a log record containing `needle` exists, then return all.
+
+        The access line is written after the response is flushed, so a client
+        holding its answer can be ahead of the log. Waiting for the record keeps
+        this deterministic: an intermittently green leak test is worse than a
+        red one, because it teaches everyone to re-run until it passes.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            joined = "\n".join(self.messages)
+            if needle in joined:
+                return joined
+            time.sleep(0.01)
+        raise AssertionError(f"no log record containing {needle!r} within {timeout}s")
+
+
 
 class _Capture(logging.Handler):
     """Collects records so the redaction tests can read what would be written."""
@@ -106,6 +124,10 @@ def _config(tmp_path, **overrides) -> cs.ServiceConfig:
         "port": 0,
         "db_path": tmp_path / "context.db",
         "state_dir": tmp_path / "state",
+        # A test starts and stops a server per case, and shutdown() blocks until
+        # the accept loop next checks its flag. A daemon's 0.5s would be most of
+        # this file's runtime.
+        "shutdown_poll_s": 0.01,
     }
     return cs.ServiceConfig(**{**settings, **overrides})
 
@@ -610,8 +632,7 @@ def test_request_logs_never_carry_the_token(authed):
         body=b'{"text": "hello", "token": "sekrit-abc123"}',
         headers={"Content-Type": "application/json"},
     )
-    joined = "\n".join(authed.messages)
-    assert joined  # the access line was written
+    joined = authed.wait_for_log("/v1/nope")
     assert "sekrit-abc123" not in joined
     assert "hello" not in joined  # bodies are never logged either
 
