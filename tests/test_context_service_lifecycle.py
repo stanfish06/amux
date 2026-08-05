@@ -18,6 +18,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -198,6 +199,69 @@ def _bindable_port() -> int:
         f" port the service can bind"
     )
     return BINDABLE_PORT
+
+
+def _bad_listener(behaviour: str):
+    """A real listener on a real port that is not the context service.
+
+    `reset` closes without answering, which is what a denied network policy
+    looks like from the client's side (note #63) rather than the
+    name-resolution failure one might expect. `garbage` answers with something
+    that is not HTTP, which is what a port collision looks like.
+    """
+    sock = socket.socket()
+    sock.bind((cs.LOOPBACK, 0))
+    sock.listen(1)
+
+    def run() -> None:
+        try:
+            conn, _ = sock.accept()
+        except OSError:
+            return
+        try:
+            conn.recv(4096)
+            if behaviour == "garbage":
+                conn.sendall(b"hello there\r\n\r\n")
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return sock, int(sock.getsockname()[1])
+
+
+@pytest.mark.parametrize("behaviour", ["reset", "garbage"])
+def test_a_probe_treats_every_failure_as_no_answer(behaviour):
+    """Never a traceback and never a guess about the cause: a non-HTTP responder
+    raises `HTTPException`, not `OSError`, and a policy denial is a reset rather
+    than a resolution failure."""
+    sock, port = _bad_listener(behaviour)
+    try:
+        assert cs.probe_health(port, timeout=3.0) is None
+    finally:
+        sock.close()
+
+
+@pytest.mark.parametrize("behaviour", ["reset", "garbage"])
+def test_something_else_on_the_port_reads_as_unresponsive(config, behaviour):
+    """The state that already exists for this: a live pid whose port answers
+    nothing usable. Reported, not crashed on, and not doubled up beside."""
+    sock, port = _bad_listener(behaviour)
+    try:
+        cs.write_runfile(config, cs.RunFile(pid=os.getpid(), port=port, started_ts=1.0))
+        result = cs.status(config)
+        assert result.state == "unresponsive"
+        assert str(port) in result.message
+        assert "stop it before starting another" in result.message
+
+        launched = []
+        with pytest.raises(cs.ServiceLifecycleError):
+            cs.start(config, launcher=lambda c: launched.append(1))
+        assert launched == []
+    finally:
+        sock.close()
 
 
 # --- serve ---

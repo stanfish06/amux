@@ -1568,10 +1568,20 @@ def _pid_alive(pid: int) -> bool:
 
 
 def probe_health(port: int, timeout: float = 2.0) -> dict[str, Any] | None:
-    """`GET /healthz` against a loopback port, or None if nothing answered.
+    """`GET /healthz` against a loopback port, or None if nothing usable answered.
 
     A degraded service still answers, so the payload — not the status — is what
     says whether it is usable.
+
+    Every failure is the same answer, deliberately, and the *kind* of failure is
+    never branched on. Two reasons. A blocked host surfaces as a connection
+    reset, not a name-resolution error (note #63: a real balanced-policy denial
+    of `host.docker.internal` reads as "Remote end closed connection without
+    response"), so code that expected a resolution failure would send the user
+    to fix a hostname that is fine. And something non-HTTP listening on the port
+    raises `HTTPException` rather than `OSError` — `BadStatusLine` for a server
+    that answers with anything else — which is a port collision, exactly the
+    case `status` calls unresponsive, and it must not arrive as a traceback.
     """
     conn = http.client.HTTPConnection(LOOPBACK, port, timeout=timeout)
     try:
@@ -1579,7 +1589,7 @@ def probe_health(port: int, timeout: float = 2.0) -> dict[str, Any] | None:
         response = conn.getresponse()
         payload = json.loads(response.read() or b"{}")
         return payload if isinstance(payload, dict) else None
-    except (OSError, ValueError):
+    except (OSError, ValueError, http.client.HTTPException):
         return None
     finally:
         conn.close()
