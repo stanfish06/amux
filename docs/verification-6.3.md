@@ -26,7 +26,22 @@ merged happy-deer   (amux/amux/docker/happy-deer)   —  7 commit(s), 21 files, 
 merged misty-panda  (amux/amux/docker/misty-panda)  — 13 commit(s), 18 files, +2408/−113
 ```
 
-Zero conflicts. The merge used the feature this change adds, on its own change.
+Zero conflicts.
+
+**Correction, and it matters for how much this proves.** An earlier draft said
+this "used the feature this change adds, on its own change". It did not. `amux`
+on `PATH` is a binary built before any of this work — it contains no `doctor`
+and no `context-service` subcommand at all — so every `amux integrate` run here
+exercised the *pre-change* host-worktree path, not the sandbox-branch
+integration this change adds. It is evidence that host integration still works,
+and nothing more.
+
+A second `amux integrate` refused with `no active worktrees for task 'docker'`,
+because the first pass marks rows `merged` and `worktree.py` selects
+`status == "active"`. The remaining merges here were done by hand with `git`.
+That refusal was also observed with the pre-change binary, so treat it as
+consistent with reading `worktree.py:289` rather than as a measurement of this
+tree.
 
 ## Automated suite
 
