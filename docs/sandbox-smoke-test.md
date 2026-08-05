@@ -10,7 +10,13 @@ go. Steps are ordered so that anything which can fail cheaply fails first.
 
 - **Time:** about 45 minutes, most of it waiting on sandbox creation.
 - **You need:** a macOS or Linux host with Docker Sandboxes installed and signed
-  in, a Claude and a Codex credential, and roughly 40 GB of free disk.
+  in, and roughly 15 GB of free disk (measured: ~2.4 GB per sandbox).
+- **Provider credentials must be set on the host first**, or every agent comes up
+  logged out and no agent-driven step can run:
+  `sbx secret set -g openai --oauth` (and the Claude equivalent). A sandbox
+  created without them still spawns, installs its shim and exchanges context — but
+  its agent sits at a login prompt, so hooks never fire and pane state never
+  changes by itself.
 - **You do not need:** any knowledge of the amux internals. Where a step depends
   on something subtle, the step says so.
 
@@ -32,6 +38,21 @@ Read these once. Two of them can destroy work.
    amux and it is not undone by cleanup. Step 0 asks you to make it deliberately.
 4. Sandboxes hold live provider credentials. Treat a sandbox you cannot account
    for as you would a stray shell with your tokens in it: `sbx rm` it.
+5. **Isolate the run from your live amux state.** The smoke test writes registry
+   rows, notes and events, and creates tmux sessions. Against the default state
+   that is the same `context.db` and the same `amux-root` server your real work
+   uses. Give it its own of both:
+
+   ```sh
+   export XDG_STATE_HOME=/tmp/amux-smoke-state   # its own context.db + worktrees
+   alias sm='amux -L amux-smoke'                 # its own tmux server
+   ```
+
+   Every `amux` below means `sm`. Confirm before spawning anything:
+
+   ```sh
+   python3 -c 'from amux import store; print(store.DB_PATH)'   # must be under /tmp
+   ```
 
 ---
 
@@ -119,10 +140,15 @@ sandboxes running:
 
 ```sh
 sbx ls --json
-docker system df
-vm_stat | head -5              # macOS; use `free -m` on Linux
-df -h / | tail -1
+df -k / | tail -1                                  # disk; see note below
+ps -Ao pid,pcpu,rss,comm | grep containerd-shim-nerdbox   # per-VM footprint
 ```
+
+`docker system df` is **not** usable here: Docker Sandboxes ships no `docker`
+CLI, and there is no Docker Desktop data directory to size. Use `df -k /` for
+disk. Do not use `vm_stat` "pages free" for memory — macOS compresses and
+reclaims, so the delta is meaningless. Each microVM is one host
+`containerd-shim-nerdbox-v1` process, so its RSS *is* the per-sandbox figure.
 
 ---
 
@@ -527,10 +553,17 @@ where step 2b's answer shows up:** if hooks need approval, Codex will sit at
 its commits are reachable on the host through a `sandbox-<name>` git remote.
 Integration never imports uncommitted files.
 
+> **Order matters, and not the way you would guess.** `integrate` marks every
+> worktree row `merged`, and both the stop and cleanup paths only act on `active`
+> rows — so running it before the real commit consumes the rows and nothing
+> afterwards can integrate, stop, or clean that task. Commit *first*, integrate
+> *once*, and do the uncommitted-work check in the same pass.
+
 ```sh
-# Uncommitted work first: it must NOT appear on the host.
+# Uncommitted work must NOT appear on the host. Left in place deliberately: the
+# commit below uses `-a`, which does not add an untracked file, so one integrate
+# proves both halves.
 sbx exec "$BOX_A" sh -lc 'cd ~/*/ && echo "dirty" > uncommitted.txt && git status --short'
-amux integrate "$WS" "$TASK"        # expect no delta from A
 
 # Now commit properly.
 sbx exec "$BOX_A" sh -lc 'cd ~/*/ && git checkout -b smoke-change 2>/dev/null; \
@@ -641,10 +674,17 @@ deliberately in step 6 is the only acceptable occurrence, and it is now revoked.
 ## Step 12 — Restore the host
 
 ```sh
-sbx ls --json                      # empty of smoke sandboxes
+# amux cleanup does NOT remove a sandbox whose row is `merged`, and it reports
+# success anyway -- so check, and finish the job by hand.
+sbx ls --json
+sbx rm -f $(sbx ls --json | python3 -c 'import json,sys; print(" ".join(s["name"] for s in json.load(sys.stdin)["sandboxes"]))')
+sbx ls --json                      # must now be empty
+
 amux context-service stop
-rm -rf "$SMOKE"
-docker system df                   # compare to step 0d; note reclaimable space
+sbx policy rm network --id "$RULE_ID"   # printed when you added it
+sbx policy ls                      # allow count back to its pre-test value
+rm -rf "$SMOKE" "$XDG_STATE_HOME"
+df -k / | tail -1                  # compare to step 0e
 ```
 
 `sbx policy init` is **not** undone — it is a host-wide decision you made in
@@ -722,9 +762,10 @@ State these alongside the results rather than leaving them implied.
 
 - **One host, one profile.** Nothing here says anything about a different OS,
   less RAM, another `sbx` version, or a different policy profile.
-- **Resource attribution is host-level.** Unless `sbx ls --json` reports
-  per-sandbox usage, the four-agent numbers are a delta for the whole Docker VM,
-  not a per-agent measurement.
+- **Resource attribution comes from the host process table, not from `sbx`.**
+  `sbx ls --json` reports no cpu or memory fields at all (confirmed). Per-sandbox
+  figures come from each microVM's `containerd-shim-nerdbox-v1` process; disk is a
+  whole-volume `df` delta and cannot be split per sandbox.
 - **Latency is one cold run.** Image pulls, provider warm-up and disk cache make
   the first spawn unrepresentative. Note whether images were already local.
 - **The conflict and rollback paths are only sampled.** Transactional rollback
@@ -732,3 +773,18 @@ State these alongside the results rather than leaving them implied.
   provoking a real mid-creation failure is not part of this guide.
 - **No adversarial testing.** This verifies that the boundary holds under normal
   operation. It is not an attempt to break out of it.
+- **Nothing agent-driven is covered without provider credentials.** Hooks fire on
+  agent activity, so a logged-out sandbox can never demonstrate a hook-driven
+  state transition. Every context operation is still testable by invoking the shim
+  through `sbx exec`, which is what the steps above do — but that exercises the
+  *service* path, not the *hook* path.
+- **Kill your own long-running probes with `timeout`.** A killed process group can
+  leave an orphaned `sbx exec` behind, and the next measurement then blocks on it
+  and looks like a service bug. Two apparent concurrency failures in the first run
+  of this guide were exactly that.
+- **Stop the context service even if you abandon the run.**
+  `context-service start` detaches deliberately, so it outlives the shell, the
+  test, and an aborted smoke test. It then squats the default port 47317 and
+  breaks anything that binds it — in the second run of this guide it survived to
+  the end and failed two of someone else's tests. `context-service stop` belongs
+  in your cleanup unconditionally, not only on the success path.
