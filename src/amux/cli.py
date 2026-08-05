@@ -140,9 +140,36 @@ def _cmd_spw(server, args) -> int:
     return 0
 
 
+def _workspace_dir(workspace: str) -> str | None:
+    """Where a task runs when `-p` is omitted: the workspace's own repository.
+
+    From the registry rather than from tmux, because both tmux answers are
+    wrong. `#{session_path}` reads back as `.` for a session created with a
+    relative start directory, and a pane's current path is the *agent's*
+    worktree -- a secondary checkout, whose `repo_root` is itself rather than
+    the repository, and which `sbx create --clone` refuses outright. The
+    registry holds what amux recorded when the workspace was spawned, which is
+    the primary checkout.
+
+    None when nothing is recorded: a workspace spawned outside a repository has
+    no directory to resolve, and inventing one is worse than passing the None
+    that preflight will report on.
+    """
+    for row in reversed(store.worktrees_for(workspace)):
+        if row["repo"]:
+            return row["repo"]
+    return None
+
+
 def _cmd_spg(server, args) -> int:
     chosen = _resolve_runtime(args)  # see `_cmd_spw`
     session = _get_session(server, args.workspace)
+    # `-p` is documented as defaulting to the workspace directory, and nothing
+    # downstream implemented that: the None travelled into
+    # `runtime.preflight`, where the sandbox runtime cannot find a repository
+    # and refuses, and into `HostRuntime._worktrees`, which returns {} for a
+    # falsy cwd and so skips per-agent worktrees without saying so.
+    cwd = args.path or _workspace_dir(args.workspace)
     nrows, ncols, agents = _resolve_grid(args)
     grid = core.spawn_agent_grid(
         session,
@@ -150,7 +177,7 @@ def _cmd_spg(server, args) -> int:
         nrows=nrows,
         ncols=ncols,
         agents=agents,
-        cwd=args.path,
+        cwd=cwd,
         runtime=chosen,
     )
     print(
