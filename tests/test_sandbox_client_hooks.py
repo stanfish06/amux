@@ -79,7 +79,7 @@ def test_every_hook_carries_a_timeout_so_an_unreachable_host_cannot_stall_the_ag
 
 
 def test_tool_events_get_a_match_all_matcher_and_prompt_submit_gets_none():
-    document = merged_claude("claude_template_empty.json")
+    document = merged_claude("claude_synthetic_empty.json")
     amux_group = document["hooks"]["PreToolUse"][-1]
     assert amux_group["matcher"] == ""
     assert "matcher" not in document["hooks"]["UserPromptSubmit"][-1]
@@ -91,13 +91,13 @@ def test_tool_events_get_a_match_all_matcher_and_prompt_submit_gets_none():
 def test_settings_outside_hooks_are_untouched():
     before = json.loads(fixture("claude_template.json"))
     after = merged_claude("claude_template.json")
-    assert after["model"] == before["model"]
-    assert after["permissions"] == before["permissions"]
+    assert {k: v for k, v in after.items() if k != "hooks"} == before
+    assert before["defaultMode"] == "bypassPermissions"  # the image really ships this
 
 
 def test_a_templates_own_hooks_are_preserved_exactly():
-    before = json.loads(fixture("claude_template_with_hooks.json"))
-    after = merged_claude("claude_template_with_hooks.json")
+    before = json.loads(fixture("claude_synthetic_with_hooks.json"))
+    after = merged_claude("claude_synthetic_with_hooks.json")
     for event, groups in before["hooks"].items():
         assert after["hooks"][event][: len(groups)] == groups
 
@@ -106,7 +106,7 @@ def test_amux_appends_its_own_group_rather_than_joining_someone_elses():
     """Joining a template group would inherit its matcher: the template's
     PreToolUse group matches only Bash, so a busy hook added there would fire
     for one tool instead of all of them."""
-    after = merged_claude("claude_template_with_hooks.json")
+    after = merged_claude("claude_synthetic_with_hooks.json")
     groups = after["hooks"]["PreToolUse"]
     assert len(groups) == 2
     assert groups[0]["matcher"] == "Bash"
@@ -116,7 +116,7 @@ def test_amux_appends_its_own_group_rather_than_joining_someone_elses():
 
 
 def test_the_source_document_is_not_mutated():
-    existing = json.loads(fixture("claude_template_with_hooks.json"))
+    existing = json.loads(fixture("claude_synthetic_with_hooks.json"))
     snapshot = json.dumps(existing, sort_keys=True)
     sh.merge_claude_settings(existing, shim=SHIM, config_path=CONFIG)
     assert json.dumps(existing, sort_keys=True) == snapshot
@@ -129,14 +129,14 @@ def test_a_missing_settings_file_produces_a_valid_document_from_nothing():
 
 
 def test_merging_twice_does_not_stack_duplicate_hooks():
-    once = merged_claude("claude_template_with_hooks.json")
+    once = merged_claude("claude_synthetic_with_hooks.json")
     twice = sh.merge_claude_settings(once, shim=SHIM, config_path=CONFIG)
     assert twice == once
 
 
 def test_the_rendered_settings_are_valid_json():
-    text = sh.render_claude_settings(merged_claude("claude_template_with_hooks.json"))
-    assert json.loads(text) == merged_claude("claude_template_with_hooks.json")
+    text = sh.render_claude_settings(merged_claude("claude_synthetic_with_hooks.json"))
+    assert json.loads(text) == merged_claude("claude_synthetic_with_hooks.json")
     assert text.endswith("\n")
 
 
@@ -159,7 +159,7 @@ def merged_codex(name: str | None) -> dict:
 def test_codex_reaches_every_amux_kind_through_its_hook_events():
     """Codex is not structurally weaker than Claude: `hooks.json` has the events
     for all four kinds, with PermissionRequest standing in for Notification."""
-    document = merged_codex("codex_hooks_template_empty.json")
+    document = merged_codex("codex_synthetic_hooks_empty.json")
     kinds = {
         command.rsplit("event emit ", 1)[1].split()[0]
         for event in sh.CODEX_EVENT_KINDS
@@ -168,21 +168,36 @@ def test_codex_reaches_every_amux_kind_through_its_hook_events():
     assert kinds == {"busy", "stop", "notify", "exit"}
 
 
+def test_codex_session_end_asks_for_the_timeout_codex_will_actually_grant():
+    """Codex caps SessionEnd at 3s and warns on every run when asked for more
+    ("clamping SessionEnd hook timeout to 3s"), observed on codex-cli 0.146.0 in
+    the real image. Asking for 3 keeps that noise out of the agent's output."""
+    document = merged_codex("codex_synthetic_hooks_empty.json")
+    timeout_for = lambda e: document["hooks"][e][-1]["hooks"][0]["timeout"]  # noqa: E731
+    assert timeout_for("SessionEnd") == 3
+    assert timeout_for("PreToolUse") == sh.HOOK_TIMEOUT  # everything else unchanged
+
+
+def test_claude_session_end_is_not_clamped_because_only_codex_caps_it():
+    document = merged_claude("claude_template.json")
+    assert document["hooks"]["SessionEnd"][-1]["hooks"][0]["timeout"] == sh.HOOK_TIMEOUT
+
+
 def test_codex_has_no_notification_event_and_uses_permission_request():
     assert "Notification" not in sh.CODEX_EVENT_KINDS
     assert sh.CODEX_EVENT_KINDS["PermissionRequest"] == "notify"
 
 
 def test_codex_hooks_name_the_codex_agent_not_claude():
-    document = merged_codex("codex_hooks_template_empty.json")
+    document = merged_codex("codex_synthetic_hooks_empty.json")
     for event in sh.CODEX_EVENT_KINDS:
         for command in commands(document, event):
             assert command.endswith("--agent codex")
 
 
 def test_a_codex_templates_own_hooks_are_preserved():
-    before = json.loads(fixture("codex_hooks_template.json"))
-    after = merged_codex("codex_hooks_template.json")
+    before = json.loads(fixture("codex_synthetic_hooks.json"))
+    after = merged_codex("codex_synthetic_hooks.json")
     groups = after["hooks"]["PreToolUse"]
     assert groups[0] == before["hooks"]["PreToolUse"][0]
     assert groups[0]["hooks"][0]["statusMessage"] == "Auditing tool use"
@@ -191,13 +206,13 @@ def test_a_codex_templates_own_hooks_are_preserved():
 
 def test_every_codex_event_carries_a_match_all_matcher():
     """Unlike Claude, the verified Codex config puts a matcher on every event."""
-    document = merged_codex("codex_hooks_template_empty.json")
+    document = merged_codex("codex_synthetic_hooks_empty.json")
     for event in sh.CODEX_EVENT_KINDS:
         assert document["hooks"][event][-1]["matcher"] == ""
 
 
 def test_merging_codex_hooks_twice_is_a_no_op():
-    once = merged_codex("codex_hooks_template.json")
+    once = merged_codex("codex_synthetic_hooks.json")
     assert sh.merge_codex_hooks(once, shim=SHIM, config_path=CONFIG) == once
 
 
@@ -213,8 +228,9 @@ def test_the_hooks_feature_is_enabled_under_features_not_at_top_level():
 
 def test_a_features_table_is_appended_when_the_image_has_none():
     """A new table header is safe at the end of a file; a bare key would land in
-    whichever table happens to be last."""
-    text = sh.enable_codex_hooks(fixture("codex_template.toml"))
+    whichever table happens to be last. Uses the synthetic fixture: the real
+    image config has no tables, so it cannot exercise this."""
+    text = sh.enable_codex_hooks(fixture("codex_synthetic_with_tables.toml"))
     document = tomllib.loads(text)
     assert document["features"]["hooks"] is True
     assert document["projects"]["/work/repo"] == {"trust_level": "trusted"}
@@ -222,7 +238,7 @@ def test_a_features_table_is_appended_when_the_image_has_none():
 
 
 def test_hooks_false_in_an_existing_features_table_is_switched_on():
-    text = sh.enable_codex_hooks(fixture("codex_config_hooks_off.toml"))
+    text = sh.enable_codex_hooks(fixture("codex_synthetic_hooks_off.toml"))
     document = tomllib.loads(text)
     assert document["features"]["hooks"] is True
     assert document["features"]["js_repl"] is False  # sibling survives
@@ -230,12 +246,12 @@ def test_hooks_false_in_an_existing_features_table_is_switched_on():
 
 
 def test_a_replaced_feature_line_is_commented_not_deleted():
-    text = sh.enable_codex_hooks(fixture("codex_config_hooks_off.toml"))
+    text = sh.enable_codex_hooks(fixture("codex_synthetic_hooks_off.toml"))
     assert "# amux replaced this: hooks = false" in text
 
 
 def test_an_already_enabled_config_is_left_untouched():
-    before = fixture("codex_config_hooks_on.toml")
+    before = fixture("codex_synthetic_hooks_on.toml")
     assert sh.enable_codex_hooks(before) == before
     assert sh.codex_hooks_enabled(before) is True
 
@@ -293,8 +309,9 @@ def test_codex_notify_is_pointed_at_the_amux_dispatch_script():
 
 def test_a_new_notify_is_prepended_so_it_cannot_land_inside_a_table():
     """Appending would put the key inside whichever table is last in the file,
-    which is a different setting entirely."""
-    text, _ = sh.merge_codex_config(fixture("codex_template.toml"))
+    which is a different setting entirely. Synthetic fixture: the real image
+    config has no tables."""
+    text, _ = sh.merge_codex_config(fixture("codex_synthetic_with_tables.toml"))
     document = tomllib.loads(text)
     assert document["notify"] == [sh.CODEX_DISPATCH_PATH]
     assert document["projects"]["/work/repo"] == {"trust_level": "trusted"}
@@ -310,20 +327,20 @@ def test_other_codex_settings_survive():
 
 
 def test_an_existing_notify_is_returned_so_it_can_be_chained():
-    text, previous = sh.merge_codex_config(fixture("codex_template_with_notify.toml"))
+    text, previous = sh.merge_codex_config(fixture("codex_synthetic_with_notify.toml"))
     assert previous == ["/opt/template/notify.sh", "turn-ended"]
     assert tomllib.loads(text)["notify"] == [sh.CODEX_DISPATCH_PATH]
 
 
 def test_a_replaced_notify_is_commented_out_not_deleted():
-    text, _ = sh.merge_codex_config(fixture("codex_template_with_notify.toml"))
+    text, _ = sh.merge_codex_config(fixture("codex_synthetic_with_notify.toml"))
     assert '# notify = ["/opt/template/notify.sh", "turn-ended"]' in text
     assert tomllib.loads(text)["notify"] == [sh.CODEX_DISPATCH_PATH]
 
 
 def test_a_multiline_notify_array_is_replaced_whole():
     text, previous = sh.merge_codex_config(
-        fixture("codex_template_multiline_notify.toml")
+        fixture("codex_synthetic_multiline_notify.toml")
     )
     assert previous == ["/opt/template/notify.sh", "turn-ended", "--verbose"]
     document = tomllib.loads(text)
@@ -332,7 +349,7 @@ def test_a_multiline_notify_array_is_replaced_whole():
 
 
 def test_merging_codex_twice_is_a_no_op():
-    once, _ = sh.merge_codex_config(fixture("codex_template_with_notify.toml"))
+    once, _ = sh.merge_codex_config(fixture("codex_synthetic_with_notify.toml"))
     twice, previous = sh.merge_codex_config(once)
     assert twice == once
     assert previous is None
@@ -399,7 +416,9 @@ def test_the_dispatch_script_quotes_a_chained_command_with_spaces():
 
 
 def test_without_a_previous_notify_the_script_does_not_exec_anything():
-    assert "exec" not in sh.render_codex_dispatch(SHIM, CONFIG)
+    script = sh.render_codex_dispatch(SHIM, CONFIG)
+    assert "event emit stop --agent codex" in script  # it is a real script
+    assert "exec" not in script
 
 
 # --- honest coverage ---------------------------------------------------------
@@ -440,21 +459,34 @@ def test_an_unsupported_agent_is_refused_by_name():
     assert "claude" in str(failure.value)
 
 
-# --- the fixtures are honest about being assumed -----------------------------
+# --- the fixtures say honestly where they came from --------------------------
 
 
-def test_the_runtime_can_tell_that_a_hook_location_is_unverified():
-    """`paths_are_assumed` is what lets preflight say "hooks installed, location
-    unverified" instead of implying it checked. The flag flips to False when the
-    fixtures are re-recorded; this asserts the signal exists, not its value."""
+def test_both_hook_locations_are_recorded_rather_than_assumed():
+    """Verified against real images on 2026-08-05, so preflight may now say the
+    location was checked. If a future image moves one, re-record and set the flag
+    back — `location_verified` is what stops us implying we looked when we did
+    not."""
     for adapter in (sh.CLAUDE, sh.CODEX):
-        assert isinstance(adapter.paths_are_assumed, bool)
+        assert adapter.paths_are_assumed is False
         assert adapter.settings_relpath and not adapter.settings_relpath.startswith("/")
 
 
-def test_the_fixture_readme_documents_how_to_re_record_against_a_real_image():
+def test_recorded_and_synthetic_fixtures_are_distinguishable_by_name():
+    """A re-record must not "correct" an invented edge case into uselessness: the
+    real Codex config has no TOML tables, so the table hazard only has a
+    synthetic fixture."""
+    names = {p.name for p in FIXTURES.iterdir() if p.name != "README.md"}
+    recorded = {n for n in names if "_template" in n}
+    synthetic = {n for n in names if "_synthetic_" in n}
+    assert recorded == {"claude_template.json", "codex_template.toml"}
+    assert synthetic and recorded | synthetic == names
+
+
+def test_the_fixture_readme_records_what_was_observed_and_how_to_redo_it():
     readme = (FIXTURES / "README.md").read_text()
-    assert "ASSUMED" in readme
+    for observed in ("2.1.221", "codex-cli 0.146.0", "/home/agent", "synthetic"):
+        assert observed in readme
     for step in ("sbx create", "sbx exec", "sbx rm", "paths_are_assumed"):
         assert step in readme
 
@@ -482,12 +514,12 @@ def written(ops, path: str) -> str:
 
 def test_installing_claude_hooks_writes_a_merged_settings_file(tmp_path, installed):
     ops = FakeOps()
-    ops.files["/root/.claude/settings.json"] = fixture("claude_template_with_hooks.json")
+    ops.files["/root/.claude/settings.json"] = fixture("claude_synthetic_with_hooks.json")
     result = sb.install_hooks(ops, "claude", installed, staging_dir=tmp_path)
 
     assert result.settings_path == "/root/.claude/settings.json"
     document = json.loads(written(ops, result.settings_path))
-    assert document["model"] == "claude-opus-4-5"
+    assert document["model"] == "claude-opus-4-5"  # the synthetic fixture's own key
     assert len(document["hooks"]["PreToolUse"]) == 2  # template's plus ours
     assert result.missing_kinds == ()
     assert result.degraded is False
@@ -514,7 +546,7 @@ def codex_ops(version: str = "codex-cli 0.146.0", **files) -> FakeOps:
 
 
 def test_a_current_codex_gets_hooks_json_and_is_not_degraded(tmp_path, installed):
-    ops = codex_ops(**{"/root/.codex/hooks.json": fixture("codex_hooks_template.json")})
+    ops = codex_ops(**{"/root/.codex/hooks.json": fixture("codex_synthetic_hooks.json")})
     result = sb.install_hooks(ops, "codex", installed, staging_dir=tmp_path)
 
     assert result.settings_path == "/root/.codex/hooks.json"
@@ -529,7 +561,7 @@ def test_a_current_codex_gets_hooks_json_and_is_not_degraded(tmp_path, installed
 
 def test_installing_codex_hooks_also_switches_the_feature_on(tmp_path, installed):
     """hooks.json alone is inert."""
-    ops = codex_ops(**{"/root/.codex/config.toml": fixture("codex_config_hooks_off.toml")})
+    ops = codex_ops(**{"/root/.codex/config.toml": fixture("codex_synthetic_hooks_off.toml")})
     sb.install_hooks(ops, "codex", installed, staging_dir=tmp_path)
     config = tomllib.loads(written(ops, "/root/.codex/config.toml"))
     assert config["features"]["hooks"] is True
@@ -537,21 +569,25 @@ def test_installing_codex_hooks_also_switches_the_feature_on(tmp_path, installed
 
 
 def test_a_config_that_already_enables_hooks_is_not_rewritten(tmp_path, installed):
-    ops = codex_ops(**{"/root/.codex/config.toml": fixture("codex_config_hooks_on.toml")})
-    sb.install_hooks(ops, "codex", installed, staging_dir=tmp_path)
+    ops = codex_ops(**{"/root/.codex/config.toml": fixture("codex_synthetic_hooks_on.toml")})
+    result = sb.install_hooks(ops, "codex", installed, staging_dir=tmp_path)
+    # install DID run - hooks.json was written - so the untouched config is a
+    # decision, not a no-op that would satisfy this assertion for free.
+    assert result.settings_path in ops.copied
     assert "/root/.codex/config.toml" not in ops.copied
 
 
 def test_no_dispatch_script_is_installed_for_a_codex_that_has_hooks(tmp_path, installed):
     ops = codex_ops()
-    sb.install_hooks(ops, "codex", installed, staging_dir=tmp_path)
+    result = sb.install_hooks(ops, "codex", installed, staging_dir=tmp_path)
+    assert result.mechanism == "hooks" and result.settings_path in ops.copied
     assert sh.CODEX_DISPATCH_PATH not in ops.copied
 
 
 def test_an_old_codex_falls_back_to_notify_and_is_reported_degraded(tmp_path, installed):
     ops = codex_ops(
         "codex-cli 0.100.0",
-        **{"/root/.codex/config.toml": fixture("codex_template_with_notify.toml")},
+        **{"/root/.codex/config.toml": fixture("codex_synthetic_with_notify.toml")},
     )
     result = sb.install_hooks(ops, "codex", installed, staging_dir=tmp_path)
 
@@ -581,6 +617,8 @@ def test_claude_is_never_version_probed(tmp_path, installed):
     """Claude's hook surface is not conditional, so probing would be noise."""
     ops = FakeOps()
     sb.install_hooks(ops, "claude", installed, staging_dir=tmp_path)
+    assert ops.execs, "no commands ran, so finding no --version proves nothing"
+    assert ["mkdir", "-p", "/root/.claude"] in ops.execs
     assert not any("--version" in " ".join(argv) for argv in ops.execs)
 
 
@@ -605,10 +643,18 @@ def test_hook_files_are_delivered_as_files_not_as_shell_arguments(tmp_path, inst
     make quoting a correctness problem."""
     ops = FakeOps()
     ops.files["/root/.claude/settings.json"] = fixture("claude_template.json")
-    sb.install_hooks(ops, "claude", installed, staging_dir=tmp_path)
+    result = sb.install_hooks(ops, "claude", installed, staging_dir=tmp_path)
+    # the document really was delivered, and as a file
+    assert "bypassPermissions" in written(ops, result.settings_path)
+    assert ops.execs
+    # Naming the path is fine — reading it back, chowning and chmoding all do.
+    # Carrying the document is not, and that is what a heredoc would do.
     for argv in ops.execs:
-        assert "settings.json" not in " ".join(argv) or argv[:2] == ["sh", "-lc"]
-        assert "claude-opus" not in " ".join(argv)
+        assert "bypassPermissions" not in " ".join(argv)
+        assert not any(">" in arg or "<<" in arg for arg in argv[3:])
+    readers = [a for a in ops.execs if a[:2] == ["sh", "-lc"] and a[2].startswith("cat ")]
+    assert len(readers) == 1  # the only command that touches the file's contents
+    assert result.settings_path in readers[0][2]
 
 
 def test_no_hook_staging_file_is_left_on_the_host(tmp_path, installed):
@@ -649,9 +695,9 @@ def test_installed_hooks_point_at_the_delivered_capability_file(tmp_path, instal
 def test_no_fixture_carries_host_specific_configuration():
     """The user's real host config was the format reference; none of it, and no
     host path, may end up in a sandbox."""
-    for path in FIXTURES.iterdir():
-        if path.name == "README.md":
-            continue
+    checked = [p for p in FIXTURES.iterdir() if p.name != "README.md"]
+    assert len(checked) >= 6, "fixtures missing; scanning an empty set proves nothing"
+    for path in checked:
         text = path.read_text()
         for forbidden in ("/Users/", "dot-agents", "nvim-notify", "amux-event.sh"):
             assert forbidden not in text, f"{path.name} leaks host configuration"

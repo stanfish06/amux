@@ -40,6 +40,9 @@ CONFIG_RELPATH = ".config/amux/context.json"
 
 CONFIG_MODE = "600"
 SHIM_MODE = "755"
+#: Hook documents are configuration, not secrets: the agent must own and be able
+#: to rewrite them, and its own tooling reads them.
+HOOK_MODE = "644"
 
 
 class BootstrapError(Exception):
@@ -63,9 +66,31 @@ class SandboxOps(Protocol):
         """Copy a host file to an absolute path inside the sandbox."""
         ...
 
-    def exec(self, argv: Sequence[str]) -> str:
-        """Run a command inside the sandbox and return its stdout."""
+    def exec(self, argv: Sequence[str], *, user: str | None = None) -> str:
+        """Run a command inside the sandbox and return its stdout.
+
+        `user` is `None` for the sandbox's own agent user — the default and the
+        only thing bootstrap wants for almost everything. `"root"` is used solely
+        to chown copied-in files (see `_deliver`); nothing else is escalated.
+        """
         ...
+
+
+@dataclass(frozen=True)
+class SandboxIdentity:
+    """Who the sandbox's agent is, asked rather than assumed.
+
+    The Claude and Codex images do not have to agree on any of it: Codex's
+    runs as `agent` with `HOME=/home/agent`, not `root`.
+    """
+
+    home: str
+    user: str
+    group: str
+
+    @property
+    def owner(self) -> str:
+        return f"{self.user}:{self.group}"
 
 
 @dataclass(frozen=True)
@@ -116,13 +141,48 @@ def default_staging_dir() -> Path:
     return shared.STATE_DIR / "staging"
 
 
+#: The shim's module file, as it is named inside the `amux` package.
+CLIENT_MODULE = "sandbox_client.py"
+
+
 def client_source() -> Path:
-    """The shim file to copy in."""
+    """The shim file to copy into a sandbox.
+
+    A PyInstaller build compiles amux into an archive inside the executable and
+    ships no `.py` on disk, so `sandbox_client.__file__` names a path that does
+    not exist and every sandbox spawn from a *packaged* amux dies here. Source
+    checkouts and the host runtime are unaffected, which is why no test saw it;
+    swift-crane found it in a frozen union build.
+
+    Shipping the source is a packaging requirement that no runtime trick can
+    replace. Measured in a frozen bundle with the source absent: `__file__` is
+    missing, `importlib.resources` raises FileNotFoundError, and
+    `inspect.getsource` raises OSError — there is no source text in the bundle for
+    any API to read. So the Makefile ships it with
+    `--add-data $(CURDIR)/src/amux/sandbox_client.py:amux` — absolute, because a
+    relative source resolves against `--specpath` and fails the build outright.
+
+    No frozen-specific branch is needed, and that was measured rather than
+    assumed: with an absolute `--add-data` whose destination is `amux`, PyInstaller
+    unpacks the file at exactly the path it already reports as
+    `sandbox_client.__file__`, in both `--onefile` and `--onedir`. So `__file__`
+    resolves and this function works unmodified — the destination `amux` is what
+    makes that true, and changing it would re-break shim installation with no
+    build error at all.
+
+    The `is_file` guard is the point of the function: a mis-packaged build gets a
+    named error naming the exact path, instead of an empty shim copied into the VM
+    or a bare `sbx cp` failure.
+    """
     from amux import sandbox_client
 
     source = Path(sandbox_client.__file__ or "")
     if not source.is_file():
-        raise BootstrapError(f"sandbox client source is missing at {source}")
+        raise BootstrapError(
+            f"the sandbox client source is missing at {source}, so there is nothing "
+            f"to install into a sandbox. A packaged amux must ship it: "
+            f"pyinstaller --add-data <repo>/src/amux/{CLIENT_MODULE}:amux"
+        )
     return source
 
 
@@ -162,26 +222,29 @@ def install_client(
     """Install the shim and deliver its capability into one sandbox.
 
     Ordering matters: the config directory exists before anything is copied into
-    it, and the config file's mode is tightened before the shim is usable. The
+    it, every copy is chowned before its mode is set (see `_deliver`), and the
     host's plaintext copy is removed in `finally`, so a failure anywhere above
     still leaves nothing behind.
+
+    That last property is not theoretical. Before the chown existed, this method
+    failed against a real image at `chmod 755` on the shim — and it failed
+    *closed*: the host staging file was removed by the `finally` below and no
+    world-readable token was ever created inside the VM.
     """
     staging = staging_dir or default_staging_dir()
     shim = source or client_source()
     staged = stage_config_file(endpoint, token, directory=staging)
     try:
-        home = _home(ops, token)
-        config_path = posixpath.join(home, CONFIG_RELPATH)
+        who = _identity(ops, token)
+        config_path = posixpath.join(who.home, CONFIG_RELPATH)
         _exec(ops, token, ["mkdir", "-p", posixpath.dirname(config_path)])
-        _copy(ops, token, staged, config_path)
-        _exec(ops, token, ["chmod", CONFIG_MODE, config_path])
-        _copy(ops, token, shim, SHIM_PATH)
-        _exec(ops, token, ["chmod", SHIM_MODE, SHIM_PATH])
+        _deliver(ops, token, staged, config_path, who, CONFIG_MODE)
+        _deliver(ops, token, shim, SHIM_PATH, who, SHIM_MODE)
         # The shim must at least run under the VM's interpreter. This needs no
         # service and no capability, so it isolates "copied wrong" from "cannot
         # reach the host" before an agent ever sees a context command fail.
         _exec(ops, token, [SHIM_PATH, "--help"])
-        return Installed(shim_path=SHIM_PATH, config_path=config_path, home=home)
+        return Installed(shim_path=SHIM_PATH, config_path=config_path, home=who.home)
     finally:
         staged.unlink(missing_ok=True)
 
@@ -224,6 +287,7 @@ def _install_hook_document(
     version: str,
 ) -> HooksInstalled:
     """The normal path for both agents: merge into the agent's hook document."""
+    who = _identity(ops, "")
     settings_path = posixpath.join(installed.home, adapter.settings_relpath)
     existing = _read_optional(ops, settings_path)
     document = _parse_json(existing, settings_path)
@@ -236,7 +300,7 @@ def _install_hook_document(
         )
     )
     _exec(ops, "", ["mkdir", "-p", posixpath.dirname(settings_path)])
-    _write_into(ops, staging, posixpath.basename(settings_path), settings_path, text)
+    _write_into(ops, staging, settings_path, text, who, HOOK_MODE)
 
     if adapter.enable_relpath:
         # Codex: hooks.json is inert until `hooks = true` under [features].
@@ -245,9 +309,10 @@ def _install_hook_document(
         switched = sandbox_hooks.enable_codex_hooks(current)
         if switched != current:
             _exec(ops, "", ["mkdir", "-p", posixpath.dirname(enable_path)])
-            _write_into(
-                ops, staging, posixpath.basename(enable_path), enable_path, switched
-            )
+            # Chowned like everything else, and here it matters beyond permissions:
+            # a config.toml the agent does not own is one `codex features enable`
+            # cannot write, and one Codex cannot persist its own hook trust into.
+            _write_into(ops, staging, enable_path, switched, who, HOOK_MODE)
 
     return HooksInstalled(
         agent=adapter.agent,
@@ -269,21 +334,22 @@ def _install_codex_notify_fallback(
     """A Codex too old for `hooks.json`: use its single `notify` slot and report
     exactly which kinds that cannot cover."""
     assert adapter.enable_relpath is not None
+    who = _identity(ops, "")
     config_path = posixpath.join(installed.home, adapter.enable_relpath)
     existing = _read_optional(ops, config_path) or ""
     text, replaced = sandbox_hooks.merge_codex_config(existing)
     _write_into(
         ops,
         staging,
-        "amux-codex-notify",
         sandbox_hooks.CODEX_DISPATCH_PATH,
         sandbox_hooks.render_codex_dispatch(
             installed.shim_path, installed.config_path, list(replaced or ())
         ),
+        who,
+        SHIM_MODE,
     )
-    _exec(ops, "", ["chmod", "755", sandbox_hooks.CODEX_DISPATCH_PATH])
     _exec(ops, "", ["mkdir", "-p", posixpath.dirname(config_path)])
-    _write_into(ops, staging, posixpath.basename(config_path), config_path, text)
+    _write_into(ops, staging, config_path, text, who, HOOK_MODE)
     return HooksInstalled(
         agent=adapter.agent,
         settings_path=config_path,
@@ -329,15 +395,20 @@ def _read_optional(ops: SandboxOps, path: str) -> str | None:
 
 
 def _write_into(
-    ops: SandboxOps, staging: Path, filename: str, destination: str, text: str
+    ops: SandboxOps,
+    staging: Path,
+    destination: str,
+    text: str,
+    who: SandboxIdentity,
+    mode: str,
 ) -> None:
     """Deliver text as a file rather than through a shell heredoc: an argument
     would put the whole document in the process table and make quoting a
     correctness problem."""
-    local = staging / filename
+    local = staging / posixpath.basename(destination)
     local.write_text(text)
     try:
-        _copy(ops, "", local, destination)
+        _deliver(ops, "", local, destination, who, mode)
     finally:
         local.unlink(missing_ok=True)
 
@@ -355,11 +426,14 @@ def _fail(ops: SandboxOps, token: str, what: str, exc: BaseException) -> Bootstr
     )
 
 
-def _exec(ops: SandboxOps, token: str, argv: Sequence[str]) -> str:
+def _exec(
+    ops: SandboxOps, token: str, argv: Sequence[str], *, user: str | None = None
+) -> str:
     try:
-        return ops.exec(argv)
+        return ops.exec(argv, user=user) if user else ops.exec(argv)
     except Exception as exc:
-        raise _fail(ops, token, " ".join(argv), exc) from None
+        where = " ".join(argv) if user is None else f"{' '.join(argv)} (as {user})"
+        raise _fail(ops, token, where, exc) from None
 
 
 def _copy(ops: SandboxOps, token: str, source: Path, destination: str) -> None:
@@ -369,14 +443,55 @@ def _copy(ops: SandboxOps, token: str, source: Path, destination: str) -> None:
         raise _fail(ops, token, f"copy to {destination}", exc) from None
 
 
-def _home(ops: SandboxOps, token: str) -> str:
-    """The agent user's home inside the VM. Asked rather than assumed: the
-    Claude and Codex images do not have to agree on it, and a wrong guess puts
-    the capability where the shim will not look for it."""
-    home = _exec(ops, token, ["sh", "-lc", 'printf %s "$HOME"']).strip()
-    if not home.startswith("/"):
+def _identity(ops: SandboxOps, token: str) -> SandboxIdentity:
+    """Who the sandbox's agent is: `$HOME`, user, group. One probe, because all
+    three are the same question and each `sbx exec` is a round trip.
+
+    Asked rather than assumed. Codex's image runs as `agent` with
+    `HOME=/home/agent`; a hardcoded `root` would put the capability where the
+    shim never looks and chown it to a user that is not the one running.
+    """
+    raw = _exec(
+        ops, token, ["sh", "-lc", 'printf "%s\\n%s\\n%s" "$HOME" "$(id -un)" "$(id -gn)"']
+    )
+    parts = raw.strip().splitlines()
+    if len(parts) != 3 or not parts[0].startswith("/") or not all(parts):
         raise BootstrapError(
-            f"sandbox {ops.name}: could not resolve the agent's home directory "
-            f"(got {home!r}); the context client config has nowhere to go"
+            f"sandbox {ops.name}: could not resolve the agent's identity "
+            f"(got {raw!r}); the context client config has nowhere to go"
         )
-    return home
+    return SandboxIdentity(home=parts[0], user=parts[1], group=parts[2])
+
+
+def _deliver(
+    ops: SandboxOps,
+    token: str,
+    source: Path,
+    destination: str,
+    who: SandboxIdentity,
+    mode: str,
+) -> None:
+    """Copy a file in, then make it the agent's own at `mode`.
+
+    The chown is not optional and not cosmetic. `sbx cp` preserves the source
+    mode but sets the owner to the *host* uid, which does not exist inside the
+    container — verified against a live image, where a 0600 capability landed as
+    `-rw------- 501:root` and the agent got "Permission denied" reading its own
+    token. It also cannot chmod a file it does not own, so the chown must come
+    first or the chmod fails with EPERM.
+
+    Only this chown runs as root; everything else bootstrap does runs as the
+    agent.
+
+    A trap for whoever changes `CONFIG_MODE`: before the chown existed, the
+    `chmod 600` on the capability *appeared* to succeed while the shim's
+    `chmod 755` failed. That was an accident of coreutils, which elides the
+    chmod(2) syscall when the mode already matches — and the staged file is
+    already 0600. `chmod 601` on the same file failed EPERM, proving the point.
+    So the real fault surfaced two steps later, at the shim, pointing a reader
+    at `/usr/local/bin` instead of at ownership. Do not read a passing chmod as
+    evidence that ownership is right.
+    """
+    _copy(ops, token, source, destination)
+    _exec(ops, token, ["chown", who.owner, destination], user="root")
+    _exec(ops, token, ["chmod", mode, destination])
