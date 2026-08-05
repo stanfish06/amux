@@ -399,7 +399,9 @@ def test_the_dispatch_script_quotes_a_chained_command_with_spaces():
 
 
 def test_without_a_previous_notify_the_script_does_not_exec_anything():
-    assert "exec" not in sh.render_codex_dispatch(SHIM, CONFIG)
+    script = sh.render_codex_dispatch(SHIM, CONFIG)
+    assert "event emit stop --agent codex" in script  # it is a real script
+    assert "exec" not in script
 
 
 # --- honest coverage ---------------------------------------------------------
@@ -538,13 +540,17 @@ def test_installing_codex_hooks_also_switches_the_feature_on(tmp_path, installed
 
 def test_a_config_that_already_enables_hooks_is_not_rewritten(tmp_path, installed):
     ops = codex_ops(**{"/root/.codex/config.toml": fixture("codex_config_hooks_on.toml")})
-    sb.install_hooks(ops, "codex", installed, staging_dir=tmp_path)
+    result = sb.install_hooks(ops, "codex", installed, staging_dir=tmp_path)
+    # install DID run - hooks.json was written - so the untouched config is a
+    # decision, not a no-op that would satisfy this assertion for free.
+    assert result.settings_path in ops.copied
     assert "/root/.codex/config.toml" not in ops.copied
 
 
 def test_no_dispatch_script_is_installed_for_a_codex_that_has_hooks(tmp_path, installed):
     ops = codex_ops()
-    sb.install_hooks(ops, "codex", installed, staging_dir=tmp_path)
+    result = sb.install_hooks(ops, "codex", installed, staging_dir=tmp_path)
+    assert result.mechanism == "hooks" and result.settings_path in ops.copied
     assert sh.CODEX_DISPATCH_PATH not in ops.copied
 
 
@@ -581,6 +587,8 @@ def test_claude_is_never_version_probed(tmp_path, installed):
     """Claude's hook surface is not conditional, so probing would be noise."""
     ops = FakeOps()
     sb.install_hooks(ops, "claude", installed, staging_dir=tmp_path)
+    assert ops.execs, "no commands ran, so finding no --version proves nothing"
+    assert ["mkdir", "-p", "/root/.claude"] in ops.execs
     assert not any("--version" in " ".join(argv) for argv in ops.execs)
 
 
@@ -605,10 +613,18 @@ def test_hook_files_are_delivered_as_files_not_as_shell_arguments(tmp_path, inst
     make quoting a correctness problem."""
     ops = FakeOps()
     ops.files["/root/.claude/settings.json"] = fixture("claude_template.json")
-    sb.install_hooks(ops, "claude", installed, staging_dir=tmp_path)
+    result = sb.install_hooks(ops, "claude", installed, staging_dir=tmp_path)
+    # the document really was delivered, and as a file
+    assert "claude-opus" in written(ops, result.settings_path)
+    assert ops.execs
+    # Naming the path is fine — reading it back, chowning and chmoding all do.
+    # Carrying the document is not, and that is what a heredoc would do.
     for argv in ops.execs:
-        assert "settings.json" not in " ".join(argv) or argv[:2] == ["sh", "-lc"]
         assert "claude-opus" not in " ".join(argv)
+        assert not any(">" in arg or "<<" in arg for arg in argv[3:])
+    readers = [a for a in ops.execs if a[:2] == ["sh", "-lc"] and a[2].startswith("cat ")]
+    assert len(readers) == 1  # the only command that touches the file's contents
+    assert result.settings_path in readers[0][2]
 
 
 def test_no_hook_staging_file_is_left_on_the_host(tmp_path, installed):
@@ -649,9 +665,9 @@ def test_installed_hooks_point_at_the_delivered_capability_file(tmp_path, instal
 def test_no_fixture_carries_host_specific_configuration():
     """The user's real host config was the format reference; none of it, and no
     host path, may end up in a sandbox."""
-    for path in FIXTURES.iterdir():
-        if path.name == "README.md":
-            continue
+    checked = [p for p in FIXTURES.iterdir() if p.name != "README.md"]
+    assert len(checked) >= 6, "fixtures missing; scanning an empty set proves nothing"
+    for path in checked:
         text = path.read_text()
         for forbidden in ("/Users/", "dot-agents", "nvim-notify", "amux-event.sh"):
             assert forbidden not in text, f"{path.name} leaks host configuration"
