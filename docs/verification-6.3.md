@@ -264,6 +264,23 @@ was mutated before its row was marked covered.
   built here. The packaging break was measured in both modes, but only
   `--onedir` was built by `make` and probed.
 - **Four-agent resource behaviour.** That is a 6.4 measurement.
+- **That the suite has no intermittent failures.** One remains open:
+  `test_wait_is_released_by_a_sandbox_event`. Observed once in a full run on a
+  heavily loaded machine, then 8/8 green on that file alone and 800/800 on a
+  later full suite. The traceback was not kept.
+
+  A *different* flake in the same test was found and fixed during this change —
+  the fixture capped `max_wait_s` at 2s, reachable under load — and it would be
+  easy to close this item on that mechanism. It does not apply: the failing test
+  calls `_generous_cap`, which raises the cap to 30s, and the waiter asks for
+  `timeout=25` against a 40s client budget. So the cap fix is real, already
+  applied, and **not** the cause here.
+
+  What is left is one named test, one observation, mechanism unknown. The
+  remaining timing surface is a bare `time.sleep(0.3)` between starting the
+  waiter thread and flipping the pane state — an untested hypothesis, recorded as
+  a lead and not as a finding. Rate is load-dependent: roughly one full run in
+  two on a machine busy with microVM work, one in nineteen on an idle one.
 - **Anything about the monitor.** `amux monitor` was never run during this
   verification. `monitor.py` is only a launcher; the renderer is the Ink TUI in
   `tui/`, whose build output is gitignored (`tui/.gitignore`) and absent from the
