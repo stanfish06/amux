@@ -235,6 +235,34 @@ So the accurate statement is: VMs are recoverable, and work committed after any
 integrate pass is not — which makes integrating early, before teammates have
 committed, the expensive mistake rather than integrating twice.
 
+**Mechanism** (clever-mole, confirmed at source): `worktree.integrate` computes
+`n_commits` and then calls `store.set_worktree_status(wt_id, "merged")`
+unconditionally — `n_commits` never gates it — so a zero-commit agent is marked
+merged, and the `status == "active"` filter at `worktree.py:289` forecloses it
+permanently. Routed as a narrow fix: do not mark merged when `n_commits == 0`.
+
+**Classification: a defect that no scenario covers — not an R4 scenario
+failure.** Deciding this needed one fact rather than an argument. R4's no-delta
+scenario requires that amux *"does not report those files as integrated and
+explains whether the agent must commit or there is no branch delta"*, and the
+output does exactly that: `0 commit(s), no changes`. The wrong thing is the
+durable record, and `status` is surfaced **nowhere** user-facing — not
+`utils.py`, not `monitor.py`, not the roster entries in `core.py`/`cli.py`, not
+`sandbox_client.py`. Its only readers are `context_service.py:370`, internally,
+to refuse a removed execution, and `integrate`'s own filter. So the record is
+internal state, the scenario's stated `THEN` is met, and calling this a scenario
+failure would overstate what the spec requires. The requirement sentence does
+not fit either: *"MUST NOT treat uncommitted sandbox files as integrated work"*
+— at pass 1 there were no files at all, committed or otherwise.
+
+That makes it a gap in the specification as much as in the code: no scenario says
+the record must stay active when there is no delta, and one should. **This
+classification flips if the record ever becomes user-facing** — if `status`
+reaches `ctx`, a list command or the monitor, then a permanent `merged` mark
+*would* be reporting uncommitted work as integrated, and this becomes an R4
+scenario failure. Worth re-checking whenever visibility work touches those
+views.
+
 Worth keeping both halves recorded, because as two separate quirks — "integrate
 won't re-run" and "cleanup leaked VMs" — they read as unrelated, and the thing
 that connected them was one predicate copied onto the wrong axis.
