@@ -227,6 +227,34 @@ little of this was designed up front. The rule is worth having precisely because
 the shapes are indistinguishable on sight — you can only tell them apart by
 asking whose boundary is being frozen.
 
+## The question that caught the most
+
+Three claims in this change were overstated, and the same question found all
+three. It is not "did you verify it" — everyone answers yes to that — but:
+
+> **Verified against what?**
+
+- The integration merge in this document was offered as dogfooding. It ran the
+  `amux` on `PATH`, a binary built before this work with no `doctor` subcommand
+  at all, so it exercised the pre-change host path.
+- "Integrate is one-shot, so cleanup leaves you stranded" rested on reading a
+  filter. Measured, half of it was already fixed, and the surviving half was
+  *worse* than described in a different way — see below.
+- A three-pane assertion was said to guard host output from gaining fields. It
+  guarded the *no-execution-row* case; the host-row path was never reached, and
+  a mutation passed against it.
+
+A fourth is the same question applied to a property rather than a fact: the
+spec-coverage map was reported complete because it had been built
+scenario-by-scenario. That was true, but unknown to be true until a checker
+extracted all 35 scenario titles and tested each for representation. Not "is it
+complete" but *against what did you check completeness*.
+
+The related habit worth keeping: **a test that arrives with its own fix is the
+most likely place for a test that cannot fail**, because it was written against
+already-correct code and nobody has seen it red. Every such test in this change
+was mutated before its row was marked covered.
+
 ## What this record does not establish
 
 - **Whether a real sandboxed agent works end to end.** Every check above is
@@ -236,6 +264,23 @@ asking whose boundary is being frozen.
   built here. The packaging break was measured in both modes, but only
   `--onedir` was built by `make` and probed.
 - **Four-agent resource behaviour.** That is a 6.4 measurement.
+- **That the suite has no intermittent failures.** One remains open:
+  `test_wait_is_released_by_a_sandbox_event`. Observed once in a full run on a
+  heavily loaded machine, then 8/8 green on that file alone and 800/800 on a
+  later full suite. The traceback was not kept.
+
+  A *different* flake in the same test was found and fixed during this change —
+  the fixture capped `max_wait_s` at 2s, reachable under load — and it would be
+  easy to close this item on that mechanism. It does not apply: the failing test
+  calls `_generous_cap`, which raises the cap to 30s, and the waiter asks for
+  `timeout=25` against a 40s client budget. So the cap fix is real, already
+  applied, and **not** the cause here.
+
+  What is left is one named test, one observation, mechanism unknown. The
+  remaining timing surface is a bare `time.sleep(0.3)` between starting the
+  waiter thread and flipping the pane state — an untested hypothesis, recorded as
+  a lead and not as a finding. Rate is load-dependent: roughly one full run in
+  two on a machine busy with microVM work, one in nineteen on an idle one.
 - **Anything about the monitor.** `amux monitor` was never run during this
   verification. `monitor.py` is only a launcher; the renderer is the Ink TUI in
   `tui/`, whose build output is gitignored (`tui/.gitignore`) and absent from the
