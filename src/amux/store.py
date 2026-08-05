@@ -601,6 +601,32 @@ def worktree_for_pane(
     return dict(row) if row else None
 
 
+def worktrees_for_panes(
+    panes: Sequence[str], since: float | None = None, db_path: Path | None = None
+) -> dict[str, dict[str, Any]]:
+    """The worktree each pane fronts, in one query. Panes with none are absent.
+
+    The bulk counterpart to `worktree_for_pane`, for the monitor's per-refresh
+    view: resolving these one pane at a time would put a query per pane on
+    every refresh. Selection matches the single-pane version exactly — active
+    wins, then most recently created — so the two cannot disagree about which
+    row a pane fronts.
+    """
+    if not panes:
+        return {}
+    placeholders = ", ".join("?" * len(panes))
+    sql = f"SELECT * FROM worktrees WHERE pane IN ({placeholders})"
+    params: tuple = tuple(panes)
+    if since is not None:
+        sql += " AND created_ts >= ?"
+        params += (since,)
+    # Ordered so the row each pane should front is the last one written into
+    # the dict, mirroring `_pane_worktree`'s ORDER BY.
+    sql += " ORDER BY (status = 'active') ASC, created_ts ASC, id ASC"
+    with _session(db_path) as conn:
+        return {row["pane"]: row for row in _rows(conn, sql, params)}
+
+
 def worktree_by_id(
     worktree_id: int, db_path: Path | None = None
 ) -> dict[str, Any] | None:

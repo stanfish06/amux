@@ -91,6 +91,27 @@ const AgentDetail: React.FC<{ agent: AgentPaneInfo }> = ({ agent }) => {
                     <Text dimColor>CWD:</Text>
                     <Text>{agent.cwd || 'N/A'}</Text>
                 </Box>
+                {/* Only for a sandboxed agent. `amux event state --json` omits
+                    these keys entirely for host agents, so a host agent's panel
+                    is unchanged rather than gaining empty rows. */}
+                {agent.runtime && agent.runtime !== 'host' ? (
+                    <Box gap={2}>
+                        <Text dimColor>Runtime:</Text>
+                        <Text>{agent.runtime}</Text>
+                        {agent.runtimeStatus ? (
+                            <>
+                                <Text dimColor>Status:</Text>
+                                <Text>{agent.runtimeStatus}</Text>
+                            </>
+                        ) : null}
+                        {agent.sandboxName ? (
+                            <>
+                                <Text dimColor>Sandbox:</Text>
+                                <Text>{agent.sandboxName}</Text>
+                            </>
+                        ) : null}
+                    </Box>
+                ) : null}
             </Box>
 
             <Box

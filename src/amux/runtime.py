@@ -174,7 +174,24 @@ class HostRuntime:
         cwd: str | None,
     ) -> dict[str, str]:
         """Per-agent git worktrees when the target dir is a repo. Fail soft: a
-        non-repo target keeps today's shared-directory behavior."""
+        non-repo target keeps today's shared-directory behavior.
+
+        A missing `cwd` is a different thing from a non-repo one and used to
+        share this branch silently: a non-repo target is a deliberate choice,
+        while an unresolved directory means nobody worked out where the grid
+        lives. That combination -- a known workspace and task but no path --
+        skipped per-agent worktrees for every `spg` without `-p`, and tmux
+        inheritance left the panes in a shared directory so it looked correct.
+        It is still fail-soft, because `cwd` is part of a public signature and
+        callers may legitimately pass None, but it no longer does so quietly.
+        """
+        if workspace and task and not cwd:
+            print(
+                "amux: no directory resolved for "
+                f"{workspace}/{task}; agents will share one directory instead "
+                "of getting a worktree each (pass -p, or spawn from the "
+                "workspace directory)"
+            )
         if not (workspace and task and cwd):
             return {}
         repo = worktree.repo_root(cwd)
@@ -200,6 +217,45 @@ def _context_service():
     return context_service
 
 
+#: `runtime_status` values meaning the VM is already gone. Anything else on a
+#: row with a sandbox name may still be a live microVM.
+GONE_RUNTIME_STATUSES = frozenset({"removed", "failed"})
+
+
+def sandbox_rows(workspace: str, task: str) -> list[dict]:
+    """Every row of a task that may still have a microVM behind it.
+
+    Selected on the *runtime* axis, never the merge axis. `status` answers "was
+    this work merged"; `runtime_status` answers "does a VM exist". Cleanup and
+    stop need the second, and asking the first is how an integrated task leaked
+    every sandbox it had: `integrate` sets status='merged', so a filter on
+    'active' skipped exactly the rows whose VMs were still running.
+
+    Deliberately permissive: anything with a sandbox name that is not already
+    recorded gone is included. Acting on a VM that turns out to be absent is
+    reported and harmless; skipping one that exists is the bug.
+    """
+    return [
+        dict(row)
+        for row in store.worktrees_for(workspace, task)
+        if row["runtime"] == DOCKER_SANDBOX
+        and row["sandbox_name"]
+        and row["runtime_status"] not in GONE_RUNTIME_STATUSES
+    ]
+
+
+def _retire(worktree_id: int, status: str, *, current: str) -> None:
+    """Record that a row's VM is gone, without rewriting its merge history.
+
+    `runtime_status` always moves; `status` only when the execution was still
+    active. A merged row stays merged -- the work really was merged, and only
+    the VM went away.
+    """
+    store.set_worktree_runtime(worktree_id, runtime_status=status)
+    if current == "active":
+        store.set_worktree_status(worktree_id, "removed")
+
+
 def stop_task(workspace: str, task: str) -> list[str]:
     """Stop every sandbox backing a task without destroying anything.
 
@@ -213,12 +269,8 @@ def stop_task(workspace: str, task: str) -> list[str]:
     not be blocked by one stubborn sandbox.
     """
     stopped: list[str] = []
-    for row in store.worktrees_for(workspace, task):
-        if row["status"] != "active" or row["runtime"] != DOCKER_SANDBOX:
-            continue
+    for row in sandbox_rows(workspace, task):
         name = row["sandbox_name"]
-        if not name:
-            continue
         try:
             sandbox.stop(name)
         except sandbox.SandboxError as exc:
@@ -244,13 +296,7 @@ def clean_task(workspace: str, task: str, *, force: bool = False) -> list[str]:
     Returns the sandboxes removed. Raises `SandboxError` naming every sandbox
     that refused, without having touched any of them.
     """
-    rows = [
-        row
-        for row in store.worktrees_for(workspace, task)
-        if row["status"] == "active"
-        and row["runtime"] == DOCKER_SANDBOX
-        and row["sandbox_name"]
-    ]
+    rows = sandbox_rows(workspace, task)
     if not rows:
         return []
 
@@ -286,8 +332,7 @@ def clean_task(workspace: str, task: str, *, force: bool = False) -> list[str]:
         except Exception as exc:  # noqa: BLE001
             print(f"amux: could not remove remote for {name}: {exc}")
         store.revoke_context_tokens_for_worktree(row["id"])
-        store.set_worktree_runtime(row["id"], runtime_status="removed")
-        store.set_worktree_status(row["id"], "removed")
+        _retire(row["id"], "removed", current=row["status"])
         removed.append(name)
     return removed
 
@@ -568,14 +613,9 @@ class SandboxRuntime:
         `--clean` leaves exactly this behind, which is what makes a later
         spawn a resume rather than a rebuild.
         """
-        for row in store.worktrees_for(workspace, task):
-            if (
-                row["name"] == agent_name
-                and row["status"] == "active"
-                and row["runtime"] == DOCKER_SANDBOX
-                and row["sandbox_name"]
-            ):
-                return dict(row)
+        for row in sandbox_rows(workspace, task):
+            if row["name"] == agent_name:
+                return row
         return None
 
     @staticmethod
@@ -587,11 +627,15 @@ class SandboxRuntime:
         resolvable. Its capability is revoked because the new pane mints its
         own, and a token whose pane is gone should not keep working.
         """
-        for row in store.worktrees_for(workspace, task):
-            if row["sandbox_name"] != sandbox_name or row["status"] != "active":
+        for row in sandbox_rows(workspace, task):
+            if row["sandbox_name"] != sandbox_name:
                 continue
+            # The capability goes regardless -- the new pane mints its own, and
+            # a dead pane's token should not keep working. The merge record
+            # only moves if this execution was still active.
             store.revoke_context_tokens_for_worktree(row["id"])
-            store.set_worktree_status(row["id"], "removed")
+            if row["status"] == "active":
+                store.set_worktree_status(row["id"], "removed")
 
     # --- rollback ---
 
