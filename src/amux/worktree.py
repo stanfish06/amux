@@ -91,35 +91,88 @@ def _branch_exists(repo: str, branch: str) -> bool:
     )
 
 
-def setup_task(
-    repo: str,
-    workspace: str,
-    task: str,
-    panes: list[tuple[str, str, str]],
-) -> dict[str, str]:
-    """Create the integration worktree + one worktree per pane.
+@dataclass(frozen=True)
+class TaskIntegration:
+    """The task's integration worktree, and the base every agent branches off.
 
-    `panes` is a list of (pane_id, agent, name). Returns {pane_id: worktree_path}.
-    Registers every pane in the worktree store.
+    Both runtimes need this: host agents get worktrees branched from it, and
+    sandboxed agents get clones whose committed branches are merged back into
+    it. Only the per-agent step differs, so only the per-agent step is split.
     """
+
+    repo: str
+    workspace: str
+    task: str
+    base_ref: str
+    branch: str
+    path: str
+
+
+def setup_task_integration(repo: str, workspace: str, task: str) -> TaskIntegration:
+    """Create the task's integration branch and worktree. Runtime-agnostic."""
     if not has_commits(repo):
         raise WorktreeError("repo has no commits yet")
     base = head_ref(repo)
-    int_branch = integration_branch(workspace, task)
-    root = task_worktree_root(workspace, task)
-    int_path = f"{root}/{INTEGRATION_DIR}"
+    branch = integration_branch(workspace, task)
+    path = f"{task_worktree_root(workspace, task)}/{INTEGRATION_DIR}"
 
-    if not _branch_exists(repo, int_branch):
-        _git(repo, "branch", int_branch, base)
-    _git(repo, "worktree", "add", int_path, int_branch)
+    if not _branch_exists(repo, branch):
+        _git(repo, "branch", branch, base)
+    _git(repo, "worktree", "add", path, branch)
+    return TaskIntegration(
+        repo=repo,
+        workspace=workspace,
+        task=task,
+        base_ref=base,
+        branch=branch,
+        path=path,
+    )
+
+
+def remove_task_integration(integration: TaskIntegration) -> None:
+    """Undo `setup_task_integration`.
+
+    The branch is kept deliberately, as everywhere else in this module: it is
+    the task's durable line, a retry is idempotent because `_branch_exists`
+    short-circuits, and anything already merged into it must stay reachable.
+    """
+    _git(
+        integration.repo,
+        "worktree",
+        "remove",
+        "--force",
+        integration.path,
+        check=False,
+    )
+
+
+def setup_host_agents(
+    integration: TaskIntegration,
+    panes: list[tuple[str, str, str]],
+) -> dict[str, str]:
+    """One worktree + registry row per host pane, branched off the integration
+    branch.
+
+    `panes` is a list of (pane_id, agent, name). Returns {pane_id: path}. Rolls
+    back its own worktrees and rows on failure; the integration worktree belongs
+    to the caller that created it.
+    """
+    repo, workspace, task = integration.repo, integration.workspace, integration.task
+    root = task_worktree_root(workspace, task)
 
     paths: dict[str, str] = {}
+    # Tracked separately from `paths`: a worktree exists on disk from the moment
+    # `worktree add` returns, but only joins `paths` once its row is registered.
+    # Rolling back `paths` alone would strand the worktree of whichever pane the
+    # registry failed on.
+    created: list[str] = []
     registered: list[int] = []
     try:
         for pane_id, agent, name in panes:
             branch = agent_branch(workspace, task, name)
             path = f"{root}/{name}"
-            _git(repo, "worktree", "add", path, "-b", branch, int_branch)
+            _git(repo, "worktree", "add", path, "-b", branch, integration.branch)
+            created.append(path)
             registered.append(
                 store.register_worktree(
                     pane=pane_id,
@@ -129,14 +182,14 @@ def setup_task(
                     name=name,
                     path=path,
                     branch=branch,
-                    base_ref=base,
+                    base_ref=integration.base_ref,
                     repo=repo,
                 )
             )
             paths[pane_id] = path
     except Exception:
         # Roll back this task's worktrees so a failed spawn leaves no debris.
-        for path in [int_path, *paths.values()]:
+        for path in created:
             _git(repo, "worktree", "remove", "--force", path, check=False)
         # The registry is append-only, so rows already inserted outlive the
         # rollback. Left active, a later integrate would merge branches whose
@@ -145,6 +198,24 @@ def setup_task(
             store.set_worktree_status(wt_id, "removed")
         raise
     return paths
+
+
+def setup_task(
+    repo: str,
+    workspace: str,
+    task: str,
+    panes: list[tuple[str, str, str]],
+) -> dict[str, str]:
+    """Host-runtime task setup: the integration worktree + one worktree per pane.
+
+    A failure anywhere unwinds both halves, so a failed spawn leaves no debris.
+    """
+    integration = setup_task_integration(repo, workspace, task)
+    try:
+        return setup_host_agents(integration, panes)
+    except Exception:
+        remove_task_integration(integration)
+        raise
 
 
 def integrate(

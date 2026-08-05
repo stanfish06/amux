@@ -1,0 +1,6 @@
+model = "gpt-5.6"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+
+[projects."/work/repo"]
+trust_level = "trusted"
