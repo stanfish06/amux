@@ -64,8 +64,14 @@ def test_plaintext_token_never_reaches_the_database(
     db_path: Path, worktree_id: int
 ) -> None:
     """Read the file, not the API. A future refactor that starts persisting the
-    plaintext somewhere incidental must fail here."""
-    token, _ = store.mint_context_token(
+    plaintext somewhere incidental must fail here.
+
+    The hash assertion is not decoration. Without it this test passes on an
+    empty database — a mint that wrote nothing at all would satisfy "the token
+    is absent", so the evidence for "plaintext never enters SQLite" would come
+    from a file that contains nothing whatsoever.
+    """
+    token, token_id = store.mint_context_token(
         worktree_id, permissions=["context:read"], db_path=db_path
     )
     raw = db_path.read_bytes()
@@ -73,6 +79,11 @@ def test_plaintext_token_never_reaches_the_database(
         sidecar = db_path.with_name(db_path.name + suffix)
         if sidecar.exists():
             raw += sidecar.read_bytes()
+
+    # Positive first: prove a row really landed in these bytes.
+    assert token_id > 0
+    assert hashlib.sha256(token.encode()).hexdigest().encode() in raw
+
     assert token.encode() not in raw
 
 
@@ -90,14 +101,43 @@ def test_only_the_sha256_hash_is_stored(db_path: Path, worktree_id: int) -> None
     assert stored == hashlib.sha256(token.encode()).hexdigest()
 
 
-def test_minting_does_not_log_the_plaintext(
+def test_minting_emits_no_log_records_at_all(
     db_path: Path, worktree_id: int, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """`store` has no logger, so "the token is not in the log" is structurally
+    vacuous — it passes because nothing is ever written, not because anything
+    was redacted. Assert the real property instead: minting stays silent.
+
+    If someone adds logging here, this fails and they have to decide
+    deliberately whether the new record can carry capability material, rather
+    than inheriting an assertion that never could have caught it.
+    """
     with caplog.at_level(logging.DEBUG):
-        token, _ = store.mint_context_token(
+        token, token_id = store.mint_context_token(
             worktree_id, permissions=["context:read"], db_path=db_path
         )
+
+    assert token_id > 0  # minting actually happened
+    assert caplog.records == [], (
+        "store now logs during minting; assert redaction of the plaintext"
+        " rather than its absence"
+    )
     assert token not in caplog.text
+
+
+def test_a_resolved_record_never_carries_the_plaintext(
+    db_path: Path, worktree_id: int
+) -> None:
+    """The other surface a plaintext could escape through: what lookup hands
+    back to the service, which then puts it in responses and logs."""
+    token, _ = store.mint_context_token(
+        worktree_id, permissions=["context:read"], db_path=db_path
+    )
+    record = store.context_token_record(token, db_path=db_path)
+
+    assert record is not None and record["name"] == "brave-hawk"  # a real record
+    assert token not in repr(record)
+    assert not any(value == token for value in record.values())
 
 
 # --- lookup ---

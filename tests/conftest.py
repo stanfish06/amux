@@ -271,6 +271,7 @@ def fake_sbx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeSbx:
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("FAKE_SBX_LOG", str(log))
     monkeypatch.setenv("FAKE_SBX_SCRIPT", str(script))
+    monkeypatch.setenv("FAKE_SBX_BIN", str(bin_dir))
     return FakeSbx(bin_dir=bin_dir, log=log, script=script)
 
 
@@ -300,8 +301,16 @@ def no_real_sbx(monkeypatch: pytest.MonkeyPatch) -> None:
         name = Path(str(argv0)).name
         if name in {"sbx", "docker"}:
             resolved = shutil.which(str(argv0))
-            fake = os.environ.get("FAKE_SBX_LOG")
-            if not fake or resolved is None or "bin/sbx" not in resolved:
+            fake_bin = os.environ.get("FAKE_SBX_BIN")
+            # Nothing on PATH is the one case that certainly is not a real
+            # binary, so let it through: `no_sbx` exists precisely to make the
+            # code under test meet the FileNotFoundError it would meet on a
+            # machine without Docker Sandboxes installed.
+            reachable = resolved is not None
+            is_fake = bool(fake_bin) and resolved is not None and (
+                Path(resolved).parent == Path(fake_bin)
+            )
+            if reachable and not is_fake:
                 raise AssertionError(
                     f"test invoked real {name!r}; use the fake_sbx fixture"
                 )
