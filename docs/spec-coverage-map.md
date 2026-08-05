@@ -19,7 +19,8 @@ something other than the behaviour it named.
 | Tree equivalence | `git diff --stat f30c43b a45fc7d -- src tests tui docs Makefile pyproject.toml` is **empty**. `tui/` is included this time and was not in the first pass, because the R6 show half lives there |
 | Union suite | **800 passed** after the R6 restructure below (`f30c43b` itself is 799 passed / 1 failed, and that one failure is the predicted collision this re-run fixes) |
 | Specs | `openspec/changes/prototype-sandbox-agents-context-service/specs/{sandbox-agent-runtime,sandbox-context-bridge}/spec.md` |
-| Counted | 15 Requirements, 34 Scenarios (verified by `grep -c` on both files, not by trusting the scope) |
+| Counted | **15 Requirements, 35 Scenarios** (re-counted by `grep -c` on both files, not by adopting the number I was given) |
+| Count change | The spec gained a scenario *during* 6.3: clever-mole added R4's *"Agent commits after an integrate pass that found no delta"* in response to the foreclosure measured in §3. `sandbox-agent-runtime` went 16 → 17 scenarios. The map was first built against 34 |
 
 **Line numbers** are cited where verified by reading. Where a row cites
 `file:symbol` instead, the exact line was not confirmed — that is deliberate, so
@@ -40,10 +41,33 @@ no number in this document is invented.
 
 ## 1. Findings — read these first
 
-> **F1, F2 and F3 are FIXED as of `f30c43b`** — misty-panda `8786f6c` (Python)
+> **F4 is open. F1, F2 and F3 are FIXED as of `f30c43b`** — misty-panda `8786f6c` (Python)
 > and `dc487a7` (TUI). The findings are kept below as written, because they are
 > why 5.4 was un-ticked and because the fix is only legible against them. What
 > landed, and how it was verified, is in §3 R6.
+
+### F4. R4's new no-delta-then-commits scenario is uncovered
+
+*"Agent commits after an integrate pass that found no delta — **WHEN** an agent
+contributed no commits to an integrate pass and afterwards commits work on its
+assigned branch, **THEN** a later integrate reaches that agent and merges the new
+commits, because a pass that merged nothing MUST NOT record the agent as
+integrated."*
+
+Added to the spec during 6.3, because the behaviour it forbids is what §3's
+measurement found: `worktree.integrate` marks every row merged unconditionally,
+so a zero-commit agent is foreclosed and its later commits are unreachable.
+
+- Implementation: **none** — the fix is routed to misty-panda (do not mark merged
+  when `n_commits == 0`).
+- Test: **none.**
+- Mutation: not applicable until there is something to mutate.
+
+This is the honest state and is why the clause was worth adding: the defect was
+real before the scenario existed, and the map recorded it as *"a defect no
+scenario covers"*. It is now a scenario, and it is uncovered. When the fix lands,
+the mutation to name is *mark merged unconditionally again* → the new test must
+fail.
 
 ### F1. The monitor clause of "Runtime state is visible in existing amux views" has no implementation and no test
 
@@ -154,7 +178,7 @@ misty-panda real time.
 
 ---
 
-## 3. `sandbox-agent-runtime` — 7 Requirements, 16 Scenarios
+## 3. `sandbox-agent-runtime` — 7 Requirements, 17 Scenarios
 
 ### R1. Sandbox execution is explicit and optional
 
@@ -185,18 +209,88 @@ misty-panda real time.
 |---|---|---|---|
 | Sandbox branch integrates successfully | `worktree.integrate` sandbox path, `sandbox.git_remote` (`sandbox.py:203`), durable local ref | `test_a_committed_sandbox_branch_integrates`, `test_the_fetched_tip_is_kept_in_a_durable_local_ref`, `test_a_merge_commit_is_made_even_for_a_single_commit`, `test_host_and_sandbox_agents_integrate_in_one_pass` | Drop `--no-ff` → `test_a_merge_commit_is_made_even_for_a_single_commit` fails; skip the durable-ref write → its test fails |
 | Sandbox branch conflicts | conflict abort + blocker note in `worktree.integrate` | `test_a_conflicting_sandbox_branch_aborts_and_blocks`, `test_one_unreachable_sandbox_does_not_stop_the_others` | Remove the `merge --abort` → the test fails on a left-behind conflicted index; skip the blocker note → fails on the missing note |
+| **Agent commits after a no-delta pass** (added during 6.3) | **none** — `worktree.integrate` marks every row merged regardless of `n_commits`, so the agent is foreclosed. Fix routed | **none** | **F4 — no implementation, no test.** Once fixed: mark merged unconditionally again → the new test fails |
 | Sandbox has no committed work | no-delta and never-committed branches in `worktree.integrate` | `test_a_branch_with_no_delta_reports_no_changes`, `test_uncommitted_sandbox_files_are_not_integrated`, `test_a_sandbox_that_never_committed_the_branch_is_reported`, `test_a_stopped_or_removed_sandbox_is_reported_not_guessed` | Report `ok=True` with a fabricated shortstat for an empty delta → the first two fail |
 
 **Observed limitation, R4 (not a scenario failure).** `amux integrate <ws> <task>
 --all` is one-shot per row: the first pass marks each agent record `merged`, and
-`worktree.integrate` selects `status == "active"`, so a second pass refuses with
-*"no active worktrees for task ..."*. clever-mole hit this running the 6.3
-integration on this change and completed the merge by hand with `git`. R4's
-scenarios are all satisfied — the spec requires the record be marked merged and
-says nothing about re-running — but the documented command cannot be re-run
-after any further change lands, and it shares its `status == "active"` filter
-with the cleanup-leak defect (`stop_task`/`clean_task` skipping merged rows and
-leaking their microVMs), which is what makes the pair bite together.
+`worktree.integrate` selects `status == "active"` (`worktree.py:289`), so a
+second pass refuses with *"no active worktrees for task ..."*. clever-mole hit
+this running the 6.3 integration on this change and finished the merge by hand
+with `git`. R4's scenarios are all satisfied — the spec requires the record be
+marked merged and says nothing about re-running — but the documented command
+cannot be re-run after any further change lands.
+
+**The adjacency, and its current state.** The same predicate was applied on two
+different axes, and that is what made the original pair dangerous: with
+`stop_task`/`clean_task` also filtering `status == "active"`, a merged row was
+untouchable from *both* directions — integrate refused it and cleanup silently
+skipped it — so its microVM was unreachable to amux entirely and only `sbx rm`
+could recover it. That is the state clever-mole hit: `kw --clean --force`
+reported success and left four VMs running.
+
+**Half of it is now fixed**, verified at source rather than taken from the
+report: `runtime.sandbox_rows` (`runtime.py:225-239`) selects on the *runtime*
+axis, with the leak named in its own docstring — *"`status` answers 'was this
+work merged'; `runtime_status` answers 'does a VM exist'"*. `worktree.py:289` is
+the only place left where the merge axis gates anything.
+
+**Measured, not read** (disposable repo, its own `XDG_STATE_HOME`, its own
+`-L amux-probe` socket, `python -m amux.cli` from this tree — not the installed
+binary, which predates the change and has no `doctor` subcommand):
+
+| Observation | Result |
+|---|---|
+| Pass 1, two host agents, one with a commit and one without | both merged: `jolly-lemur` 1 commit, `olive-bear` **0 commits, "no changes"** — and *both* rows moved `active` → `merged` |
+| Pass 2, `--all` | refuses: `amux: no active worktrees for task 't0' in workspace 'probe'`, rc=1 |
+| Pass 2, `--agent olive-bear` | refuses identically |
+| `kg --clean` on merged rows | succeeds, rows move `merged` → `removed` |
+| `runtime.sandbox_rows` on a `merged` sandbox row | returns it — cleanup and stop do reach merged rows |
+
+**Correction to an earlier claim in this document.** I wrote that the surviving
+consequence is "you cannot re-integrate, but you are no longer stranded". That
+is true of *microVMs* and false of *work*. A row is marked merged on the
+attempt, not on having contributed anything — so an agent that had not committed
+when someone ran `integrate` is marked merged with a zero-commit result, and its
+later commits cannot be integrated by any amux command: `--all` and
+`--agent <name>` both refuse, and the commit sits on its branch, absent from the
+integration branch. Measured above. Recovery is a manual `git merge`.
+
+So the accurate statement is: VMs are recoverable, and work committed after any
+integrate pass is not — which makes integrating early, before teammates have
+committed, the expensive mistake rather than integrating twice.
+
+**Mechanism** (clever-mole, confirmed at source): `worktree.integrate` computes
+`n_commits` and then calls `store.set_worktree_status(wt_id, "merged")`
+unconditionally — `n_commits` never gates it — so a zero-commit agent is marked
+merged, and the `status == "active"` filter at `worktree.py:289` forecloses it
+permanently. Routed as a narrow fix: do not mark merged when `n_commits == 0`.
+
+**Classification: a defect that no scenario covers — not an R4 scenario
+failure.** Deciding this needed one fact rather than an argument. R4's no-delta
+scenario requires that amux *"does not report those files as integrated and
+explains whether the agent must commit or there is no branch delta"*, and the
+output does exactly that: `0 commit(s), no changes`. The wrong thing is the
+durable record, and `status` is surfaced **nowhere** user-facing — not
+`utils.py`, not `monitor.py`, not the roster entries in `core.py`/`cli.py`, not
+`sandbox_client.py`. Its only readers are `context_service.py:370`, internally,
+to refuse a removed execution, and `integrate`'s own filter. So the record is
+internal state, the scenario's stated `THEN` is met, and calling this a scenario
+failure would overstate what the spec requires. The requirement sentence does
+not fit either: *"MUST NOT treat uncommitted sandbox files as integrated work"*
+— at pass 1 there were no files at all, committed or otherwise.
+
+That makes it a gap in the specification as much as in the code: no scenario says
+the record must stay active when there is no delta, and one should. **This
+classification flips if the record ever becomes user-facing** — if `status`
+reaches `ctx`, a list command or the monitor, then a permanent `merged` mark
+*would* be reporting uncommitted work as integrated, and this becomes an R4
+scenario failure. Worth re-checking whenever visibility work touches those
+views.
+
+Worth keeping both halves recorded, because as two separate quirks — "integrate
+won't re-run" and "cleanup leaked VMs" — they read as unrelated, and the thing
+that connected them was one predicate copied onto the wrong axis.
 
 ### R5. Sandbox lifecycle follows amux lifecycle without silent data loss
 
