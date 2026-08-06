@@ -23,10 +23,6 @@ amux monitor -W 160 -T 60                   # ...at 160 cols, 60 of them for the
 
 # architecture
 
-Four layers. A frontend issues commands, a runtime places each agent somewhere,
-a communication layer carries state back, and a context layer is the only thing
-that remembers anything.
-
 ```mermaid
 flowchart TB
     accTitle: amux Layered Architecture
@@ -93,17 +89,6 @@ flowchart TB
     class store,db,trees context_style
     class vm,svc guard_style
 ```
-
-| layer | what it is | where it lives |
-| --- | --- | --- |
-| **frontend** | the `amux` CLI, and `amux monitor`, a read-only Node/Ink dashboard that polls tmux and shells back into `amux event state --json` rather than opening the database itself | `src/amux/cli.py`, `src/amux/monitor.py`, `tui/` |
-| **runtime** | the seam that decides *where* an agent runs. `HostRuntime` gives it a tmux pane and a git worktree; `SandboxRuntime` gives it an `sbx` microVM with a private clone. Everything above this line is runtime-agnostic | `src/amux/runtime.py`, `src/amux/core.py`, `src/amux/sandbox.py`, `src/amux/sandbox_bootstrap.py` |
-| **communication** | how an agent's state gets back. Hooks fire on both runtimes; on the host they call `amux event emit` directly, in a sandbox they call the stdlib-only shim, which reaches the host over authenticated loopback HTTP. Both paths record the event and then signal the tmux bus that wakes `amux event wait` | `src/amux/events.py`, `src/amux/sandbox_hooks.py`, `src/amux/sandbox_client.py`, `src/amux/context_service.py` |
-| **context** | the only durable state: one sqlite database on the host holding events, notes, the worktree registry, and hashed capability tokens, plus the worktrees themselves | `src/amux/store.py`, `src/amux/worktree.py`, `$XDG_STATE_HOME/amux/` |
-
-The red nodes are the sandbox boundary. `context.db` and the tmux socket are
-never mounted into a VM, and the shim can only speak the context vocabulary —
-see [two rules that define the boundary](#two-rules-that-define-the-boundary).
 
 # runtimes
 
