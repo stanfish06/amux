@@ -21,6 +21,90 @@ amux monitor -W 160 -T 60                   # ...at 160 cols, 60 of them for the
 ```
 - runs on a dedicated tmux server (socket `amux-root`); attach: `tmux -L amux-root attach -t myproj`
 
+# architecture
+
+Four layers. A frontend issues commands, a runtime places each agent somewhere,
+a communication layer carries state back, and a context layer is the only thing
+that remembers anything.
+
+```mermaid
+flowchart TB
+    accTitle: amux Layered Architecture
+    accDescr: The CLI and monitor TUI drive one of two runtimes, host tmux panes or Docker sandbox microVMs, agents report state either directly or through an authenticated loopback context service, and both paths converge on one host-side context database.
+
+    subgraph frontend ["Frontend"]
+        cli["amux CLI<br/>spw · spg · kg · kw · integrate<br/>note · ctx · doctor · context-service"]
+        tui["amux monitor<br/>read-only Ink TUI, tui/"]
+    end
+
+    subgraph runtime ["Runtime"]
+        proto{{"Runtime protocol<br/>runtime.py"}}
+        host["HostRuntime<br/>one tmux pane per agent, socket amux-root"]
+        vm["SandboxRuntime<br/>one sbx microVM per agent, private clone"]
+        agent["claude / codex"]
+    end
+
+    subgraph comms ["Communication"]
+        hooks["agent hooks<br/>spawn · busy · stop · notify · exit"]
+        emit["amux event emit<br/>events.py, in process on the host"]
+        shim["in-VM amux shim<br/>sandbox_client.py, context subset only"]
+        svc["context service<br/>loopback HTTP :47317, bearer capability<br/>context:read · notes:write · events:write"]
+        bus["tmux bus<br/>@amux_state option + wait-for channel"]
+    end
+
+    subgraph contextl ["Context"]
+        store["store.py<br/>schema · migration · token hashing"]
+        db[("context.db<br/>events · notes · worktrees · tokens")]
+        trees["git worktrees<br/>amux/ws/task/name off the integration branch"]
+    end
+
+    cli --> proto
+    cli --> store
+    cli -->|"amux context-service start"| svc
+    tui -.->|"poll tmux"| bus
+    tui -.->|"amux event state --json"| store
+    proto --> host
+    proto --> vm
+    host --> agent
+    vm --> agent
+    host --> trees
+    vm -->|"integrate: fetch the sandbox remote"| trees
+    trees --> store
+
+    agent --> hooks
+    hooks -->|host| emit
+    hooks -->|sandboxed| shim
+    shim -->|"HTTP + bearer token"| svc
+    svc --> store
+    emit --> store
+    emit --> bus
+    svc -.->|"if the pane is alive"| bus
+    store --> db
+
+    classDef frontend_style fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#3b0764
+    classDef runtime_style fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a5f
+    classDef comms_style fill:#fef9c3,stroke:#ca8a04,stroke-width:2px,color:#713f12
+    classDef context_style fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef guard_style fill:#fee2e2,stroke:#dc2626,stroke-width:2px,color:#7f1d1d
+
+    class cli,tui frontend_style
+    class proto,host,agent runtime_style
+    class hooks,emit,shim,bus comms_style
+    class store,db,trees context_style
+    class vm,svc guard_style
+```
+
+| layer | what it is | where it lives |
+| --- | --- | --- |
+| **frontend** | the `amux` CLI, and `amux monitor`, a read-only Node/Ink dashboard that polls tmux and shells back into `amux event state --json` rather than opening the database itself | `src/amux/cli.py`, `src/amux/monitor.py`, `tui/` |
+| **runtime** | the seam that decides *where* an agent runs. `HostRuntime` gives it a tmux pane and a git worktree; `SandboxRuntime` gives it an `sbx` microVM with a private clone. Everything above this line is runtime-agnostic | `src/amux/runtime.py`, `src/amux/core.py`, `src/amux/sandbox.py`, `src/amux/sandbox_bootstrap.py` |
+| **communication** | how an agent's state gets back. Hooks fire on both runtimes; on the host they call `amux event emit` directly, in a sandbox they call the stdlib-only shim, which reaches the host over authenticated loopback HTTP. Both paths record the event and then signal the tmux bus that wakes `amux event wait` | `src/amux/events.py`, `src/amux/sandbox_hooks.py`, `src/amux/sandbox_client.py`, `src/amux/context_service.py` |
+| **context** | the only durable state: one sqlite database on the host holding events, notes, the worktree registry, and hashed capability tokens, plus the worktrees themselves | `src/amux/store.py`, `src/amux/worktree.py`, `$XDG_STATE_HOME/amux/` |
+
+The red nodes are the sandbox boundary. `context.db` and the tmux socket are
+never mounted into a VM, and the shim can only speak the context vocabulary —
+see [two rules that define the boundary](#two-rules-that-define-the-boundary).
+
 # runtimes
 
 Two execution backends. `host` is the default and is unchanged: the agent runs
