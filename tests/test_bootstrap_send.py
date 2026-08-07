@@ -386,6 +386,40 @@ def test_a_chooser_whose_second_option_is_below_the_fold_is_still_a_chooser():
     assert not core.interface_ready(truncated)
 
 
+def test_a_numbered_list_in_the_transcript_does_not_make_a_pane_unreachable():
+    """`1.` in an agent's own output is not a menu.
+
+    A chooser's caret marks its selected option and the menu runs beneath it; a
+    numbered list an agent printed is always above the composer. Scanning the
+    whole pane conflates them, which costs nothing at spawn -- the transcript is
+    empty then -- and silently breaks the `amux send` this helper exists to be
+    reused by, since by that point a pane has said plenty.
+    """
+    ready = capture("codex_0.146.0_ready")
+    assert core.interface_ready(ready)
+
+    assert core.interface_ready("1. Install the dependencies\n2. Run them\n\n" + ready)
+
+
+def test_a_chooser_is_caught_by_the_option_on_its_own_caret_line():
+    """What actually catches every real chooser: the caret marks the SELECTED
+    option, so the caret line itself is numbered.
+
+    An earlier version of this test was called
+    `..._still_reaches_options_under_the_caret` and asserted the same thing,
+    which was a lie by name -- narrowing the scan to the caret line alone passes
+    it. That clause of the implementation is deliberate breadth for a chooser
+    shape no capture has (an unnumbered caret over a numbered menu) and NOTHING
+    PINS IT. Said here rather than dressed up, because a test whose name
+    overclaims is worse than an absent one.
+    """
+    assert not core.interface_ready(
+        "some output\n\n› 1. Yes, continue\n  2. No, quit\n\n  Press enter to continue"
+    )
+    # The caret line alone is enough, in every real capture and here.
+    assert not core.interface_ready("some output\n\n› 2. No, quit\n\n  a footer")
+
+
 def test_a_chooser_raised_mid_session_is_caught_too():
     """Choosers are not only a startup phenomenon: codex offered to switch model
     on its own, several turns in, while this fixture was being captured."""

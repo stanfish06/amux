@@ -361,17 +361,33 @@ def interface_ready(capture: str) -> bool:
 
     Two clauses, each measured rather than reasoned:
 
-    - No blocking chooser. It renders a caret too, and it is not a composer.
     - A caret line with something rendered BELOW it. A composer has a status
       footer under it; a shell prompt is the last thing on the screen. Without
       this, the common `❯ ` zsh prompt reads as ready and the message is typed
       into a shell, which then runs it.
+    - No blocking chooser FROM THE LAST CARET DOWN. It renders a caret too, and
+      it is not a composer.
+
+    The chooser scan is bounded rather than whole-pane because a chooser's caret
+    marks its selected option and the rest of the menu is beneath it, while a
+    numbered list in an agent's transcript is always above. Scanning everything
+    makes any pane that has ever printed "1. do this" read as never-ready --
+    free at spawn, where the transcript is empty, and the feature silently not
+    working for the `amux send` this helper is meant to be reused by. Verified
+    verdict-identical to the whole-pane scan across every captured fixture.
+
+    Two known limits, stated because neither is pinned by a test. A chooser
+    whose options are not numbered is invisible to this and to the whole-pane
+    scan alike -- no real capture has one. And every real chooser numbers the
+    caret line itself, so the part of the scan that reaches BELOW the caret is
+    deliberate breadth for a shape nothing has exhibited, not a measured need.
     """
-    if _CHOOSER.search(capture):
-        return False
     lines = capture.splitlines()
     last = max((i for i, line in enumerate(lines) if line.strip()), default=-1)
-    return any(_CARET.match(line) for line in lines[:last])
+    carets = [i for i, line in enumerate(lines) if _CARET.match(line)]
+    if not any(i < last for i in carets):
+        return False
+    return not _CHOOSER.search("\n".join(lines[carets[-1] :]))
 
 
 def _not_ready_reason(capture: str, timeout: float) -> str:
