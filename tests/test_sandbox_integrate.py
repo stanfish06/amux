@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from amux import store, worktree
+from amux.shared import AgentRequest
 from test_host_grid_snapshot import git
 
 SANDBOX = "amux-ws-t0-alpha-deadbeef"
@@ -103,9 +104,12 @@ def test_the_fetched_tip_is_kept_in_a_durable_local_ref(git_repo, task, clone):
     # Namespaced away from refs/heads so it cannot collide with a host agent's
     # identically named branch.
     assert ref.startswith("refs/amux/sandboxes/")
-    assert BRANCH not in git(
-        git_repo, "for-each-ref", "--format=%(refname:short)", "refs/heads"
-    ).splitlines()
+    assert (
+        BRANCH
+        not in git(
+            git_repo, "for-each-ref", "--format=%(refname:short)", "refs/heads"
+        ).splitlines()
+    )
 
 
 def test_a_merge_commit_is_made_even_for_a_single_commit(git_repo, task, clone):
@@ -222,7 +226,7 @@ def test_host_and_sandbox_agents_integrate_in_one_pass(git_repo, task, clone):
     register(git_repo)
 
     # A host agent alongside it, with a real worktree.
-    worktree.setup_host_agents(task, [("%2", "codex", "beta")])
+    worktree.setup_host_agents(task, [("%2", AgentRequest("codex"), "beta")])
     host_path = f"{worktree.task_worktree_root('ws', 't0')}/beta"
     (Path(host_path) / "host.txt").write_text("h\n")
     git(host_path, "add", "host.txt")

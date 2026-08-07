@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from amux import sandbox, sandbox_bootstrap, store, worktree
-from amux.shared import DEFAULT_SOCKET
+from amux.shared import DEFAULT_SOCKET, AgentRequest, render_command, render_tuning
 
 HOST = "host"
 DOCKER_SANDBOX = "docker-sandbox"
@@ -42,6 +42,12 @@ class PaneSpec:
     pane: str
     agent: str
     name: str
+    model: str = ""
+    effort: str = ""
+
+    @property
+    def request(self) -> AgentRequest:
+        return AgentRequest(agent=self.agent, model=self.model, effort=self.effort)
 
 
 @dataclass(frozen=True)
@@ -58,7 +64,7 @@ class Runtime(Protocol):
 
     def preflight(
         self,
-        agents: list[str],
+        agents: list[AgentRequest],
         *,
         workspace: str | None,
         task: str | None,
@@ -91,7 +97,7 @@ class HostRuntime:
 
     def preflight(
         self,
-        agents: list[str],
+        agents: list[AgentRequest],
         *,
         workspace: str | None,
         task: str | None,
@@ -118,7 +124,13 @@ class HostRuntime:
         paths = self._worktrees(panes, workspace=workspace, task=task, cwd=cwd)
         launches = []
         for spec in panes:
-            command = AGENT_COMMANDS.get(spec.agent, spec.agent)
+            # A raw command spec is its own agent string and carries no tuning
+            # by construction, so `render_tuning` returns () and nothing is
+            # appended to it.
+            command = render_command(
+                AGENT_COMMANDS.get(spec.agent, spec.agent),
+                render_tuning(spec.request),
+            )
             path = paths.get(spec.pane)
             keys = []
             if path:
@@ -156,7 +168,7 @@ class HostRuntime:
                 repo,
                 workspace,
                 task,
-                [(spec.pane, spec.agent, spec.name) for spec in panes],
+                [(spec.pane, spec.request, spec.name) for spec in panes],
             )
         except worktree.WorktreeError as exc:
             print(f"amux: worktree isolation unavailable: {exc}")
@@ -409,7 +421,7 @@ class SandboxRuntime:
 
     def preflight(
         self,
-        agents: list[str],
+        agents: list[AgentRequest],
         *,
         workspace: str | None,
         task: str | None,
@@ -417,7 +429,7 @@ class SandboxRuntime:
     ) -> None:
         repo = worktree.repo_root(cwd) if cwd else None
         sandbox.preflight(
-            agents=agents,
+            agents=[r.agent for r in agents],
             repo=repo or "",
             resources=self.config.resources,
             endpoint=self.config.policy_target,
@@ -520,6 +532,8 @@ class SandboxRuntime:
             sandbox_name=name,
             sandbox_id=handle.id,
             socket_name=socket or DEFAULT_SOCKET,
+            model=spec.model,
+            effort=spec.effort,
         )
 
         if acquired.reattached:
@@ -563,7 +577,7 @@ class SandboxRuntime:
         return Launch(
             pane=spec.pane,
             cwd="",  # the pane's working directory is inside the VM
-            keys=(sandbox.attach_command(name, spec.agent),),
+            keys=(sandbox.attach_command(name, spec.agent, spec.request),),
         )
 
     @staticmethod

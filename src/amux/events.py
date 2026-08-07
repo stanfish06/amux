@@ -251,9 +251,14 @@ _PANE_FIELDS = (
     "#{pane_current_path}",
     "#{session_name}",
     "#{window_name}",
+    "#{@amux_model}",
+    "#{@amux_effort}",
     _SENTINEL,
 )
-_FREE_TEXT = slice(7, 11)
+# Everything tmux can hand back with the delimiter in it, so it all lives
+# behind the same exact-field-count guard in `_parse_pane`. Model and effort
+# are unvalidated pass-through values, which puts them squarely in here.
+_FREE_TEXT = slice(7, 13)
 _DELIM = "\x1f"
 _PANE_FORMAT = _DELIM.join(_PANE_FIELDS)
 
@@ -275,6 +280,8 @@ class PaneFacts:
     cwd: str = ""
     workspace: str = ""
     task: str = ""
+    model: str = ""
+    effort: str = ""
 
     def __post_init__(self) -> None:
         if self.alive and self.created is None:
@@ -312,7 +319,14 @@ def _parse_pane(line: str) -> PaneFacts:
         command=fields[6],
     )
     if len(fields) == len(_PANE_FIELDS):
-        facts.agent, facts.cwd, facts.workspace, facts.task = fields[_FREE_TEXT]
+        (
+            facts.agent,
+            facts.cwd,
+            facts.workspace,
+            facts.task,
+            facts.model,
+            facts.effort,
+        ) = fields[_FREE_TEXT]
     return facts
 
 

@@ -48,15 +48,83 @@ locally. See *Sandboxed agents* for why, and for `--runtime docker-sandbox`.
 
 ## Agent specs and grid shape
 
-`-a AGENT[:COUNT]` is repeatable and fills panes row-major. `AGENT` is `claude`,
-`codex`, or any raw shell command. Default is one `claude`.
+`-a AGENT[@MODEL][/EFFORT][:COUNT]` is repeatable and fills panes row-major.
+`AGENT` is `claude`, `codex`, or any raw shell command. Every other part is
+optional. Default is one `claude`.
 
 ```sh
 amux spw myproj -p ~/Git/myproj -r 2 -c 2   # 2x2, all claude
 amux spg myproj review -a codex:2           # 1x2, both codex
 amux spg myproj fix -a claude:3 -a codex    # 2x2, 3 claude + 1 codex
 amux spg myproj shell -a bash               # raw command instead of an agent
+amux spg myproj plan -a claude@opus/high -a codex@gpt-5.6-sol/xhigh   # per-spec model + effort
 ```
+
+## Model and reasoning effort
+
+Each spec carries its own model and effort, so one grid can mix a cheap
+reviewer with an expensive implementer. Both work identically under the host
+and `docker-sandbox` runtimes, and `amux ctx` reports what your own pane was
+launched with, so you can check rather than guess.
+
+They become each CLI's own flags — `claude --model X --effort Y`, `codex -m X
+-c model_reasoning_effort=Y` — appended to the command amux already runs.
+
+**amux does not check the values.** A model or effort level released after this
+amux was built works immediately, and amux never refuses one it has not heard
+of. The cost is that **a typo is not caught by anything, and it fails quietly
+rather than loudly** — do not expect a dead pane to tell you. Measured live
+against `claude` 2.1.224 and `codex-cli` 0.146.0:
+
+- `claude --effort hgih` prints `Warning: Unknown --effort value 'hgih' —
+  ignoring it and using the default effort`, then runs normally on its default.
+- `codex -c model_reasoning_effort=hgih` accepts the string silently and
+  displays it as if it were real.
+- A bad *model* on either agent starts normally and fails at the first API call.
+
+So the pane comes up alive, and it is running on a configuration that is not the
+one you asked for. **`amux ctx` will not save you here**: it reports what the
+pane was *launched* with, and cannot know what the agent did with that. After a
+typo the two disagree.
+
+**Be careful which banner you trust — the two agents differ.** claude's startup
+box reports the *effective* value: launch it with `--effort hgih` and the box
+reads `with high effort`, the default it actually fell back to, so it is a real
+confirmation. Codex's `model:` row is a bare **echo of what you passed** —
+`codex -m totally-bogus-model-zzz` prints that nonexistent model verbatim and
+runs until the first API call fails. So for codex the row confirms only that
+your flag arrived, never that the model exists or was accepted. To know a codex
+model is real, send it a prompt and see whether the request succeeds; nothing
+before that first call can tell you. That last part is measured, not assumed: a
+bogus-model pane left idle shows nothing in its whole scrollback, and codex's
+`⚠ Model metadata for ... not found` warning does not appear at startup — it
+arrives with the first request, alongside the `400 ... model is not supported`
+that is the actual answer. **An untroubled-looking fresh codex pane is not
+evidence of anything.**
+
+What amux does reject is a malformed *shape* — `claude@`, `claude/`, and
+`claude@opus/` are errors, and nothing is created.
+
+**Escape hatch.** `@`, `/` and `:` are the delimiters, so a model id containing
+`/` (`openai/gpt-5`) or ending in `:<digits>` (a Bedrock-style `…-v1:0`) cannot
+go in a spec — it parses as an effort level or an invalid count. Launch it as a
+raw command instead:
+
+```sh
+amux spg myproj fix -a 'claude --model openai/gpt-5 --dangerously-skip-permissions'
+```
+
+You are trading the grammar for the flag. A raw spec carries no `@MODEL` or
+`/EFFORT` of its own, so it must spell out every flag itself — including the
+ones amux normally adds, which is why the example above repeats
+`--dangerously-skip-permissions`. It also cannot run under `docker-sandbox` at
+all, and `ctx` and `monitor` print the whole command string in the agent column
+instead of `claude` or `codex`. Prefer the spec grammar when your model id fits
+it.
+
+What a raw-command pane does **not** lose is its work. It still gets its own
+worktree and branch like everyone else, and `amux integrate` merges its branch
+normally — so commit and integrate exactly as you otherwise would.
 
 Shape resolution, given `n` total agents:
 

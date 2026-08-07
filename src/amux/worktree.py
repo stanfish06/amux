@@ -18,7 +18,7 @@ import subprocess
 from dataclasses import dataclass
 
 from amux import store
-from amux.shared import STATE_DIR
+from amux.shared import STATE_DIR, AgentRequest
 
 INTEGRATION_DIR = "_integration"
 
@@ -150,12 +150,12 @@ def remove_task_integration(integration: TaskIntegration) -> None:
 
 def setup_host_agents(
     integration: TaskIntegration,
-    panes: list[tuple[str, str, str]],
+    panes: list[tuple[str, AgentRequest, str]],
 ) -> dict[str, str]:
     """One worktree + registry row per host pane, branched off the integration
     branch.
 
-    `panes` is a list of (pane_id, agent, name). Returns {pane_id: path}. Rolls
+    `panes` is a list of (pane_id, request, name). Returns {pane_id: path}. Rolls
     back its own worktrees and rows on failure; the integration worktree belongs
     to the caller that created it.
     """
@@ -166,7 +166,7 @@ def setup_host_agents(
     created: list[str] = []
     registered: list[int] = []
     try:
-        for pane_id, agent, name in panes:
+        for pane_id, request, name in panes:
             branch = agent_branch(workspace, task, name)
             path = f"{root}/{name}"
             _git(repo, "worktree", "add", path, "-b", branch, integration.branch)
@@ -176,12 +176,14 @@ def setup_host_agents(
                     pane=pane_id,
                     workspace=workspace,
                     task=task,
-                    agent=agent,
+                    agent=request.agent,
                     name=name,
                     path=path,
                     branch=branch,
                     base_ref=integration.base_ref,
                     repo=repo,
+                    model=request.model,
+                    effort=request.effort,
                 )
             )
             paths[pane_id] = path
@@ -198,7 +200,7 @@ def setup_task(
     repo: str,
     workspace: str,
     task: str,
-    panes: list[tuple[str, str, str]],
+    panes: list[tuple[str, AgentRequest, str]],
 ) -> dict[str, str]:
     """Host-runtime task setup: the integration worktree + one worktree per pane."""
     integration = setup_task_integration(repo, workspace, task)

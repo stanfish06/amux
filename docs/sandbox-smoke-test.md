@@ -353,13 +353,26 @@ Take the "before" numbers from step 0d again if time has passed, then:
 date +%s.%N > /tmp/spawn-start
 amux spw "$WS" -p "$SMOKE" -t "$TASK" \
   --runtime docker-sandbox --cpus 2 --memory 4g \
-  -a claude:2 -a codex:2
+  -a claude@opus/high:2 -a codex:2
 date +%s.%N > /tmp/spawn-returned
 ```
 
 `--cpus 2 --memory 4g` are amux's defaults, stated explicitly here because
 `sbx`'s own defaults are *not* caps: `--cpus 0` means every host CPU and default
 memory is half the host's.
+
+The two claude panes carry a model and effort and the two codex panes carry
+neither, so one spawn exercises both halves of the spec grammar under the
+sandbox runtime. Under `docker-sandbox` the flags ride on the attach command
+rather than on `sbx create`, which is the part that has no host equivalent —
+and claude has no other attach argument, so this is also the case that proves
+the `<agent> -- <args>` form is emitted for tuning alone.
+
+**Substitute a model your account can actually serve.** The value is passed
+through unchecked, and a model you have no access to does *not* stop the pane —
+the agent starts normally and fails at its first API call, so you would be
+measuring a healthy-looking pane that cannot do any work. That quiet failure is
+step 5e's subject, not this one.
 
 ### 5a. Spawn-to-prompt latency
 
@@ -425,6 +438,64 @@ sbx ls --json | python3 -c 'import json,sys; [print(s.get("name"), {k:v for k,v 
 Record the deltas and, separately, whatever per-sandbox resource fields
 `sbx ls --json` actually reports. If it reports none, say so — that answers one
 of the change's open questions.
+
+### 5d. The tuned panes report their own model and effort
+
+A sandboxed agent cannot read tmux pane options, so its `ctx` is served from
+the worktree row through the context service — a different path from the host's,
+and the one that silently reports nothing if any hop was missed.
+
+From inside one of the **claude** panes:
+
+```sh
+amux ctx | head -3
+amux ctx --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["self"])'
+```
+
+Expect a `model: opus  effort: high` line below the `runtime:` line, and both
+values as separate fields in `self`. Then check the launch actually carried
+them, rather than trusting the report:
+
+```sh
+sbx ls --json | python3 -m json.tool | grep -A3 command   # or the pane's scrollback
+tmux -L amux-root capture-pane -p -t "$PANE" | head -20
+```
+
+From a **codex** pane, `amux ctx` must print no `model:`/`effort:` line at all
+and `self` must carry neither key. A default reported for a pane that was never
+given one is a bug, not a nicety: it would tell an agent it is running on a
+model nobody chose.
+
+### 5e. A mistyped effort survives quietly, and `ctx` then lies
+
+This is the documented trade-off of passing values through unchecked, and it is
+quieter than it sounds. Confirm it behaves as documented rather than assuming it
+does:
+
+```sh
+amux spg "$WS" typo --runtime docker-sandbox -a claude/hihg
+```
+
+Expect the spec to be **accepted** — amux validates shape, not values — the pane
+and sandbox to be created, and the agent to come up **alive**. On the host this
+was measured against `claude` 2.1.224: it prints `Warning: Unknown --effort
+value 'hihg' — ignoring it and using the default effort` and then runs normally.
+Nothing dies.
+
+The thing to record is the disagreement that leaves behind. From inside that
+pane:
+
+```sh
+amux ctx | head -3                                    # reports effort: hihg
+tmux -L amux-root capture-pane -p -t "$PANE" | head -20   # agent's own banner
+```
+
+`ctx` reports what the pane was *launched* with, so it will confidently print
+`effort: hihg` for an agent that is running on its default. Record whether the
+agent's warning is still on screen or has scrolled away — that, not a dead pane,
+is what decides whether this trade-off is tolerable, because the scrolled-away
+case leaves no signal anywhere except the agent's own banner. Then
+`amux kg "$WS" typo --clean`.
 
 ---
 

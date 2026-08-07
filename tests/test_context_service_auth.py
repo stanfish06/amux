@@ -124,7 +124,6 @@ class Probe:
         raise AssertionError(f"no log record containing {needle!r} within {timeout}s")
 
 
-
 class _Capture(logging.Handler):
     def __init__(self, sink: list[logging.LogRecord]) -> None:
         super().__init__()
@@ -160,9 +159,8 @@ def spy():
 
     def handler(service, request):
         return 200, {
-            "identity": vars(request.caller) | {
-                "permissions": sorted(request.caller.permissions)
-            },
+            "identity": vars(request.caller)
+            | {"permissions": sorted(request.caller.permissions)},
             "body": request.body,
             "query": request.query,
         }
@@ -197,6 +195,8 @@ def test_a_minted_token_authenticates_and_carries_the_whole_row(token_probe, spy
         "runtime_status": "running",
         "sandbox_name": "amux-proj-fix-swift-crane-a1b2",
         "sandbox_id": "sbx-0001",
+        "model": "",
+        "effort": "",
         "status": "active",
         "socket": "amux-root",
         "permissions": sorted(cs.AGENT_PERMISSIONS),
@@ -268,7 +268,9 @@ def test_one_agents_token_cannot_become_another(token_probe, spy):
     assert payload["identity"]["name"] == "swift-crane"
 
 
-def test_the_socket_comes_from_the_row_so_events_reach_the_right_server(token_probe, spy):
+def test_the_socket_comes_from_the_row_so_events_reach_the_right_server(
+    token_probe, spy
+):
     token, _, _ = token_probe.agent(socket_name="amux-other")
     _, payload = token_probe.get(spy, token=token)
     assert payload["identity"]["socket"] == "amux-other"
@@ -311,7 +313,9 @@ def test_a_revoked_token_is_rejected(token_probe, spy):
 def test_removing_a_sandbox_revokes_its_capabilities(token_probe, spy):
     token, _, worktree_id = token_probe.agent()
     other_token, _, _ = token_probe.agent(pane="%2")
-    revoked = store.revoke_context_tokens_for_worktree(worktree_id, db_path=token_probe.db)
+    revoked = store.revoke_context_tokens_for_worktree(
+        worktree_id, db_path=token_probe.db
+    )
     assert revoked == 1
     assert token_probe.get(spy, token=token)[0] == 401
     # A teammate's capability is untouched.
@@ -354,12 +358,15 @@ def test_unknown_expired_and_revoked_are_indistinguishable(token_probe, spy):
     revoked, revoked_id = token_probe.mint(worktree_id)
     store.revoke_context_token(revoked_id, db_path=token_probe.db)
     answers = {
-        json.dumps(token_probe.get(spy, token=t)) for t in ("unknown-token", expired, revoked)
+        json.dumps(token_probe.get(spy, token=t))
+        for t in ("unknown-token", expired, revoked)
     }
     assert len(answers) == 1
 
 
-def test_a_token_from_another_database_does_not_authenticate(token_probe, spy, tmp_path):
+def test_a_token_from_another_database_does_not_authenticate(
+    token_probe, spy, tmp_path
+):
     """Authentication reads the service's own store and no other."""
     elsewhere = tmp_path / "elsewhere.db"
     other_id = store.register_worktree(
@@ -453,7 +460,9 @@ def test_a_route_refuses_a_capability_that_lacks_its_permission(token_probe):
     )
     try:
         allowed, _, _ = token_probe.agent(pane="%1", permissions=cs.AGENT_PERMISSIONS)
-        read_only, _, _ = token_probe.agent(pane="%2", permissions=(cs.PERM_CONTEXT_READ,))
+        read_only, _, _ = token_probe.agent(
+            pane="%2", permissions=(cs.PERM_CONTEXT_READ,)
+        )
         assert token_probe.post("/v1/needs-notes", token=allowed)[0] == 200
         status, payload = token_probe.post("/v1/needs-notes", token=read_only)
         assert status == 403
