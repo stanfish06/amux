@@ -313,7 +313,18 @@ _CARET = re.compile(r"^\s*[>›❯]\s*(?:\S.*)?$")
 #: the keyboard, and render a caret exactly like a composer does. Sending a
 #: message into codex's update modal types it into a menu whose first entry runs
 #: `npm install -g @openai/codex`, so this exclusion is load-bearing, not tidy.
-_CHOOSER = re.compile(r"^\W*[2-9]\.\s+\S", re.MULTILINE)
+#:
+#: `[1-9]`, not `[2-9]`, and the first option is the one that matters. In an
+#: 80x8 pane -- an ordinary quarter of a 2x2 grid -- the trust modal's `2. No,
+#: quit` and `Press enter to continue` lines fall BELOW THE VISIBLE AREA, so a
+#: matcher that needs to see a second option sees a lone `> 1. Yes, continue`
+#: and calls the modal a composer. The `Enter` that follows the message would
+#: then land on the highlighted first option, which is amux silently answering a
+#: trust prompt on the user's behalf -- the one thing this change must not do.
+#:
+#: Matching a `1.` in ordinary agent output costs a refusal to send, which is a
+#: reported timeout. That is the safe direction and this errs towards it.
+_CHOOSER = re.compile(r"^\W*[1-9]\.\s+\S", re.MULTILINE)
 
 BOOTSTRAP_READY_TIMEOUT_S = 45.0
 BOOTSTRAP_POLL_S = 0.5
@@ -331,12 +342,17 @@ BOOTSTRAP_SUBMIT_PAUSE_S = 0.4
 #: there unsubmitted as submitted, at every probe length. The retry `Enter`
 #: then never fires and amux says nothing was wrong.
 #:
-#: SHORT, because the same truncation eventually eats the tail too: measured
-#: against a real capture of that 80x8 pane, anything from about 110 characters
-#: up starts failing. Short has its own floor -- at a handful of characters the
-#: probe stops identifying the message and matches the footer of a pane that
-#: submitted it cleanly. Both cliffs are pinned by fixtures in
-#: `test_pane_readiness_fixtures/`; this sits between them, near neither.
+#: SHORT, because the same truncation eventually eats the tail too. Measured
+#: against the real 80x8 capture: 189 characters still matches, 190 does not.
+#: Short has its own floor, and it is lower than it looks -- only a 1-character
+#: probe false-matches the footer of a pane that submitted cleanly; 2 is already
+#: clean. So the safe band is 2..189 and 40 sits well inside it, with about 150
+#: characters of headroom above.
+#:
+#: Both cliffs are pinned by fixtures in `test_pane_readiness_fixtures/`, which
+#: is what to trust: these numbers are a property of one capture at one pane
+#: size, and re-recording that capture moves them. An earlier version of this
+#: comment said 110, carried over from a capture that was later replaced.
 _PROBE_CHARS = 40
 
 

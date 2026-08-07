@@ -58,9 +58,34 @@ hold the real payload, typed into a real composer:
   message plainly sitting unsubmitted reads as submitted, the retry `Enter` never
   fires, and amux reports no problem.
 
-Together they pin both cliffs behaviourally rather than by asserting a constant:
-a probe of ~1 character matches the footer of a cleanly submitted pane, and one
-of ~110 or more no longer fits in what the 80x8 capture shows.
+Together they pin both cliffs behaviourally rather than by asserting a constant.
+Measured against these exact files: a 1-character probe matches the footer of a
+cleanly submitted pane (2 is already clean), and 190 characters no longer fits in
+what the 80x8 capture shows (189 does). The shipped 40 sits inside that band with
+about 150 characters of headroom.
+
+Treat those numbers as properties of *these captures at these pane sizes*, not of
+the code: re-record a file and they move. An earlier version of this README said
+~110, which was true of a capture that has since been replaced and was never
+re-measured — the shape of mistake worth avoiding here more than the value.
+
+## The 80x8 pane found two more things
+
+Taking the small-pane captures was the reviewer's idea, to pin the false-stuck
+direction that a stuck-only pair leaves open. It found two defects instead:
+
+- `codex_0.146.0_80x8_trust_modal_truncated.txt` — the trust modal with its
+  `2. No, quit` and `Press enter to continue` lines **below the visible area**.
+  A chooser matcher that needs to see a second option reads a lone
+  `> 1. Yes, continue` as a composer, and the `Enter` after the message then
+  lands on the highlighted first option: amux answering a trust prompt on the
+  user's behalf. This is why `_CHOOSER` matches `[1-9]`, not `[2-9]`.
+- `codex_0.146.0_80x8_model_chooser.txt` — codex offering to switch model,
+  raised **on its own, several turns in**, while these captures were being
+  taken. Choosers are not only a startup phenomenon.
+
+`codex_0.146.0_80x8_real_message_submitted.txt` is the capture that was actually
+being sought, and it behaves: ready, and not holding the message.
 
 `codex_0.146.0_shell_prompt_after_exit.txt` is this developer's shell prompt,
 kept because it is the shape a capture takes when the agent is not running at

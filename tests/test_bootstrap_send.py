@@ -16,9 +16,11 @@ they are files rather than string literals in this module.
 Two hazards shape the whole design, and both are measured rather than imagined:
 
 - **A blocking chooser renders a caret too.** `codex` shows an update prompt and
-  both agents show a trust-this-directory prompt *before* the composer. Typing a
-  message into codex's update modal types it into a menu whose first entry runs
-  `npm install -g @openai/codex`.
+  both agents show a trust-this-directory prompt *before* the composer — and
+  codex raises a model-switch chooser mid-session, unprompted. Typing a message
+  into codex's update modal types it into a menu whose first entry runs
+  `npm install -g @openai/codex`. In a small pane a chooser's later options fall
+  below the fold, so only its *first* option is on screen to recognise it by.
 - **Nothing here may raise.** The helper runs inside `core._build_grid`, whose
   callers answer any exception by killing the whole session (`spw`) or the whole
   task window (`spg`). An agent that cannot be given its pointer loses its
@@ -96,12 +98,18 @@ def send(p, text=MESSAGE, **kwargs) -> str:
 # --- reading a real interface -------------------------------------------------
 
 
-READY = ["codex_0.146.0_ready", "claude_2.1.224_ready"]
+READY = [
+    "codex_0.146.0_ready",
+    "claude_2.1.224_ready",
+    "codex_0.146.0_80x8_real_message_submitted",
+]
 NOT_READY = [
     "codex_0.146.0_starting",
     "claude_2.1.224_starting",
     "codex_0.146.0_update_modal",
     "codex_0.146.0_trust_modal",
+    "codex_0.146.0_80x8_trust_modal_truncated",
+    "codex_0.146.0_80x8_model_chooser",
     "claude_2.1.224_trust_modal",
     "codex_0.146.0_shell_prompt_after_exit",
     "synthetic_caret_shell_prompt",
@@ -347,9 +355,46 @@ def test_a_message_whose_head_scrolled_out_of_the_composer_is_still_stuck():
     assert verbs(p).count("enter") == 2
 
 
+def test_a_submitted_message_in_a_small_pane_is_not_mistaken_for_a_stuck_one():
+    """The other direction at 80x8, which the stuck-only pair left unpinned.
+
+    A tail probe is the right call precisely because the tail is what a small
+    composer keeps -- so it is worth checking that a pane which really did
+    submit does not still show it, or every success there would retry `Enter`
+    onto an empty prompt.
+    """
+    p = pane(capture("codex_0.146.0_ready"), capture("codex_0.146.0_80x8_real_message_submitted"))
+
+    assert send(p) == ""
+    assert verbs(p).count("enter") == 1
+
+
+def test_a_chooser_whose_second_option_is_below_the_fold_is_still_a_chooser():
+    """Found by taking the capture above, and it was a live defect.
+
+    In an 80x8 pane the trust modal's `2. No, quit` and `Press enter to
+    continue` fall BELOW THE VISIBLE AREA. A matcher needing a second option
+    sees a lone `> 1. Yes, continue`, calls the modal a composer, and the
+    `Enter` after the message lands on the highlighted first option -- amux
+    silently answering a trust prompt for the user, which is the one thing this
+    whole feature is not allowed to do.
+    """
+    truncated = capture("codex_0.146.0_80x8_trust_modal_truncated")
+    assert "2." not in truncated  # the giveaway really is off screen
+    assert "1. Yes, continue" in truncated
+
+    assert not core.interface_ready(truncated)
+
+
+def test_a_chooser_raised_mid_session_is_caught_too():
+    """Choosers are not only a startup phenomenon: codex offered to switch model
+    on its own, several turns in, while this fixture was being captured."""
+    assert not core.interface_ready(capture("codex_0.146.0_80x8_model_chooser"))
+
+
 def test_the_probe_is_short_enough_to_survive_a_truncated_composer(monkeypatch):
-    """The upper cliff, measured: from about 110 characters the probe stops
-    fitting in what an 80x8 pane shows, and a stuck message reads as sent.
+    """The upper cliff, measured against the 80x8 capture: 189 characters still
+    matches, 190 does not, and past it a stuck message reads as sent.
 
     `monkeypatch` rather than save-and-restore on purpose. Restoring a literal
     40 here would put the value back whatever the module said, so a mutated
@@ -363,9 +408,10 @@ def test_the_probe_is_short_enough_to_survive_a_truncated_composer(monkeypatch):
 
 
 def test_the_probe_is_long_enough_to_identify_the_message(monkeypatch):
-    """The lower cliff, from the same captures: a probe of one or two characters
-    is punctuation, and matches the footer of a pane that submitted cleanly --
-    which costs a live agent a spurious extra `Enter` on an empty prompt."""
+    """The lower cliff, from the same captures, and it is a narrow one: only a
+    1-character probe false-matches the footer of a pane that submitted cleanly
+    -- 2 is already clean. That costs a live agent a spurious extra `Enter` on
+    an empty prompt."""
     monkeypatch.setattr(core, "_PROBE_CHARS", 1)
     assert core._held_in_the_composer(capture(REAL_SUBMITTED), MESSAGE)
     monkeypatch.undo()
