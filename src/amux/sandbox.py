@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from amux.shared import render_command, skill_pointer_args
+
 SBX = "sbx"
 
 MIN_VERSION = (0, 37, 0)
@@ -319,14 +321,19 @@ AGENT_ATTACH_ARGS: dict[str, tuple[str, ...]] = {"codex": (HOOK_TRUST_FLAG,)}
 
 def attach_argv(name: str, agent: str = "") -> tuple[str, ...]:
     args = ["run", "--name", name]
-    extra = AGENT_ATTACH_ARGS.get(agent, ())
+    # Composed, not chosen between: the hook-trust flag is the sandbox's own
+    # requirement, the pointer is amux's for both runtimes, and `claude` reaches
+    # the `<agent> -- <args>` form through the pointer alone.
+    extra = (*AGENT_ATTACH_ARGS.get(agent, ()), *skill_pointer_args(agent))
     if extra:
         args += [agent, "--", *extra]
     return tuple(args)
 
 
 def attach_command(name: str, agent: str = "") -> str:
-    return " ".join((SBX, *attach_argv(name, agent)))
+    # Through `render_command`, because the pointer is one argument containing
+    # spaces: a bare join would hand `sbx` a dozen of them.
+    return render_command(SBX, attach_argv(name, agent))
 
 
 def stop(name: str) -> None:

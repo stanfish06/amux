@@ -22,7 +22,7 @@ from typing import Any
 import pytest
 
 import fake_tmux
-from amux import core, events, store, worktree
+from amux import core, events, shared, store, worktree
 
 GOLDEN_DIR = Path(__file__).parent / "golden"
 
@@ -93,7 +93,15 @@ def snapshot(
     state: Path,
 ):
     """Everything the host path did, with volatile values normalized away."""
-    subs = [(str(state), "<STATE>"), (str(repo), "<REPO>")]
+    # The skill pointer is normalized like a path is. These goldens exist to
+    # catch structural drift in what the host path does; the pointer's prose is
+    # pinned by `test_skill_pointer`, and leaving it inline would make every
+    # reworded sentence look like a change in grid building.
+    subs = [
+        (shared.SKILL_POINTER, "<POINTER>"),
+        (str(state), "<STATE>"),
+        (str(repo), "<REPO>"),
+    ]
     rows = store.worktrees_for("ws", "t0")
     with store._connect() as conn:  # noqa: SLF001 - the registry is the contract
         raw_events = [dict(r) for r in conn.execute("SELECT * FROM events ORDER BY id")]
