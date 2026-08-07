@@ -22,6 +22,7 @@ import pytest
 
 import fake_tmux
 from amux import core, runtime, sandbox, store, worktree
+from amux.shared import AgentRequest
 from test_host_grid_snapshot import tmux_calls  # noqa: F401 - fixture
 from test_sandbox_runtime import (  # noqa: F401 - `minted` is a fixture
     make_runtime,
@@ -246,7 +247,7 @@ def test_a_failed_grid_leaves_no_task_window(git_repo, fake_sbx):
             window_name="t0",
             nrows=1,
             ncols=2,
-            agents=["claude", "codex"],
+            agents=[AgentRequest("claude"), AgentRequest("codex")],
             cwd=str(git_repo),
             runtime=make_runtime(),
         )
@@ -272,7 +273,7 @@ def test_a_failed_workspace_spawn_leaves_no_session(git_repo, fake_sbx):
 
     with pytest.raises(runtime.GridCreationError):
         core._build_grid(  # noqa: SLF001
-            window, 1, 2, ["claude", "codex"], str(git_repo),
+            window, 1, 2, [AgentRequest("claude"), AgentRequest("codex")], str(git_repo),
             workspace="ws", task="t0", runtime=make_runtime(),
         )
     # _build_grid itself does not own the session; the spawn entry point does.
@@ -285,7 +286,7 @@ def test_host_grids_are_unaffected_by_the_unwind_path(git_repo, tmux_calls):
     assert runtime.HostRuntime().rollback() == []
     window = fake_tmux.new_window()
     grid = core._build_grid(  # noqa: SLF001
-        window, 1, 1, ["claude"], str(git_repo), workspace="ws", task="t0"
+        window, 1, 1, [AgentRequest("claude")], str(git_repo), workspace="ws", task="t0"
     )
     assert len(grid.agent_panes) == 1
 

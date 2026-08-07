@@ -18,7 +18,7 @@ from amux import (
     utils,
     worktree,
 )
-from amux.shared import ALIAS, scrub_pyinstaller_env
+from amux.shared import ALIAS, AgentRequest, scrub_pyinstaller_env
 
 
 def _get_session(server, workspace: str):
@@ -106,14 +106,22 @@ def _resolve_runtime(args) -> runtime.Runtime | None:
     )
 
 
-def _resolve_grid(args) -> tuple[int, int, list[str]]:
+def _resolve_grid(args) -> tuple[int, int, list[AgentRequest]]:
     agents = core.parse_agent_specs(args.agent or [], args.rows, args.cols)
     nrows, ncols = core.resolve_grid_shape(len(agents), args.rows, args.cols)
     return nrows, ncols, agents
 
 
-def _composition(agents: list[str]) -> str:
-    return " + ".join(f"{n} {agent}" for agent, n in Counter(agents).items())
+def _spec_text(request: AgentRequest) -> str:
+    """The request back in spec form; identical to the agent kind when untuned."""
+    model = f"@{request.model}" if request.model else ""
+    effort = f"/{request.effort}" if request.effort else ""
+    return f"{request.agent}{model}{effort}"
+
+
+def _composition(agents: list[AgentRequest]) -> str:
+    counted = Counter(_spec_text(a) for a in agents)
+    return " + ".join(f"{n} {agent}" for agent, n in counted.items())
 
 
 def _cmd_spw(server, args) -> int:
@@ -386,7 +394,7 @@ def _cmd_doctor(server, args) -> int:
     except OSError as exc:
         repo, git_failure = "", f"cannot run git: {exc.strerror or exc}"
     report = sandbox.preflight(
-        agents=core.parse_agent_specs(args.agent or [], None, None),
+        agents=[r.agent for r in core.parse_agent_specs(args.agent or [], None, None)],
         repo=repo,
         resources=resources,
         endpoint=config.policy_target,

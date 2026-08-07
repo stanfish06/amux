@@ -15,6 +15,7 @@ import random
 
 import fake_tmux
 from amux import core, runtime, sandbox, store
+from amux.shared import AgentRequest
 from test_host_grid_snapshot import tmux_calls  # noqa: F401 - fixture
 from test_sandbox_runtime import (  # noqa: F401 - `minted` is a fixture
     make_runtime,
@@ -252,7 +253,7 @@ def test_a_respawned_grid_lands_on_its_prior_names(git_repo, fake_sbx, tmux_call
         window = fake_tmux.new_window()
         random.seed(seed)
         return core._build_grid(  # noqa: SLF001
-            window, 1, 2, ["claude", "claude"], str(git_repo),
+            window, 1, 2, [AgentRequest("claude")] * 2, str(git_repo),
             workspace="ws", task="t0", runtime=_naming_runtime(),
         )
 

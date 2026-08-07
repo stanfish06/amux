@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from amux import context_service, runtime, sandbox, store, worktree
+from amux.shared import AgentRequest
 
 VERSION_LINE = "sbx version: v0.37.1 2d4f32448c7a94d7fa525517dfca21aa36599829\n"
 
@@ -305,7 +306,7 @@ def test_preflight_refuses_a_secondary_worktree_before_creating_anything(
 
     with pytest.raises(sandbox.SandboxError, match="preflight failed"):
         make_runtime().preflight(
-            ["claude"], workspace="ws", task="t0", cwd=str(linked)
+            [AgentRequest("claude")], workspace="ws", task="t0", cwd=str(linked)
         )
     assert not fake_sbx.called_with("create")
 
@@ -314,7 +315,10 @@ def test_preflight_refuses_an_unsupported_agent(git_repo, fake_sbx):
     ready(fake_sbx, [])
     with pytest.raises(sandbox.SandboxError, match="preflight failed"):
         make_runtime().preflight(
-            ["claude", "gemini"], workspace="ws", task="t0", cwd=str(git_repo)
+            [AgentRequest("claude"), AgentRequest("gemini")],
+            workspace="ws",
+            task="t0",
+            cwd=str(git_repo),
         )
     assert not fake_sbx.called_with("create")
 

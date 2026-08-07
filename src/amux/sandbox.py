@@ -6,11 +6,14 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from amux.shared import AgentRequest, render_tuning
 
 SBX = "sbx"
 
@@ -317,16 +320,26 @@ HOOK_TRUST_FLAG = "--dangerously-bypass-hook-trust"
 AGENT_ATTACH_ARGS: dict[str, tuple[str, ...]] = {"codex": (HOOK_TRUST_FLAG,)}
 
 
-def attach_argv(name: str, agent: str = "") -> tuple[str, ...]:
+def attach_argv(
+    name: str, agent: str = "", request: AgentRequest | None = None
+) -> tuple[str, ...]:
     args = ["run", "--name", name]
-    extra = AGENT_ATTACH_ARGS.get(agent, ())
+    # Either source alone is enough to need the `<agent> -- <args>` form.
+    # Gating it on AGENT_ATTACH_ARGS would silently drop a sandboxed
+    # `claude@opus`, since claude has no entry there.
+    extra = (
+        *AGENT_ATTACH_ARGS.get(agent, ()),
+        *render_tuning(request or AgentRequest(agent)),
+    )
     if extra:
         args += [agent, "--", *extra]
     return tuple(args)
 
 
-def attach_command(name: str, agent: str = "") -> str:
-    return " ".join((SBX, *attach_argv(name, agent)))
+def attach_command(
+    name: str, agent: str = "", request: AgentRequest | None = None
+) -> str:
+    return shlex.join((SBX, *attach_argv(name, agent, request)))
 
 
 def stop(name: str) -> None:
