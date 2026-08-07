@@ -387,7 +387,24 @@ def interface_ready(capture: str) -> bool:
     carets = [i for i, line in enumerate(lines) if _CARET.match(line)]
     if not any(i < last for i in carets):
         return False
-    return not _CHOOSER.search("\n".join(lines[carets[-1] :]))
+    return not chooser_in_view(capture)
+
+
+def chooser_in_view(capture: str) -> bool:
+    """Is a blocking chooser occupying the bottom of this pane?
+
+    One function because there are two callers -- the readiness decision and the
+    sentence explaining a timeout -- and a bounded scan in one with a whole-pane
+    scan in the other means they can disagree: readiness correctly finding no
+    chooser while the timeout blames a trust prompt that is not there. Wrong
+    explanation rather than wrong action, but the reason to bound the scan at
+    all was that this helper outlives the spawn it was written for.
+    """
+    lines = capture.splitlines()
+    carets = [i for i, line in enumerate(lines) if _CARET.match(line)]
+    if not carets:
+        return False
+    return bool(_CHOOSER.search("\n".join(lines[carets[-1] :])))
 
 
 def _not_ready_reason(capture: str, timeout: float) -> str:
@@ -399,7 +416,7 @@ def _not_ready_reason(capture: str, timeout: float) -> str:
     spawn -- a bare "not ready" there sends the operator looking for a bug in
     amux rather than at the prompt sitting in the pane.
     """
-    if _CHOOSER.search(capture):
+    if chooser_in_view(capture):
         return (
             f"after {timeout:g}s it was still waiting on a prompt of its own, "
             "most likely asking whether to trust this directory -- every agent "

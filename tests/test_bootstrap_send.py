@@ -225,6 +225,27 @@ def test_an_interface_that_never_comes_up_is_reported_and_left_running():
     assert clock.now == pytest.approx(10.0)
 
 
+def test_the_reason_and_the_readiness_decision_read_the_same_region():
+    """Two callers of one scan, so they cannot disagree about what is on screen.
+
+    They could before: readiness scanned from the last caret down while the
+    timeout reason scanned the whole pane, so a pane whose TRANSCRIPT held a
+    numbered list was correctly judged chooser-free and then told the operator
+    it was "most likely asking whether to trust this directory". Wrong
+    explanation rather than wrong action, and unreachable at spawn -- but the
+    reason for bounding the scan was that this helper outlives the spawn.
+    """
+    starting = "1. Install the dependencies\n2. Run them\n\n" + capture(
+        "codex_0.146.0_starting"
+    )
+    assert not core.interface_ready(starting)
+
+    problem = send(pane(starting), timeout=1.0)
+
+    assert "not ready" in problem
+    assert "trust" not in problem
+
+
 def test_a_pane_parked_on_a_prompt_says_so_rather_than_just_timing_out():
     """Measured on a live spawn, and the reason this reason exists: a real
     `codex` timed out at 45s because it was asking whether to trust the
@@ -498,3 +519,5 @@ def test_a_keyboard_interrupt_still_reaches_the_operator():
 
     with pytest.raises(KeyboardInterrupt):
         core.send_bootstrap(Interrupted(), MESSAGE)
+
+

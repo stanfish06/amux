@@ -276,11 +276,26 @@ was mutated before its row was marked covered.
   `timeout=25` against a 40s client budget. So the cap fix is real, already
   applied, and **not** the cause here.
 
-  What is left is one named test, one observation, mechanism unknown. The
-  remaining timing surface is a bare `time.sleep(0.3)` between starting the
-  waiter thread and flipping the pane state — an untested hypothesis, recorded as
-  a lead and not as a finding. Rate is load-dependent: roughly one full run in
-  two on a machine busy with microVM work, one in nineteen on an idle one.
+  What is left is one named test, mechanism unknown. The remaining timing
+  surface is a bare `time.sleep(0.3)` between starting the waiter thread and
+  flipping the pane state — an untested hypothesis, recorded as a lead and not
+  as a finding. Rate is load-dependent: roughly one full run in two on a machine
+  busy with microVM work, one in nineteen on an idle one.
+
+  **Two further observations, both during `inject-amux-skill-on-spawn`**, which
+  touches nothing in this path — so it is now three sightings across two changes
+  and the count is worth more than any single traceback:
+
+  1. One failure in a 951-test full run; passed on rerun and on a second full
+     run of the same tree.
+  2. One failure in a 968-test clean-baseline run by that change's *reviewer*,
+     then green on three isolated reruns and three later full runs.
+
+  The second matters most: it is the first sighting by someone outside the code
+  that surrounds this test, on a different tree, which rules out the observer
+  and the change as the common factor and leaves the test itself. Still one
+  named test with an unknown mechanism — but no longer a single anecdote, and
+  the load dependence above is now corroborated rather than asserted.
 - **Anything about the monitor.** `amux monitor` was never run during this
   verification. `monitor.py` is only a launcher; the renderer is the Ink TUI in
   `tui/`, whose build output is gitignored (`tui/.gitignore`) and absent from the
