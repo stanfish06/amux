@@ -1,4 +1,4 @@
-"""Schema version 2 to version 3 migration.
+"""Schema migrations: version 2 to 3, and version 3 to 4.
 
 The version 2 DDL is frozen here on purpose. Importing it from `store` would
 make these tests follow the schema as it changes and quietly stop testing the
@@ -66,6 +66,22 @@ _V3_WORKTREE_COLUMNS = {
     "socket_name",
 }
 
+_V4_WORKTREE_COLUMNS = {"model", "effort"}
+
+# Frozen for the same reason as _V2_SCHEMA: a version 3 database is what every
+# amux shipped before per-agent model selection left behind, and importing the
+# live DDL would make this follow the schema instead of testing the upgrade.
+_V3_SCHEMA = _V2_SCHEMA.replace(
+    "  created_ts REAL NOT NULL\n);",
+    "  created_ts REAL NOT NULL,\n"
+    "  runtime TEXT NOT NULL DEFAULT 'host',\n"
+    "  runtime_status TEXT NOT NULL DEFAULT '',\n"
+    "  sandbox_name TEXT NOT NULL DEFAULT '',\n"
+    "  sandbox_id TEXT NOT NULL DEFAULT '',\n"
+    "  socket_name TEXT NOT NULL DEFAULT ''\n);",
+    1,
+)
+
 
 @pytest.fixture
 def v2_db(db_path: Path) -> Path:
@@ -97,6 +113,26 @@ def v2_db(db_path: Path) -> Path:
     return db_path
 
 
+@pytest.fixture
+def v3_db(db_path: Path) -> Path:
+    """A populated version 3 database: runtime columns, no tuning columns."""
+    conn = sqlite3.connect(db_path, isolation_level=None)
+    conn.executescript(_V3_SCHEMA)
+    conn.execute(
+        "INSERT INTO worktrees"
+        " (id, pane, workspace, task, agent, name, path, branch, base_ref, repo,"
+        "  status, created_ts, runtime, runtime_status, sandbox_name,"
+        "  sandbox_id, socket_name)"
+        " VALUES (1, '%7', 'proj', 'task0', 'claude', 'brave-hawk',"
+        "         '', 'amux/proj/task0/brave-hawk', 'main', '/tmp/repo',"
+        "         'active', 100.0, 'docker-sandbox', 'running', 'amux-box',"
+        "         'abc123', 'amux-root')",
+    )
+    conn.execute("PRAGMA user_version = 3")
+    conn.close()
+    return db_path
+
+
 def _columns(db: Path, table: str) -> set[str]:
     conn = sqlite3.connect(db)
     try:
@@ -116,15 +152,56 @@ def _user_version(db: Path) -> int:
 # --- the upgrade ---
 
 
-def test_v2_database_upgrades_to_version_3(v2_db: Path) -> None:
+def test_v2_database_upgrades_to_the_current_version(v2_db: Path) -> None:
+    """A version 2 file skips straight to 4; the upgrades are not sequential
+    runs, they are one pass that applies every additive widening it is missing."""
     store.worktree_by_id(1, db_path=v2_db)
-    assert _user_version(v2_db) == 3
-    assert store.SCHEMA_VERSION == 3
+    assert _user_version(v2_db) == 4
+    assert store.SCHEMA_VERSION == 4
 
 
 def test_migration_adds_every_runtime_column(v2_db: Path) -> None:
     store.worktree_by_id(1, db_path=v2_db)
     assert _V3_WORKTREE_COLUMNS <= _columns(v2_db, "worktrees")
+
+
+def test_migration_adds_every_tuning_column(v2_db: Path) -> None:
+    store.worktree_by_id(1, db_path=v2_db)
+    assert _V4_WORKTREE_COLUMNS <= _columns(v2_db, "worktrees")
+
+
+# --- the 3 to 4 upgrade ---
+
+
+def test_v3_database_upgrades_to_version_4(v3_db: Path) -> None:
+    store.worktree_by_id(1, db_path=v3_db)
+    assert _user_version(v3_db) == 4
+    assert _V4_WORKTREE_COLUMNS <= _columns(v3_db, "worktrees")
+
+
+def test_a_pre_tuning_row_reports_no_model_and_no_effort(v3_db: Path) -> None:
+    """Additive with empty defaults, which is what lets `ctx` tell "asked for
+    nothing" apart from "asked for something": an agent recorded before this
+    feature existed chose neither, and must not read as having chosen one."""
+    row = store.worktree_by_id(1, db_path=v3_db)
+    assert row is not None
+    assert row["model"] == ""
+    assert row["effort"] == ""
+
+
+def test_the_v3_upgrade_preserves_the_runtime_identity(v3_db: Path) -> None:
+    row = store.worktree_by_id(1, db_path=v3_db)
+    assert row is not None
+    assert row["runtime"] == "docker-sandbox"
+    assert row["runtime_status"] == "running"
+    assert row["sandbox_name"] == "amux-box"
+    assert row["sandbox_id"] == "abc123"
+
+
+def test_the_v3_upgrade_is_idempotent(v3_db: Path) -> None:
+    store.worktree_by_id(1, db_path=v3_db)
+    store.worktree_by_id(1, db_path=v3_db)
+    assert _user_version(v3_db) == 4
 
 
 def test_pre_existing_row_reads_as_host_runtime(v2_db: Path) -> None:
@@ -156,7 +233,7 @@ def test_migration_preserves_existing_data(v2_db: Path) -> None:
 def test_migration_is_idempotent(v2_db: Path) -> None:
     for _ in range(3):
         store.worktree_by_id(1, db_path=v2_db)
-    assert _user_version(v2_db) == 3
+    assert _user_version(v2_db) == store.SCHEMA_VERSION
     assert len(store.worktrees_for("proj", db_path=v2_db)) == 1
 
 
@@ -184,7 +261,7 @@ def test_migration_leaves_version_2_intact_when_it_fails(
 # --- a fresh database ---
 
 
-def test_fresh_database_is_created_at_version_3(db_path: Path) -> None:
+def test_fresh_database_is_created_at_the_current_version(db_path: Path) -> None:
     store.register_worktree(
         pane="%1",
         workspace="proj",
@@ -193,8 +270,8 @@ def test_fresh_database_is_created_at_version_3(db_path: Path) -> None:
         branch="amux/proj/task0/a",
         db_path=db_path,
     )
-    assert _user_version(db_path) == 3
-    assert _V3_WORKTREE_COLUMNS <= _columns(db_path, "worktrees")
+    assert _user_version(db_path) == 4
+    assert _V3_WORKTREE_COLUMNS | _V4_WORKTREE_COLUMNS <= _columns(db_path, "worktrees")
 
 
 def test_old_style_registration_still_defaults_to_host(db_path: Path) -> None:
@@ -328,7 +405,11 @@ def test_schema_version_reports_a_newer_store_verbatim(db_path: Path) -> None:
     """A store written by a newer amux is left alone by `_migrate`, so callers
     can see they are behind and decide for themselves."""
     store.register_worktree(
-        pane="%1", workspace="proj", task="task0", path="", branch="b",
+        pane="%1",
+        workspace="proj",
+        task="task0",
+        path="",
+        branch="b",
         db_path=db_path,
     )
     conn = sqlite3.connect(db_path, isolation_level=None)

@@ -15,6 +15,7 @@ import pytest
 
 import fake_tmux
 from amux import core, runtime, store, worktree
+from amux.shared import AgentRequest
 from test_host_grid_snapshot import tmux_calls  # noqa: F401 - fixture
 
 
@@ -106,7 +107,7 @@ def test_a_custom_runtime_owns_launch_and_cwd(repo, tmux_calls):
         window,
         1,
         2,
-        ["claude", "codex"],
+        [AgentRequest("claude"), AgentRequest("codex")],
         str(repo),
         workspace="ws",
         task="t0",
@@ -141,7 +142,7 @@ def test_pane_metadata_and_events_do_not_depend_on_the_runtime(
         window = fake_tmux.new_window()
         random.seed(1234)
         core._build_grid(  # noqa: SLF001
-            window, 1, 2, ["claude", "codex"], str(repo),
+            window, 1, 2, [AgentRequest("claude"), AgentRequest("codex")], str(repo),
             workspace="ws", task="t0", runtime=rt,
         )
         tmux = [e for e in window.server.log if e[0] != "send_keys"]
@@ -159,7 +160,7 @@ def test_build_grid_defaults_to_the_host_runtime(repo, tmux_calls):
     window = fake_tmux.new_window()
     random.seed(1234)
     grid = core._build_grid(  # noqa: SLF001
-        window, 1, 1, ["claude"], str(repo), workspace="ws", task="t0"
+        window, 1, 1, [AgentRequest("claude")], str(repo), workspace="ws", task="t0"
     )
     (pane,) = grid.agent_panes
     assert pane.cwd.endswith(f"/worktrees/ws/t0/{pane.name}")
@@ -181,7 +182,7 @@ def test_spawn_agent_grid_forwards_the_runtime(repo, tmux_calls):
         window_name="t1",
         nrows=1,
         ncols=1,
-        agents=["claude"],
+        agents=[AgentRequest("claude")],
         cwd=str(repo),
         runtime=fake,
     )
@@ -269,7 +270,7 @@ def test_spawn_agent_grid_isolates_agents_when_given_a_path(repo, tmux_calls):
         window_name="t0",
         nrows=1,
         ncols=2,
-        agents=["claude", "codex"],
+        agents=[AgentRequest("claude"), AgentRequest("codex")],
         cwd=str(repo),
     )
     cwds = [p.cwd for p in grid.agent_panes]

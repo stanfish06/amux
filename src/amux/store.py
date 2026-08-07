@@ -14,7 +14,7 @@ from amux.shared import STATE_DIR
 
 DB_PATH = STATE_DIR / "context.db"
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 NoteScope = Literal["agent", "task", "workspace"]
 NoteKind = Literal["note", "decision", "finding", "blocker"]
@@ -31,6 +31,14 @@ _RUNTIME_COLUMNS = (
     ("sandbox_name", "TEXT NOT NULL DEFAULT ''"),
     ("sandbox_id", "TEXT NOT NULL DEFAULT ''"),
     ("socket_name", "TEXT NOT NULL DEFAULT ''"),
+)
+
+# Schema 4. Unvalidated pass-through values, so they are stored as given and
+# never defaulted: an empty string means the user asked for nothing, which is
+# what lets `ctx` decline to invent one.
+_TUNING_COLUMNS = (
+    ("model", "TEXT NOT NULL DEFAULT ''"),
+    ("effort", "TEXT NOT NULL DEFAULT ''"),
 )
 
 _WORKTREES_DDL = """
@@ -51,7 +59,9 @@ CREATE TABLE IF NOT EXISTS {table} (
   runtime_status TEXT NOT NULL DEFAULT '',
   sandbox_name TEXT NOT NULL DEFAULT '',
   sandbox_id TEXT NOT NULL DEFAULT '',
-  socket_name TEXT NOT NULL DEFAULT ''
+  socket_name TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  effort TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -197,9 +207,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # table that already exists, so existing worktrees need explicit ALTERs.
         # SQLite makes DDL transactional, so a failure below still rolls these
         # back and leaves a usable version 2 file.
+        # Schema 3 and 4 both widen `worktrees` additively, and both must run
+        # against a table CREATE TABLE IF NOT EXISTS cannot widen.
         if _table_exists(conn, "worktrees"):
             existing = _columns(conn, "worktrees")
-            for column, decl in _RUNTIME_COLUMNS:
+            for column, decl in (*_RUNTIME_COLUMNS, *_TUNING_COLUMNS):
                 if column not in existing:
                     conn.execute(f"ALTER TABLE worktrees ADD COLUMN {column} {decl}")
 
@@ -529,6 +541,8 @@ def register_worktree(
     sandbox_name: str = "",
     sandbox_id: str = "",
     socket_name: str = "",
+    model: str = "",
+    effort: str = "",
     db_path: Path | None = None,
 ) -> int:
     """Append an execution record and return its id. Append-only on purpose: the
@@ -546,8 +560,8 @@ def register_worktree(
             "INSERT INTO worktrees"
             " (pane, workspace, task, agent, name, path, branch, base_ref, repo,"
             "  status, created_ts, runtime, runtime_status, sandbox_name,"
-            "  sandbox_id, socket_name)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)",
+            "  sandbox_id, socket_name, model, effort)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 pane,
                 workspace,
@@ -564,6 +578,8 @@ def register_worktree(
                 sandbox_name,
                 sandbox_id,
                 socket_name,
+                model,
+                effort,
             ),
         )
         return cur.lastrowid or 0
@@ -705,7 +721,8 @@ def context_token_record(
             "       w.pane, w.workspace, w.task, w.agent, w.name, w.path,"
             "       w.branch, w.base_ref, w.repo, w.status, w.created_ts AS"
             "       worktree_created_ts, w.runtime, w.runtime_status,"
-            "       w.sandbox_name, w.sandbox_id, w.socket_name"
+            "       w.sandbox_name, w.sandbox_id, w.socket_name,"
+            "       w.model, w.effort"
             " FROM context_tokens t JOIN worktrees w ON w.id = t.worktree_id"
             " WHERE t.token_hash = ?",
             (digest,),

@@ -22,6 +22,7 @@ import pytest
 
 import fake_tmux
 from amux import core, runtime, sandbox, store, worktree
+from amux.shared import AgentRequest
 from test_host_grid_snapshot import tmux_calls  # noqa: F401 - fixture
 from test_sandbox_runtime import (  # noqa: F401 - `minted` is a fixture
     make_runtime,
@@ -33,8 +34,10 @@ from test_sandbox_runtime import (  # noqa: F401 - `minted` is a fixture
 
 
 def statuses():
-    return [(r["name"], r["status"], r["runtime_status"])
-            for r in store.worktrees_for("ws", "t0")]
+    return [
+        (r["name"], r["status"], r["runtime_status"])
+        for r in store.worktrees_for("ws", "t0")
+    ]
 
 
 def fail_second_create(fake_sbx, names):
@@ -65,7 +68,10 @@ def test_a_failed_second_sandbox_unwinds_the_first(git_repo, fake_sbx):
     with pytest.raises(sandbox.SandboxError, match="insufficient memory"):
         rt.prepare(
             specs(("%1", "claude", "alpha"), ("%2", "codex", "beta")),
-            workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+            workspace="ws",
+            task="t0",
+            cwd=str(git_repo),
+            socket="amux-root",
         )
 
     problems = rt.rollback()
@@ -81,9 +87,15 @@ def test_rollback_releases_newest_first(git_repo, fake_sbx, monkeypatch):
     ready(fake_sbx, names)
     rt = make_runtime()
     rt.prepare(
-        specs(("%1", "claude", "alpha"), ("%2", "codex", "beta"),
-              ("%3", "claude", "gamma")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        specs(
+            ("%1", "claude", "alpha"),
+            ("%2", "codex", "beta"),
+            ("%3", "claude", "gamma"),
+        ),
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
     order: list[str] = []
     monkeypatch.setattr(sandbox, "remove", lambda name, force=False: order.append(name))
@@ -99,7 +111,10 @@ def test_rollback_revokes_every_capability(git_repo, fake_sbx, minted):
     rt = make_runtime()
     rt.prepare(
         specs(("%1", "claude", "alpha"), ("%2", "codex", "beta")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
     # Both capabilities authenticate before the rollback...
     assert len(minted) == 2
@@ -119,7 +134,10 @@ def test_rollback_removes_the_shared_integration_worktree(git_repo, fake_sbx):
     rt = make_runtime()
     rt.prepare(
         specs(("%1", "claude", "alpha")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
     int_path = Path(worktree.task_worktree_root("ws", "t0")) / worktree.INTEGRATION_DIR
     assert int_path.is_dir()
@@ -139,7 +157,10 @@ def test_rollback_drops_the_host_side_sandbox_remote(git_repo, fake_sbx):
     rt = make_runtime()
     rt.prepare(
         specs(("%1", "claude", "alpha")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
     # Stand in for what `sbx create --clone` publishes on the host.
     remote = worktree.sandbox_remote(names[0])
@@ -156,7 +177,10 @@ def test_rollback_is_idempotent(git_repo, fake_sbx):
     rt = make_runtime()
     rt.prepare(
         specs(("%1", "claude", "alpha")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
     assert rt.rollback() == []
     # A second pass has nothing left to do and must not invent failures.
@@ -166,8 +190,9 @@ def test_rollback_is_idempotent(git_repo, fake_sbx):
 # --- error aggregation ---
 
 
-def test_cleanup_failures_never_replace_the_original_error(git_repo, fake_sbx,
-                                                           monkeypatch):
+def test_cleanup_failures_never_replace_the_original_error(
+    git_repo, fake_sbx, monkeypatch
+):
     names = names_for(git_repo, "alpha", "beta")
     fail_second_create(fake_sbx, names)
     rt = make_runtime()
@@ -180,7 +205,10 @@ def test_cleanup_failures_never_replace_the_original_error(git_repo, fake_sbx,
     with pytest.raises(sandbox.SandboxError) as caught:
         rt.prepare(
             specs(("%1", "claude", "alpha"), ("%2", "codex", "beta")),
-            workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+            workspace="ws",
+            task="t0",
+            cwd=str(git_repo),
+            socket="amux-root",
         )
     problems = rt.rollback()
 
@@ -246,15 +274,16 @@ def test_a_failed_grid_leaves_no_task_window(git_repo, fake_sbx):
             window_name="t0",
             nrows=1,
             ncols=2,
-            agents=["claude", "codex"],
+            agents=[AgentRequest("claude"), AgentRequest("codex")],
             cwd=str(git_repo),
             runtime=make_runtime(),
         )
     assert "insufficient memory" in str(caught.value)
     # The window this call created was killed; the pre-existing one was not.
     assert created  # a window really was made, so killing it means something
-    kills = [e for e in session.server.log if e[0] == "window-cmd"
-             and "kill-window" in e]
+    kills = [
+        e for e in session.server.log if e[0] == "window-cmd" and "kill-window" in e
+    ]
     assert kills
 
 
@@ -272,8 +301,14 @@ def test_a_failed_workspace_spawn_leaves_no_session(git_repo, fake_sbx):
 
     with pytest.raises(runtime.GridCreationError):
         core._build_grid(  # noqa: SLF001
-            window, 1, 2, ["claude", "codex"], str(git_repo),
-            workspace="ws", task="t0", runtime=make_runtime(),
+            window,
+            1,
+            2,
+            [AgentRequest("claude"), AgentRequest("codex")],
+            str(git_repo),
+            workspace="ws",
+            task="t0",
+            runtime=make_runtime(),
         )
     # _build_grid itself does not own the session; the spawn entry point does.
     assert killed == []
@@ -285,7 +320,7 @@ def test_host_grids_are_unaffected_by_the_unwind_path(git_repo, tmux_calls):
     assert runtime.HostRuntime().rollback() == []
     window = fake_tmux.new_window()
     grid = core._build_grid(  # noqa: SLF001
-        window, 1, 1, ["claude"], str(git_repo), workspace="ws", task="t0"
+        window, 1, 1, [AgentRequest("claude")], str(git_repo), workspace="ws", task="t0"
     )
     assert len(grid.agent_panes) == 1
 
@@ -293,8 +328,9 @@ def test_host_grids_are_unaffected_by_the_unwind_path(git_repo, tmux_calls):
 # --- pathless rows must never touch host git ---
 
 
-def test_a_sandbox_row_never_reports_the_hosts_commit(git_repo, fake_sbx, tmux_calls,
-                                                      monkeypatch):
+def test_a_sandbox_row_never_reports_the_hosts_commit(
+    git_repo, fake_sbx, tmux_calls, monkeypatch
+):
     """`git -C ""` is a no-op that reports the calling process's checkout, so an
     unguarded host-path git call attributes the host's HEAD to a sandboxed agent
     that never made that commit."""
@@ -302,7 +338,10 @@ def test_a_sandbox_row_never_reports_the_hosts_commit(git_repo, fake_sbx, tmux_c
     ready(fake_sbx, names)
     make_runtime().prepare(
         specs(("%1", "claude", "alpha")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
     (row,) = store.worktrees_for("ws", "t0")
     assert row["path"] == ""  # the precondition that makes this reachable
@@ -310,15 +349,18 @@ def test_a_sandbox_row_never_reports_the_hosts_commit(git_repo, fake_sbx, tmux_c
     # Run from a checkout with a distinctive HEAD subject: if the guard is
     # missing, that subject is what leaks onto the roster.
     monkeypatch.chdir(git_repo)
-    worktree._git(str(git_repo), "commit", "--allow-empty",  # noqa: SLF001
-                  "-m", "HOST ONLY do not attribute this")
+    worktree._git(
+        str(git_repo),
+        "commit",
+        "--allow-empty",  # noqa: SLF001
+        "-m",
+        "HOST ONLY do not attribute this",
+    )
 
     window = fake_tmux.new_window()
     pane = window.panes[0]
     pane.cmd("set-option", "-p", "@amux_pane", "1")
-    monkeypatch.setattr(
-        store, "worktree_for_pane", lambda *a, **k: dict(row)
-    )
+    monkeypatch.setattr(store, "worktree_for_pane", lambda *a, **k: dict(row))
     entry = core._roster_entry(pane)  # noqa: SLF001
 
     assert "HOST ONLY" not in str(entry.get("last_commit", ""))
@@ -330,7 +372,7 @@ def test_a_sandbox_row_never_reports_the_hosts_commit(git_repo, fake_sbx, tmux_c
 def test_a_host_row_still_reports_its_commit(git_repo, tmux_calls, monkeypatch):
     """The guard must not cost host agents their commit subject."""
     integration = worktree.setup_task_integration(str(git_repo), "ws", "t0")
-    worktree.setup_host_agents(integration, [("%1", "claude", "alpha")])
+    worktree.setup_host_agents(integration, [("%1", AgentRequest("claude"), "alpha")])
     (row,) = store.worktrees_for("ws", "t0")
 
     window = fake_tmux.new_window()

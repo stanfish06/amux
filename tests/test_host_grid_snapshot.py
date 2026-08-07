@@ -23,6 +23,7 @@ import pytest
 
 import fake_tmux
 from amux import core, events, store, worktree
+from amux.shared import AgentRequest
 
 GOLDEN_DIR = Path(__file__).parent / "golden"
 
@@ -150,7 +151,7 @@ def build(window, cwd, workspace="ws", task="t0", agents=None, shape=(2, 2)):
         window,
         shape[0],
         shape[1],
-        agents or ["claude", "codex", "echo hello", "claude"],
+        agents or [AgentRequest(a) for a in ("claude", "codex", "echo hello", "claude")],
         cwd,
         workspace=workspace,
         task=task,
@@ -206,7 +207,7 @@ def test_grid_without_workspace_or_task(git_repo, isolate_state, tmux_calls):
     window = fake_tmux.new_window()
     random.seed(1234)
     grid = core._build_grid(  # noqa: SLF001
-        window, 1, 2, ["claude", "codex"], str(git_repo)
+        window, 1, 2, [AgentRequest("claude"), AgentRequest("codex")], str(git_repo)
     )
     snap = snapshot(window, tmux_calls, grid, repo=git_repo, state=isolate_state)
     assert snap["worktrees"] == []
@@ -218,7 +219,7 @@ def test_grid_without_cwd(git_repo, isolate_state, tmux_calls):
     window = fake_tmux.new_window()
     random.seed(1234)
     grid = core._build_grid(  # noqa: SLF001
-        window, 1, 2, ["claude", "codex"], None, workspace="ws", task="t0"
+        window, 1, 2, [AgentRequest("claude"), AgentRequest("codex")], None, workspace="ws", task="t0"
     )
     snap = snapshot(window, tmux_calls, grid, repo=git_repo, state=isolate_state)
     assert snap["worktrees"] == []

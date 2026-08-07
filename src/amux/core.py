@@ -15,12 +15,14 @@ from amux.runtime import (
     PaneSpec,
     Runtime,
 )
-from amux.shared import ALIAS, DEFAULT_SOCKET
+from amux.shared import ALIAS, DEFAULT_SOCKET, AgentRequest
 
 AGENT_OPTION = "@amux_agent"
 LABEL_OPTION = "@amux_label"
 NAME_OPTION = "@amux_name"
 MARK_OPTION = "@amux_pane"
+MODEL_OPTION = "@amux_model"
+EFFORT_OPTION = "@amux_effort"
 
 ADJECTIVES = [
     "amber",
@@ -125,26 +127,67 @@ def get_server(socket_name: str | None = None) -> Server:
     return Server(socket_name=socket_name or DEFAULT_SOCKET)
 
 
-def _parse_agent_spec(spec: str) -> tuple[str, int | None]:
-    """Split `<agent>[:count]` on the last `:` only when the suffix is all
-    digits; raw commands containing colons pass through whole."""
-    agent, sep, suffix = spec.rpartition(":")
+RAW_COMMAND_HINT = (
+    "a model id containing '/' or ending in ':<digits>' must be launched as a "
+    "raw command instead, e.g. -a 'claude --model openai/gpt-5'"
+)
+
+
+def _tune(agent: str, head: str, spec: str) -> AgentRequest:
+    """Split `<agent>[@model][/effort]` off an already-countless head.
+
+    Only reached for a known agent, which is what keeps raw commands whole.
+    """
+    rest = head[len(agent) :]
+    model = effort = ""
+    if rest.startswith("@"):
+        model, slash, tail = rest[1:].partition("/")
+        if not model:
+            raise ValueError(f"empty model in agent spec '{spec}'")
+        if slash:
+            effort = tail
+    elif rest.startswith("/"):
+        effort = rest[1:]
+        slash = "/"
+    else:
+        slash = ""
+    if slash and not effort:
+        raise ValueError(f"empty effort in agent spec '{spec}'")
+    return AgentRequest(agent=agent, model=model, effort=effort)
+
+
+def _parse_agent_spec(spec: str) -> tuple[AgentRequest, int | None]:
+    """Parse `AGENT[@MODEL][/EFFORT][:COUNT]`.
+
+    Count comes off first, on the last `:` only when the suffix is all digits;
+    `@` and `/` are split only when the head names an agent amux launches, so
+    raw commands containing either character pass through whole.
+    """
+    head, sep, suffix = spec.rpartition(":")
+    count = None
     if not sep or not suffix.isdigit():
-        if not spec:
-            raise ValueError("empty agent spec")
-        return spec, None
-    if not agent:
+        head = spec
+    elif not head:
         raise ValueError(f"malformed agent spec '{spec}'")
-    count = int(suffix)
-    if count < 1:
-        raise ValueError(f"agent count must be >= 1, got '{spec}'")
-    return agent, count
+    else:
+        count = int(suffix)
+        if count < 1:
+            raise ValueError(
+                f"agent count must be >= 1, got '{spec}'; {RAW_COMMAND_HINT}"
+            )
+    if not head:
+        raise ValueError("empty agent spec")
+    agent = head.split("@", 1)[0].split("/", 1)[0]
+    if agent not in AGENT_COMMANDS:
+        return AgentRequest(agent=head), count
+    return _tune(agent, head, spec), count
 
 
 def parse_agent_specs(
     specs: list[str], nrows: int | None, ncols: int | None
-) -> list[str]:
-    """Expand `<agent>[:count]` specs into a per-pane agent list, row-major.
+) -> list[AgentRequest]:
+    """Expand `AGENT[@MODEL][/EFFORT][:COUNT]` specs into a per-pane request
+    list, row-major.
 
     With a known shape (both dims given), a single countless spec absorbs the
     remainder; with an unknown or partial shape, countless means 1.
@@ -161,11 +204,12 @@ def parse_agent_specs(
             remainder = nrows * ncols - sum(c for _, c in parsed if c is not None)
             if remainder < 1:
                 raise ValueError(
-                    f"no panes left for '{parsed[i][0]}' in a {nrows}x{ncols} grid"
+                    f"no panes left for '{parsed[i][0].agent}' in a "
+                    f"{nrows}x{ncols} grid"
                 )
             parsed[i] = (parsed[i][0], remainder)
     # Any spec still countless here (unknown/partial shape) means 1.
-    return [agent for agent, count in parsed for _ in range(count or 1)]
+    return [request for request, count in parsed for _ in range(count or 1)]
 
 
 def resolve_grid_shape(n: int, nrows: int | None, ncols: int | None) -> tuple[int, int]:
@@ -308,7 +352,7 @@ def _build_grid(
     window: Window,
     nrows: int,
     ncols: int,
-    agents: list[str],
+    agents: list[AgentRequest],
     cwd: str | None,
     workspace: str | None = None,
     task: str | None = None,
@@ -321,11 +365,14 @@ def _build_grid(
     resumable = runtime.resumable_names(workspace=workspace, task=task, cwd=cwd)
     rows = _split_evenly(window.panes[0], nrows, PaneDirection.Below, cwd)
     agent_panes = []
-    panes_info: list[tuple[Pane, str, str]] = []
+    panes_info: list[tuple[Pane, AgentRequest, str]] = []
     for i, row_pane in enumerate(rows):
         cols = _split_evenly(row_pane, ncols, PaneDirection.Right, cwd)
         for j, pane in enumerate(cols):
-            agent = agents[i * ncols + j]
+            request = agents[i * ncols + j]
+            # The recorded kind stays bare: `claude`, never `claude@opus/high`.
+            # is_agent, the store's agent column and hook bootstrap all read it.
+            agent = request.agent
             label = f"r{i}c{j}"
             name = _next_name(agent, resumable, taken)
             taken.add(name)
@@ -336,17 +383,24 @@ def _build_grid(
             pane.cmd("set-option", "-p", LABEL_OPTION, label)
             pane.cmd("set-option", "-p", NAME_OPTION, name)
             pane.cmd("set-option", "-p", MARK_OPTION, "1")
+            if request.model:
+                pane.cmd("set-option", "-p", MODEL_OPTION, request.model)
+            if request.effort:
+                pane.cmd("set-option", "-p", EFFORT_OPTION, request.effort)
             pane.set_hook(
                 "pane-exited", "run-shell 'amux event emit exit --pane #{hook_pane}'"
             )
-            panes_info.append((pane, agent, name))
+            panes_info.append((pane, request, name))
 
     socket = _socket_name(window)
     try:
         launches = {
             launch.pane: launch
             for launch in runtime.prepare(
-                [PaneSpec(p.id or "", agent, name) for p, agent, name in panes_info],
+                [
+                    PaneSpec(p.id or "", r.agent, name, r.model, r.effort)
+                    for p, r, name in panes_info
+                ],
                 workspace=workspace,
                 task=task,
                 cwd=cwd,
@@ -358,17 +412,17 @@ def _build_grid(
         # ever attach to and rows a later integrate would try to merge.
         raise GridCreationError(exc, _rollback(runtime)) from exc
 
-    for pane, agent, name in panes_info:
+    for pane, request, name in panes_info:
         launch = launches[pane.id or ""]
         pane_cwd = launch.cwd or pane.pane_current_path or ""
         for keys in launch.keys:
             pane.send_keys(keys)
-        events.emit("spawn", pane=pane.id, agent=agent, socket=socket)
+        events.emit("spawn", pane=pane.id, agent=request.agent, socket=socket)
         agent_panes.append(
             AgentPane(
                 pane=pane,
                 cwd=pane_cwd,
-                agent_name=agent,
+                agent_name=request.agent,
                 label=label_for(pane),
                 name=name,
             )
@@ -391,13 +445,15 @@ def spawn_agent_space(
     session_name: str,
     init_grid_nrows: int = 1,
     init_grid_ncols: int = 1,
-    init_grid_agents: list[str] | None = None,
+    init_grid_agents: list[AgentRequest] | None = None,
     init_task_name: str = "task0",
     runtime: Runtime | None = None,
 ) -> AgentSpace:
     if server.has_session(session_name):
         raise ValueError(f"{ALIAS['session']} '{session_name}' already exists")
-    agents = init_grid_agents or ["claude"] * (init_grid_nrows * init_grid_ncols)
+    agents = init_grid_agents or [AgentRequest("claude")] * (
+        init_grid_nrows * init_grid_ncols
+    )
     runtime = runtime or HostRuntime()
     runtime.preflight(
         agents, workspace=session_name, task=init_task_name, cwd=session_path
@@ -453,11 +509,11 @@ def spawn_agent_grid(
     window_name: str,
     nrows: int,
     ncols: int,
-    agents: list[str] | None = None,
+    agents: list[AgentRequest] | None = None,
     cwd: str | None = None,
     runtime: Runtime | None = None,
 ) -> AgentGrid:
-    agents = agents or ["claude"] * (nrows * ncols)
+    agents = agents or [AgentRequest("claude")] * (nrows * ncols)
     runtime = runtime or HostRuntime()
     runtime.preflight(agents, workspace=session.name or "", task=window_name, cwd=cwd)
     window = session.new_window(
@@ -538,6 +594,13 @@ def _roster_entry(pane: Pane) -> dict:
             {"kind": last.kind, "ts": last.ts, "detail": last.detail} if last else None
         ),
     }
+    # Pane options, not the worktree row: a host agent in a non-repo directory
+    # has no row at all. Absent stays absent — amux chose neither value, so it
+    # reports neither rather than a guessed default.
+    if facts.model:
+        entry["model"] = facts.model
+    if facts.effort:
+        entry["effort"] = facts.effort
     if wt:
         entry["branch"] = wt["branch"]
         entry["worktree"] = wt["path"]

@@ -326,6 +326,18 @@ def runtime_to_string(me: dict) -> str:
     return "runtime: " + " ".join(p for p in parts if p)
 
 
+def tuning_to_string(me: dict) -> str:
+    """`model: <m>  effort: <e>`, or "" when the pane was given neither.
+
+    Only the parts amux was actually asked for are rendered — it chose neither
+    value, so it reports neither rather than a guessed default, and a pane with
+    no tuning prints nothing at all. Shape shared with the host renderer
+    (`utils.context_to_string`) so the two cannot drift.
+    """
+    parts = [f"{k}: {me.get(k)}" for k in ("model", "effort") if me.get(k)]
+    return "  ".join(parts)
+
+
 def context_to_string(ctx: dict) -> list[str]:
     """Port of `amux.utils.context_to_string`, plus the runtime a sandbox agent
     needs to know it is in one."""
@@ -339,6 +351,9 @@ def context_to_string(ctx: dict) -> list[str]:
     runtime_line = runtime_to_string(me)
     if runtime_line:
         lines.append(runtime_line)
+    tuning_line = tuning_to_string(me)
+    if tuning_line:
+        lines.append(tuning_line)
     lines.append(f"team @ {me['workspace']}")
     rows = [a for group in ctx["team"] for a in group["agents"]]
     wn = max(len(a["name"] or "-") for a in rows)

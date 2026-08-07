@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from amux import store, worktree
+from amux.shared import AgentRequest
 from test_host_grid_snapshot import git
 
 
@@ -36,7 +37,9 @@ def worktree_paths(repo: Path) -> set[str]:
     """Paths git itself still considers worktrees of this repo."""
     out = git(repo, "worktree", "list", "--porcelain")
     return {
-        line.split(" ", 1)[1] for line in out.splitlines() if line.startswith("worktree ")
+        line.split(" ", 1)[1]
+        for line in out.splitlines()
+        if line.startswith("worktree ")
     }
 
 
@@ -85,7 +88,10 @@ def test_agent_setup_rolls_back_its_own_worktrees_and_rows(repo):
     with pytest.raises(worktree.WorktreeError):
         worktree.setup_host_agents(
             integration,
-            [("%1", "claude", "alpha"), ("%2", "codex", "alpha")],
+            [
+                ("%1", AgentRequest("claude"), "alpha"),
+                ("%2", AgentRequest("codex"), "alpha"),
+            ],
         )
 
     # No agent worktree survives, and no row is left active for `integrate` to
@@ -97,9 +103,7 @@ def test_agent_setup_rolls_back_its_own_worktrees_and_rows(repo):
     assert Path(integration.path).is_dir()
 
 
-def test_agent_setup_rolls_back_when_the_registry_fails(
-    repo, monkeypatch
-):
+def test_agent_setup_rolls_back_when_the_registry_fails(repo, monkeypatch):
     """The worktree is on disk before the row exists; rollback must undo both."""
     integration = worktree.setup_task_integration(str(repo), "ws", "t0")
     real = store.register_worktree
@@ -116,7 +120,10 @@ def test_agent_setup_rolls_back_when_the_registry_fails(
     with pytest.raises(RuntimeError, match="registry unavailable"):
         worktree.setup_host_agents(
             integration,
-            [("%1", "claude", "alpha"), ("%2", "codex", "beta")],
+            [
+                ("%1", AgentRequest("claude"), "alpha"),
+                ("%2", AgentRequest("codex"), "beta"),
+            ],
         )
 
     assert not (task_root() / "alpha").exists()
@@ -128,7 +135,13 @@ def test_agent_setup_rolls_back_when_the_registry_fails(
 def test_setup_task_rolls_back_both_halves(repo):
     with pytest.raises(worktree.WorktreeError):
         worktree.setup_task(
-            str(repo), "ws", "t0", [("%1", "claude", "alpha"), ("%2", "codex", "alpha")]
+            str(repo),
+            "ws",
+            "t0",
+            [
+                ("%1", AgentRequest("claude"), "alpha"),
+                ("%2", AgentRequest("codex"), "alpha"),
+            ],
         )
 
     # Nothing left: not the agent worktrees, not the integration worktree.
@@ -141,7 +154,13 @@ def test_setup_task_leaves_branches_behind_and_can_be_retried(repo):
     """Documented non-change: rollback keeps branches, so a retry is clean."""
     with pytest.raises(worktree.WorktreeError):
         worktree.setup_task(
-            str(repo), "ws", "t0", [("%1", "claude", "alpha"), ("%2", "codex", "alpha")]
+            str(repo),
+            "ws",
+            "t0",
+            [
+                ("%1", AgentRequest("claude"), "alpha"),
+                ("%2", AgentRequest("codex"), "alpha"),
+            ],
         )
     assert "amux/ws/t0/integration" in branches(repo)
     assert "amux/ws/t0/alpha" in branches(repo)
@@ -149,7 +168,13 @@ def test_setup_task_leaves_branches_behind_and_can_be_retried(repo):
     # The retry has to cope with those leftovers. A distinct name set succeeds;
     # this is the real-world case, since `_build_grid` re-rolls agent names.
     paths = worktree.setup_task(
-        str(repo), "ws", "t0", [("%1", "claude", "gamma"), ("%2", "codex", "delta")]
+        str(repo),
+        "ws",
+        "t0",
+        [
+            ("%1", AgentRequest("claude"), "gamma"),
+            ("%2", AgentRequest("codex"), "delta"),
+        ],
     )
     assert set(paths) == {"%1", "%2"}
     assert all(Path(p).is_dir() for p in paths.values())
@@ -159,7 +184,13 @@ def test_setup_task_leaves_branches_behind_and_can_be_retried(repo):
 def test_setup_task_matches_the_split_halves(repo):
     """The composition is exactly the two halves, so host callers see no change."""
     paths = worktree.setup_task(
-        str(repo), "ws", "t0", [("%1", "claude", "alpha"), ("%2", "codex", "beta")]
+        str(repo),
+        "ws",
+        "t0",
+        [
+            ("%1", AgentRequest("claude"), "alpha"),
+            ("%2", AgentRequest("codex"), "beta"),
+        ],
     )
     rows = {row["name"]: row for row in store.worktrees_for("ws", "t0")}
     base = git(repo, "rev-parse", "HEAD")
@@ -197,10 +228,14 @@ def test_integration_setup_adopts_an_existing_worktree(repo):
 
 def test_a_task_can_be_respawned_after_a_kill_without_clean(repo):
     """The whole host path, twice, as `spg` -> `kg` -> `spg` would drive it."""
-    worktree.setup_task(str(repo), "ws", "t0", [("%1", "claude", "alpha")])
+    worktree.setup_task(
+        str(repo), "ws", "t0", [("%1", AgentRequest("claude"), "alpha")]
+    )
     # `kg` without --clean removes nothing, so the second spawn meets the
     # leftovers of the first.
-    paths = worktree.setup_task(str(repo), "ws", "t0", [("%2", "claude", "beta")])
+    paths = worktree.setup_task(
+        str(repo), "ws", "t0", [("%2", AgentRequest("claude"), "beta")]
+    )
 
     assert set(paths) == {"%2"}
     assert Path(paths["%2"]).is_dir()
@@ -225,14 +260,18 @@ def commit_in(path, filename, text, message):
 
 def test_an_agent_with_no_commits_stays_integrable(repo):
     """The defect, end to end: integrate early, then commit, then integrate."""
-    paths = worktree.setup_task(str(repo), "ws", "t0", [("%1", "claude", "alpha")])
+    paths = worktree.setup_task(
+        str(repo), "ws", "t0", [("%1", AgentRequest("claude"), "alpha")]
+    )
 
     (early,) = worktree.integrate("ws", "t0")
     assert early.ok
     assert early.commits == 0
     # Reported as no-delta, exactly as before...
-    assert any("no changes" in n["text"] for n in store.query_notes(
-        workspace="ws", task="t0", limit=20))
+    assert any(
+        "no changes" in n["text"]
+        for n in store.query_notes(workspace="ws", task="t0", limit=20)
+    )
     # ...but NOT foreclosed.
     assert statuses() == ["active"]
 
@@ -251,7 +290,9 @@ def test_an_agent_with_no_commits_stays_integrable(repo):
 def test_an_agent_with_commits_is_still_marked_merged(repo):
     """The counterpart: real work still terminates the row, so it is not
     merged twice."""
-    paths = worktree.setup_task(str(repo), "ws", "t0", [("%1", "claude", "alpha")])
+    paths = worktree.setup_task(
+        str(repo), "ws", "t0", [("%1", AgentRequest("claude"), "alpha")]
+    )
     commit_in(paths["%1"], "f.txt", "x\n", "real work")
 
     (result,) = worktree.integrate("ws", "t0")
@@ -267,7 +308,13 @@ def test_a_no_delta_pass_does_not_block_a_teammate(repo):
     """A mixed pass: one agent has work, one does not. Neither outcome should
     depend on the other."""
     paths = worktree.setup_task(
-        str(repo), "ws", "t0", [("%1", "claude", "alpha"), ("%2", "codex", "beta")]
+        str(repo),
+        "ws",
+        "t0",
+        [
+            ("%1", AgentRequest("claude"), "alpha"),
+            ("%2", AgentRequest("codex"), "beta"),
+        ],
     )
     commit_in(paths["%2"], "beta.txt", "b\n", "beta work")
 
