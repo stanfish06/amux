@@ -369,8 +369,10 @@ and claude has no other attach argument, so this is also the case that proves
 the `<agent> -- <args>` form is emitted for tuning alone.
 
 **Substitute a model your account can actually serve.** The value is passed
-through unchecked, so a model you have no access to fails inside the agent and
-that pane dies at a dead shell — which is step 5e's subject, not this one.
+through unchecked, and a model you have no access to does *not* stop the pane —
+the agent starts normally and fails at its first API call, so you would be
+measuring a healthy-looking pane that cannot do any work. That quiet failure is
+step 5e's subject, not this one.
 
 ### 5a. Spawn-to-prompt latency
 
@@ -464,20 +466,36 @@ and `self` must carry neither key. A default reported for a pane that was never
 given one is a bug, not a nicety: it would tell an agent it is running on a
 model nobody chose.
 
-### 5e. A mistyped effort dies loudly, at the agent
+### 5e. A mistyped effort survives quietly, and `ctx` then lies
 
-This is a documented trade-off of passing values through unchecked, so confirm
-it behaves as documented rather than assuming it does:
+This is the documented trade-off of passing values through unchecked, and it is
+quieter than it sounds. Confirm it behaves as documented rather than assuming it
+does:
 
 ```sh
 amux spg "$WS" typo --runtime docker-sandbox -a claude/hihg
 ```
 
-Expect the spec to be **accepted** — amux validates shape, not values — the
-pane and sandbox to be created, and the agent itself to reject `--effort hihg`
-and exit, leaving that pane at a dead shell. Record what the user actually
-sees: whether the error stays on screen or scrolls away is the thing that
-decides if this trade-off is tolerable. Then `amux kg "$WS" typo --clean`.
+Expect the spec to be **accepted** — amux validates shape, not values — the pane
+and sandbox to be created, and the agent to come up **alive**. On the host this
+was measured against `claude` 2.1.224: it prints `Warning: Unknown --effort
+value 'hihg' — ignoring it and using the default effort` and then runs normally.
+Nothing dies.
+
+The thing to record is the disagreement that leaves behind. From inside that
+pane:
+
+```sh
+amux ctx | head -3                                    # reports effort: hihg
+tmux -L amux-root capture-pane -p -t "$PANE" | head -20   # agent's own banner
+```
+
+`ctx` reports what the pane was *launched* with, so it will confidently print
+`effort: hihg` for an agent that is running on its default. Record whether the
+agent's warning is still on screen or has scrolled away — that, not a dead pane,
+is what decides whether this trade-off is tolerable, because the scrolled-away
+case leaves no signal anywhere except the agent's own banner. Then
+`amux kg "$WS" typo --clean`.
 
 ---
 

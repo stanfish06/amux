@@ -45,8 +45,16 @@ Both apply identically under the host and `docker-sandbox` runtimes, and
 
 **Values are not checked against any list amux maintains**, so a model or
 effort level released after your amux works immediately. The cost is that a
-typo is caught by the agent's CLI at startup rather than by amux: that pane
-dies at spawn instead of the spawn being refused.
+typo is not caught anywhere, and it is quiet rather than loud. Measured against
+`claude` 2.1.224 and `codex-cli` 0.146.0: a bad `--effort` makes claude warn and
+run on its default, codex accepts the string and displays it, and a bad model on
+either agent starts normally and only fails at the first API call. **The pane
+survives with a configuration that is not the one you asked for.**
+
+`amux ctx` reports what the pane was *launched* with and cannot know what the
+agent did with it, so after a typo the two disagree. The agent's own startup box
+is the authority — check there, not in `ctx`, when a pane seems to be on the
+wrong model.
 
 **Escape hatch.** `@`, `/` and `:` are delimiters, so a model id containing `/`
 (`openai/gpt-5`) or ending in `:<digits>` (a Bedrock id like `…-v1:0`) cannot
@@ -56,10 +64,12 @@ go in a spec. Launch it as a raw command instead:
 amux spg myproj fix -a 'claude --model openai/gpt-5 --dangerously-skip-permissions'
 ```
 
-A raw command is not one of amux's known agents, so it gives up sandbox
-support, per-agent worktrees, and the agent-kind identity that `ctx`,
-`monitor`, and `integrate` use — the raw spec has to spell out every flag it
-wants, including the ones amux normally supplies.
+A raw command still gets its own worktree and branch, and `amux integrate`
+merges it like any other agent's. What it gives up is the agent-kind identity:
+it cannot run under `docker-sandbox`, and `ctx` and `monitor` show the whole
+command string in the agent column instead of `claude` or `codex`. It also has
+to spell out every flag itself, including the ones amux normally supplies —
+which is why the example above repeats `--dangerously-skip-permissions`.
 
 # architecture
 

@@ -107,11 +107,7 @@ def snapshot(
                 for row in rows
             ],
             "events": [
-                {
-                    k: v
-                    for k, v in row.items()
-                    if k not in ("id", "ts", "worktree_id")
-                }
+                {k: v for k, v in row.items() if k not in ("id", "ts", "worktree_id")}
                 for row in raw_events
             ],
             "grid": {
@@ -151,7 +147,8 @@ def build(window, cwd, workspace="ws", task="t0", agents=None, shape=(2, 2)):
         window,
         shape[0],
         shape[1],
-        agents or [AgentRequest(a) for a in ("claude", "codex", "echo hello", "claude")],
+        agents
+        or [AgentRequest(a) for a in ("claude", "codex", "echo hello", "claude")],
         cwd,
         workspace=workspace,
         task=task,
@@ -196,7 +193,10 @@ def test_grid_in_a_repo_without_commits(git_factory, isolate_state, tmux_calls, 
     empty = git_factory("empty", empty=True)
     window = fake_tmux.new_window()
     grid = build(window, str(empty))
-    assert "worktree isolation unavailable: repo has no commits yet" in capsys.readouterr().out
+    assert (
+        "worktree isolation unavailable: repo has no commits yet"
+        in capsys.readouterr().out
+    )
     snap = snapshot(window, tmux_calls, grid, repo=empty, state=isolate_state)
     assert snap["worktrees"] == []
     assert_golden("grid_repo_no_commits", snap)
@@ -219,8 +219,61 @@ def test_grid_without_cwd(git_repo, isolate_state, tmux_calls):
     window = fake_tmux.new_window()
     random.seed(1234)
     grid = core._build_grid(  # noqa: SLF001
-        window, 1, 2, [AgentRequest("claude"), AgentRequest("codex")], None, workspace="ws", task="t0"
+        window,
+        1,
+        2,
+        [AgentRequest("claude"), AgentRequest("codex")],
+        None,
+        workspace="ws",
+        task="t0",
     )
     snap = snapshot(window, tmux_calls, grid, repo=git_repo, state=isolate_state)
     assert snap["worktrees"] == []
     assert_golden("grid_no_cwd", snap)
+
+
+def test_a_tuned_grid_writes_the_model_and_effort_pane_options(
+    git_repo, isolate_state, tmux_calls
+):
+    """The first link in the discovery chain, and the only one nothing else covers.
+
+    Everything downstream of `_build_grid` -- `_PANE_FORMAT`, `_parse_pane`,
+    `_roster_entry`, the `ctx` line -- is tested from hand-built inputs, so all
+    of it keeps passing even if the option is never written. Deleting the two
+    `set-option` calls has to fail somewhere, and this is that somewhere: the
+    untuned goldens already prove the negative half (no such call is emitted),
+    but nothing proved the positive half until here.
+    """
+    window = fake_tmux.new_window()
+    grid = build(
+        window,
+        str(git_repo),
+        agents=[
+            AgentRequest("claude", "opus", "high"),
+            AgentRequest("codex", "gpt-5.6-sol"),
+            AgentRequest("claude", effort="xhigh"),
+            AgentRequest("claude"),
+        ],
+    )
+    tuning = [
+        (p.pane.options.get(core.MODEL_OPTION), p.pane.options.get(core.EFFORT_OPTION))
+        for p in grid.agent_panes
+    ]
+    # Absent, not empty: an option amux never set must stay unset, because the
+    # whole omit-when-absent rule downstream keys off falsiness of a real value.
+    assert tuning == [
+        ("opus", "high"),
+        ("gpt-5.6-sol", None),
+        (None, "xhigh"),
+        (None, None),
+    ]
+    # And they reached tmux as real set-option calls, not just the fake's dict.
+    opts = [
+        tuple(c[2:])
+        for c in window.server.log
+        if c[0] == "cmd" and c[2] == "set-option"
+    ]
+    assert ("set-option", "-p", core.MODEL_OPTION, "opus") in opts
+    assert ("set-option", "-p", core.EFFORT_OPTION, "high") in opts
+    assert sum(o[2] == core.MODEL_OPTION for o in opts) == 2
+    assert sum(o[2] == core.EFFORT_OPTION for o in opts) == 2
