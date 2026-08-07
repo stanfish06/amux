@@ -13,6 +13,7 @@ makes without going anywhere near the developer's own skill directory.
 from __future__ import annotations
 
 import random
+import sys
 from pathlib import Path
 
 import pytest
@@ -188,6 +189,59 @@ def test_an_unresolvable_source_document_reports_and_the_grid_comes_up(
 
     assert [launch.pane for launch in launches] == ["%1"]
     assert "SKILL.md" in capsys.readouterr().out
+
+
+class ClosedStdout:
+    """A stdout that has gone away, as `amux spw ws | head -1` leaves it."""
+
+    def write(self, _text: str) -> int:
+        raise BrokenPipeError(32, "Broken pipe")
+
+    def flush(self) -> None:
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+def test_a_closed_stdout_does_not_tear_the_grid_down(
+    git_repo, isolate_home, monkeypatch, tmux_calls
+):
+    """The regression this whole degradation story exists to prevent.
+
+    `amux spw ws | head -1` closes stdout after the first line. The install's
+    own report is the next `print`, which then raises `BrokenPipeError` -- and
+    anything escaping `HostRuntime.prepare` becomes a `GridCreationError`, which
+    `_build_grid`'s caller answers by killing the session. Reporting on a
+    markdown file must not be able to do that.
+    """
+    random.seed(1234)
+    monkeypatch.setattr(sys, "stdout", ClosedStdout())
+
+    grid = core._build_grid(  # noqa: SLF001
+        fake_tmux.new_window(), 1, 1, ["claude"], str(git_repo),
+        workspace="ws", task="t0", runtime=runtime.HostRuntime(),
+    )
+
+    monkeypatch.undo()
+    assert [pane.name for pane in grid.agent_panes] != []
+    assert skill(isolate_home, "claude").is_file()
+
+
+def test_an_exception_from_the_install_loop_degrades_rather_than_raising(
+    git_repo, isolate_home, capsys, monkeypatch
+):
+    """`install_host_skill` returns rather than raises, so what is left to guard
+    is the loop and its reporting -- and a guard is only worth having if it
+    holds for a failure nobody predicted."""
+    def blow_up(*_args, **_kwargs) -> object:
+        raise RuntimeError("something nobody wrote a catch for")
+
+    monkeypatch.setattr(runtime.sandbox_bootstrap, "install_host_skill", blow_up)
+
+    launches = runtime.HostRuntime().prepare(
+        specs(("%1", "claude", "alpha")), workspace="ws", task="t0", cwd=str(git_repo)
+    )
+
+    assert [launch.pane for launch in launches] == ["%1"]
+    assert "something nobody wrote a catch for" in capsys.readouterr().out
 
 
 # --- independent of the target directory -------------------------------------

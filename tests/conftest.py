@@ -101,6 +101,28 @@ def isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home
 
 
+@pytest.fixture(autouse=True)
+def no_bootstrap_pause(monkeypatch: pytest.MonkeyPatch) -> float:
+    """Take the wall-clock pause out of every bootstrap send.
+
+    `core.send_bootstrap` pauses between the text and its `Enter` because agent
+    TUIs read a trailing `Enter` in the same `send-keys` call inconsistently.
+    That is a real-time property of a real terminal and there is nothing for it
+    to be true of here -- but it is charged per codex pane per grid, and the
+    suite builds a lot of grids.
+
+    The ORDER it protects is still asserted in `test_bootstrap_send`, and the
+    real default is RETURNED rather than discarded so that same module can pin
+    it to a nonzero value -- otherwise this fixture could quietly become the
+    only reason the code looks fast, with nobody able to see it.
+    """
+    from amux import core
+
+    original = core.BOOTSTRAP_SUBMIT_PAUSE_S
+    monkeypatch.setattr(core, "BOOTSTRAP_SUBMIT_PAUSE_S", 0.0)
+    return original
+
+
 @pytest.fixture
 def db_path(isolate_state: Path) -> Path:
     """An isolated `context.db`. Absent until the first `store` call creates it."""

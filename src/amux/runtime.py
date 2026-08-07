@@ -5,7 +5,13 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from amux import sandbox, sandbox_bootstrap, store, worktree
-from amux.shared import DEFAULT_SOCKET, render_command, skill_pointer_args
+from amux.shared import (
+    DEFAULT_SOCKET,
+    render_command,
+    report,
+    skill_bootstrap_message,
+    skill_pointer_args,
+)
 
 HOST = "host"
 DOCKER_SANDBOX = "docker-sandbox"
@@ -57,6 +63,22 @@ def install_host_skills(
     it, so this cannot be allowed to cost anyone their grid.
     """
     results: dict[str, sandbox_bootstrap.HostSkillInstalled] = {}
+    try:
+        _install_host_skills(panes, results)
+    except Exception as exc:  # noqa: BLE001
+        # The whole body, not just the writes. `install_host_skill` already
+        # returns rather than raises, so what is left here is the reporting and
+        # the loop itself -- and a caller who closed stdout is enough to reach
+        # it. Partial results are kept: an agent whose skill did land should
+        # still get its pointer.
+        report(f"amux: could not install amux's skill ({exc}); agents will run without it")
+    return results
+
+
+def _install_host_skills(
+    panes: Sequence[PaneSpec],
+    results: dict[str, sandbox_bootstrap.HostSkillInstalled],
+) -> None:
     for spec in panes:
         # A raw command spec is not an agent amux knows, so it has no skill
         # directory to install into and no flags amux may speak for.
@@ -72,13 +94,20 @@ def install_host_skills(
                 # user curates by hand, and a developer whose `make install_skills`
                 # symlink just went away needs to see why their edits to the
                 # checkout copy stopped reaching newly spawned agents.
-                print(f"amux: installed amux's skill at {result.path}")
+                report(f"amux: installed amux's skill at {result.path}")
         if not result.ok:
-            print(
+            report(
                 f"amux: {spec.name} has no amux skill installed "
                 f"({result.reason}); it will not know amux's vocabulary"
             )
-    return results
+
+
+def host_skill_path(
+    installed: dict[str, sandbox_bootstrap.HostSkillInstalled], agent: str
+) -> str:
+    """Where `agent`'s document actually landed, or '' if it did not land."""
+    result = installed.get(agent)
+    return result.path if result is not None and result.ok else ""
 
 
 @dataclass(frozen=True)
@@ -86,6 +115,13 @@ class Launch:
     pane: str
     cwd: str = ""
     keys: tuple[str, ...] = ()
+    #: Text to send to the AGENT once its interface is up, as distinct from
+    #: `keys`, which are typed into a SHELL before the agent process exists.
+    #: Two different lifecycles, so they cannot share a field: keys sent late
+    #: would launch nothing, and a message sent early is silently swallowed by
+    #: a TUI that has not finished starting. Empty for every agent that needs
+    #: no message -- `claude` carries its pointer in the system prompt instead.
+    bootstrap: str = ""
 
 
 class Runtime(Protocol):
@@ -153,7 +189,7 @@ class HostRuntime:
         socket: str = "",
     ) -> list[Launch]:
         paths = self._worktrees(panes, workspace=workspace, task=task, cwd=cwd)
-        install_host_skills(panes)
+        installed = install_host_skills(panes)
         launches = []
         for spec in panes:
             command = render_command(
@@ -167,7 +203,14 @@ class HostRuntime:
             if command:
                 keys.append(command)
             launches.append(
-                Launch(pane=spec.pane, cwd=path or cwd or "", keys=tuple(keys))
+                Launch(
+                    pane=spec.pane,
+                    cwd=path or cwd or "",
+                    keys=tuple(keys),
+                    bootstrap=skill_bootstrap_message(
+                        spec.agent, host_skill_path(installed, spec.agent)
+                    ),
+                )
             )
         return launches
 
@@ -576,15 +619,20 @@ class SandboxRuntime:
             handle, endpoint=self.config.client_endpoint, token=plaintext
         )
 
-        # Only when the host's skills are *not* shared in. With --share-skills the
-        # sandbox's skill directory is backed by the host's, and amux writing into
-        # it would push a file across the boundary the wrong way — into the user's
-        # own ~/.claude/skills, where `make install_skills` keeps a symlink into
-        # this repository.
-        if not self.config.resources.share_skills:
+        # The split, not a refusal. With --share-skills the sandbox's skill
+        # directory IS the host's ~/.claude/skills, so writing from inside the VM
+        # would push a file across the boundary the wrong way -- amux still will
+        # not do that. But the host-side install already writes that same
+        # directory on every spawn, so the document arrives from the host
+        # instead. Skipping used to leave one configuration (a shared-skills
+        # sandbox on a machine that never ran `make install_skills`) with no
+        # document at all; now neither branch does.
+        if self.config.resources.share_skills:
+            install_host_skills([spec])
+        else:
             skill = sandbox_bootstrap.install_skill(handle, spec.agent, installed)
             if not skill.ok:
-                print(
+                report(
                     f"amux: {spec.name} has no amux skill installed "
                     f"({skill.reason}); it will not know the sandbox boundary"
                 )
@@ -605,6 +653,13 @@ class SandboxRuntime:
             pane=spec.pane,
             cwd="",  # the pane's working directory is inside the VM
             keys=(sandbox.attach_command(name, spec.agent),),
+            # The IN-SANDBOX path, not the host one. Under --share-skills the
+            # bytes come from the host directory, but the agent still reads them
+            # through its own `$HOME`, and a host path means nothing inside a VM.
+            bootstrap=skill_bootstrap_message(
+                spec.agent,
+                sandbox_bootstrap.sandbox_skill_destination(spec.agent, installed),
+            ),
         )
 
     @staticmethod

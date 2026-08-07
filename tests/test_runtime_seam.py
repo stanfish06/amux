@@ -141,6 +141,11 @@ def test_pane_metadata_and_events_do_not_depend_on_the_runtime(
     repo, tmux_calls
 ):
     """Same grid, two runtimes: everything except the launch keys is identical."""
+    # Launch-side verbs. `send_keys` is what a runtime chose to run; the rest is
+    # the bootstrap handshake, which exists only for a pane whose runtime gave it
+    # a bootstrap payload. Both are the runtime's business. Pane identity, tmux
+    # options, exit hooks and spawn events are not, and those are what is compared.
+    launch_side = {"send_keys", "enter", "capture_pane"}
 
     def run(rt) -> tuple[list, list]:
         window = fake_tmux.new_window()
@@ -149,7 +154,7 @@ def test_pane_metadata_and_events_do_not_depend_on_the_runtime(
             window, 1, 2, ["claude", "codex"], str(repo),
             workspace="ws", task="t0", runtime=rt,
         )
-        tmux = [e for e in window.server.log if e[0] != "send_keys"]
+        tmux = [e for e in window.server.log if e[0] not in launch_side]
         return tmux, list(tmux_calls)
 
     host_tmux, host_events = run(runtime.HostRuntime())

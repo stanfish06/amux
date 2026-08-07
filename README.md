@@ -124,9 +124,31 @@ amux kg myproj task0 --clean       # remove them; refuses a dirty sandbox
 amux kg myproj task0 --clean --force   # ...and accept losing uncommitted work
 ```
 
-## more
+## the skill amux installs into your agents
 
 - `skills/amux/SKILL.md` —  teach agent how to use amux
+
+**Spawning installs this document, and overwrites what is already there.** Every
+`amux spw` / `amux spg` writes it into the skill directory of each agent kind in
+the grid — `~/.claude/skills/amux/SKILL.md` and `~/.codex/skills/amux/SKILL.md` —
+so an agent has amux's vocabulary with no prerequisite step, and a stale copy
+from an older amux corrects itself. Raw command specs are left alone; amux does
+not know where an arbitrary command reads skills.
+
+Presence is not activation, so amux also points the agent at it: `claude` is
+launched with the pointer appended to its system prompt, and `codex`, which has
+no equivalent flag, is sent a short `[amux]`-prefixed message once its interface
+is up. A `codex` agent therefore spends its first turn reading the document.
+
+**If you develop amux, this replaces your `make install_skills` symlink.** That
+target links `skills/amux` from your checkout into both directories; the next
+spawn replaces the link with a real file, and your edits to the checkout stop
+reaching newly spawned agents. amux prints the path when it replaces something,
+so you can see it happen. Re-run `make install_skills` to restore the live link.
+
+Neither the install nor the activation can fail a spawn. Whatever goes wrong is
+reported against the agent it affects, and the grid, its panes, its worktrees and
+its sandboxes stay exactly as they are.
 
 ## monitor
 

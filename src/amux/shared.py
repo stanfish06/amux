@@ -40,6 +40,46 @@ def skill_pointer_args(agent: str) -> tuple[str, ...]:
     return (*flags, SKILL_POINTER) if flags else ()
 
 
+def report(message: str) -> None:
+    """Tell the operator something, and never let the telling cost them a grid.
+
+    `amux spw ws | head -1` closes stdout mid-spawn, so the next `print` raises
+    `BrokenPipeError` -- and both places amux degrades rather than fails (the
+    skill install inside `HostRuntime.prepare`, the bootstrap send inside
+    `core._build_grid`) sit under a caller that answers ANY exception by tearing
+    the grid down. A warning must not be able to do that, so the reporting is
+    degraded too, not only the thing it reports on.
+    """
+    try:
+        print(message)
+    except Exception:  # noqa: BLE001 - there is nowhere left to report to
+        pass
+
+
+def skill_bootstrap_message(agent: str, skill_path: str) -> str:
+    """The pointer as a message, for an agent that cannot take it as a flag.
+
+    Empty for any agent with a `POINTER_FLAGS` entry, so the two mechanisms can
+    never both fire: `claude` already carries the pointer in its system prompt,
+    and a message would cost it a turn to be told what it already knows.
+
+    Empty too when there is no `skill_path`, which is what a failed install
+    leaves behind. Sending an agent to read a document that is not there would
+    spend its first turn on a dead end, and the install failure has already been
+    reported on its own.
+
+    The `[amux]` prefix is not decoration. This text arrives as keystrokes in the
+    agent's own prompt, with no envelope and no sender field -- without it the
+    agent cannot tell amux apart from its human operator or a teammate.
+    """
+    if agent in POINTER_FLAGS or not skill_path:
+        return ""
+    return (
+        f"[amux] {SKILL_POINTER} amux has installed it for you at {skill_path}; "
+        "read it now, before you answer anything else."
+    )
+
+
 def render_command(base: str, args: Sequence[str] = ()) -> str:
     """`base` with `args` appended, each quoted as exactly one shell argument.
 
