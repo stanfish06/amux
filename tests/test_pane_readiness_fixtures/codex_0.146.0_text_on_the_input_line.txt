@@ -1,0 +1,29 @@
+│                                                 │
+│ See full release notes:                         │
+│ https://github.com/openai/codex/releases/latest │
+╰─────────────────────────────────────────────────╯
+
+╭──────────────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.146.0)                               │
+│                                                          │
+│ model:       gpt-5.6-sol high   /model to change         │
+│ directory:   /private/tmp/claude-501/…/…/scratchpad/work │
+│ permissions: YOLO mode                                   │
+╰──────────────────────────────────────────────────────────╯
+
+  Tip: New Use /fast to enable our fastest inference with increased plan usage.
+
+⚠ Skipped loading 2 skill(s) due to invalid SKILL.md files.
+
+⚠ /Users/stan/.agents/skills/molecular-docking/SKILL.md: invalid YAML: mapping values are not allowed in this context at
+  line 2 column 356
+
+⚠ /Users/stan/.agents/skills/plotly/SKILL.md: invalid YAML: mapping values are not allowed in this context at line 2
+  column 355
+
+
+› [amux] read the amux skill at /tmp/x/SKILL.md before coordinating
+
+  gpt-5.6-sol high · /private/tmp/claude-501/-Users-stan--local-state-amux-worktrees-amux-skill-inject-shiny-hawk/4b54b…
+
+

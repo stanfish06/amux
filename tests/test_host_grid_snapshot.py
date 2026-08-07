@@ -22,7 +22,7 @@ from typing import Any
 import pytest
 
 import fake_tmux
-from amux import core, events, store, worktree
+from amux import core, events, shared, store, worktree
 from amux.shared import AgentRequest
 
 GOLDEN_DIR = Path(__file__).parent / "golden"
@@ -85,6 +85,18 @@ def _scrub(value, subs: list[tuple[str, str]]) -> Any:
     return value
 
 
+def _bootstrap_subs() -> list[tuple[str, str]]:
+    """Scrub the codex bootstrap message's prose, but keep the path it names.
+
+    The path is the structure -- which document this agent was sent to read, and
+    under whose `$HOME` -- so it stays (normalized to `<HOME>` below). The
+    sentences around it are prose, pinned by `test_skill_pointer`; leaving them
+    here would make every reword read as a change in grid building.
+    """
+    before, _, after = shared.skill_bootstrap_message("codex", "\x00").partition("\x00")
+    return [(before, "<BOOTSTRAP "), (after, ">")]
+
+
 def snapshot(
     window: fake_tmux.FakeWindow,
     tmux_calls: list[tuple],
@@ -94,7 +106,22 @@ def snapshot(
     state: Path,
 ):
     """Everything the host path did, with volatile values normalized away."""
-    subs = [(str(state), "<STATE>"), (str(repo), "<REPO>")]
+    # The skill pointer is normalized like a path is. These goldens exist to
+    # catch structural drift in what the host path does; the pointer's prose is
+    # pinned by `test_skill_pointer`, and leaving it inline would make every
+    # reworded sentence look like a change in grid building.
+    subs = [
+        # Longest first: the bootstrap message CONTAINS the pointer, so scrubbing
+        # the pointer first would leave "<POINTER> amux has installed it..." in
+        # the golden and put the prose back in by the side door.
+        *_bootstrap_subs(),
+        (shared.SKILL_POINTER, "<POINTER>"),
+        # The bootstrap message names the installed document, which lives under
+        # the per-test `$HOME`. Unscrubbed it makes the goldens unreproducible.
+        (str(Path.home()), "<HOME>"),
+        (str(state), "<STATE>"),
+        (str(repo), "<REPO>"),
+    ]
     rows = store.worktrees_for("ws", "t0")
     with store._connect() as conn:  # noqa: SLF001 - the registry is the contract
         raw_events = [dict(r) for r in conn.execute("SELECT * FROM events ORDER BY id")]

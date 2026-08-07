@@ -1,0 +1,29 @@
+> You are in /private/tmp/claude-501/-Users-stan--local-state-amux-worktrees-amux-skill-inject-shiny-hawk/4b54b47e-7574-
+
+  Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt
+  injection. Trusting the directory allows project-local config, hooks, and exec policies to load.
+
+› 1. Yes, continue
+  2. No, quit
+
+  Press enter to continue
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

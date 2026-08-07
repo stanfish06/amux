@@ -8,6 +8,13 @@ description: Use when orchestrating AI agents in tmux with the amux CLI — spaw
 Agent orchestration on top of tmux. One dedicated tmux server (socket `amux-root`)
 holds every agent, so amux never touches your interactive tmux sessions.
 
+**amux installed this document when it spawned your pane**, and it is the
+authoritative vocabulary for that pane — coordination, spawning work, messaging
+teammates, per-agent worktrees, agent state, and, if you are in one, the sandbox
+boundary. It is rewritten on every spawn, so it describes the amux you are
+actually running rather than whatever was in your skill directory beforehand.
+Where it disagrees with your recollection of these commands, it is right.
+
 ## Vocabulary
 
 amux renames tmux concepts. Its output uses the right-hand column; raw `tmux`
@@ -184,7 +191,20 @@ amux spw thatlib -p ~/Git/thatlib -a claude
 Then hand off deliberately. The new agents start cold and share no context with
 you — they cannot see your notes, since notes are scoped per workspace. Send the
 first one a message with your identity and the task (see *Messaging teammates*),
-or they will sit idle waiting for a prompt.
+or it will never learn what you spawned it for.
+
+One thing does reach a new agent without you: amux installs this skill and points
+the agent at it. A `codex` agent is pointed by a **bootstrap message typed into
+its pane**, so it wakes on its own and spends its first turn reading this
+document — it is not idle, and it is not waiting for you. A `claude` agent gets
+the same pointer in its system prompt and costs no turn. Either way the pointer
+says nothing about *your* task; that part is still yours to send.
+
+The exception, and it is common rather than rare: both agents ask whether to
+trust a directory they have not seen before, and every agent gets a fresh
+worktree. An agent sitting on that prompt never reaches its input box, so amux
+waits, gives up, and prints that it could not point that agent at the skill. If
+you spawned it, answer the prompt in its pane — then say what the task is.
 
 Reach for `spg` (a task in your workspace) before `spw` (a whole new workspace).
 Same repo means same workspace; only a different repo justifies `spw`.
@@ -229,7 +249,10 @@ errors so a hook never looks like agent failure.
 
 An agent that has come up but has never been prompted reads `idle`, not
 `starting`: nothing on the agent side announces "my prompt is ready", so
-`starting` settles to `idle` a few seconds after spawn.
+`starting` settles to `idle` a few seconds after spawn. A freshly spawned `codex`
+may then go `busy` on its own, with nobody having prompted it — that is amux's
+bootstrap message being read, so "busy right after spawn" no longer implies a
+human sent something.
 
 `amux event state` reads the other way — the resolved state of every pane, which
 is what `monitor` and `lsw` render:
@@ -580,4 +603,6 @@ tmux -L amux-root ls                    # raw view of the amux server
   write. Report it; do not invent one.
 - **Spawning and walking away.** New agents start cold, and notes do not cross
   workspaces. Say why in a note before you spawn, then message the new agent its
-  task, or it will sit idle.
+  task, or it will never learn what you spawned it for. (A `codex` agent does
+  wake by itself to read amux's skill — that is amux's bootstrap message, not
+  your task reaching it.)

@@ -43,7 +43,12 @@ def test_host_runtime_prepares_a_worktree_per_agent(repo):
         strict=True,
     ):
         assert launch.cwd.endswith(f"/worktrees/ws/t0/{name}")
-        assert launch.keys == (f"cd {launch.cwd}", expected)
+        # `startswith`: a claude launch also carries the skill pointer, which
+        # `test_skill_pointer` owns. What this test is about is the `cd` and the
+        # agent command reaching the pane, in that order.
+        cd, command = launch.keys
+        assert cd == f"cd {launch.cwd}"
+        assert command.startswith(expected)
         assert Path(launch.cwd).is_dir()
 
 
@@ -137,6 +142,11 @@ def test_pane_metadata_and_events_do_not_depend_on_the_runtime(
     repo, tmux_calls
 ):
     """Same grid, two runtimes: everything except the launch keys is identical."""
+    # Launch-side verbs. `send_keys` is what a runtime chose to run; the rest is
+    # the bootstrap handshake, which exists only for a pane whose runtime gave it
+    # a bootstrap payload. Both are the runtime's business. Pane identity, tmux
+    # options, exit hooks and spawn events are not, and those are what is compared.
+    launch_side = {"send_keys", "enter", "capture_pane"}
 
     def run(rt) -> tuple[list, list]:
         window = fake_tmux.new_window()
@@ -145,7 +155,7 @@ def test_pane_metadata_and_events_do_not_depend_on_the_runtime(
             window, 1, 2, [AgentRequest("claude"), AgentRequest("codex")], str(repo),
             workspace="ws", task="t0", runtime=rt,
         )
-        tmux = [e for e in window.server.log if e[0] != "send_keys"]
+        tmux = [e for e in window.server.log if e[0] not in launch_side]
         return tmux, list(tmux_calls)
 
     host_tmux, host_events = run(runtime.HostRuntime())
@@ -233,7 +243,8 @@ def test_an_unresolved_cwd_isolates_nothing(repo, isolate_state, capsys):
     assert launch.cwd == ""
     # No `cd`, so the pane keeps whatever tmux gave it -- which is exactly why
     # this looked fine for so long.
-    assert launch.keys == (runtime.AGENT_COMMANDS["claude"],)
+    (command,) = launch.keys
+    assert command.startswith(runtime.AGENT_COMMANDS["claude"])
     assert store.worktrees_for("ws", "t0") == []
     assert not Path(worktree.task_worktree_root("ws", "t0")).exists()
     # Still fail-soft, but no longer silent: an unresolved directory is a

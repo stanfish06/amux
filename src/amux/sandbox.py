@@ -12,7 +12,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from amux.shared import AgentRequest, render_command, render_tuning
+from amux.shared import (
+    AgentRequest,
+    render_command,
+    render_tuning,
+    skill_pointer_args,
+)
 
 SBX = "sbx"
 
@@ -323,12 +328,15 @@ def attach_argv(
     name: str, agent: str = "", request: AgentRequest | None = None
 ) -> tuple[str, ...]:
     args = ["run", "--name", name]
-    # Either source alone is enough to need the `<agent> -- <args>` form.
-    # Gating it on AGENT_ATTACH_ARGS would silently drop a sandboxed
-    # `claude@opus`, since claude has no entry there.
+    # Composed, not chosen between: the hook-trust flag is the sandbox's own
+    # requirement, tuning is the user's, and the pointer is amux's for both
+    # runtimes. Any one of them alone is enough to need the
+    # `<agent> -- <args>` form, which `claude` reaches without an
+    # AGENT_ATTACH_ARGS entry of its own.
     extra = (
         *AGENT_ATTACH_ARGS.get(agent, ()),
         *render_tuning(request or AgentRequest(agent)),
+        *skill_pointer_args(agent),
     )
     if extra:
         args += [agent, "--", *extra]
@@ -338,6 +346,8 @@ def attach_argv(
 def attach_command(
     name: str, agent: str = "", request: AgentRequest | None = None
 ) -> str:
+    # Through `render_command`, because the pointer is one argument containing
+    # spaces: a bare join would hand `sbx` a dozen of them.
     return render_command(SBX, attach_argv(name, agent, request))
 
 

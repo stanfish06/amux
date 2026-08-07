@@ -1,0 +1,29 @@
+claude --dangerously-skip-permissions
+▲ ‹stan› 4b54b47e-7574-477e-bf12-ebee22ee7780/scratchpad/work3 [  (us-east-2)]
+ ⟫ claude --dangerously-skip-permissions
+╭─── Claude Code v2.1.224 ─────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                    │ Tips for getting started                                        │
+│                 Welcome back Stan!                 │ Ask Claude to create a new app or clone a repository            │
+│                                                    │ ─────────────────────────────────────────────────────────────── │
+│                       ▐▛███▜▌                      │ What's new                                                      │
+│                      ▝▜█████▛▘                     │ Added self-hosted environments: `claude self-hosted-runner` tu… │
+│                        ▘▘ ▝▝                       │ Added `archive` plugin source: install plugins from a zip over… │
+│ Opus 5 with high effort · Claude Team · Heemskerk  │ Added a cancel-and-confirm step when removing an unavailable p… │
+│ Lab                                                │ /release-notes for more                                         │
+│                /…/scratchpad/work3                 │                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+ ⚠ 1 MCP server needs authentication · run /mcp
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent                                           ● high · /effort
+
+
+
+
+
+
+
+

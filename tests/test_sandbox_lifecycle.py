@@ -155,7 +155,7 @@ def test_a_later_spawn_reattaches_to_the_same_sandbox(git_repo, fake_sbx):
     # No second VM was built...
     assert len([c for c in fake_sbx.calls if c[0] == "create"]) == creates_before
     # ...and the pane attaches to the sandbox that already exists.
-    assert launch.keys == (f"sbx run --name {names[0]}",)
+    assert launch.keys[0].startswith(f"sbx run --name {names[0]}")
     resumed = [r for r in store.worktrees_for("ws", "t0") if r["status"] == "active"]
     assert len(resumed) == 1
     assert resumed[0]["pane"] == "%2"

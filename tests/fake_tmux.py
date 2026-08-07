@@ -55,6 +55,14 @@ class FakeWindow:
         return FakeResult()
 
 
+#: What `capture_pane` returns unless a test says otherwise: a composer with a
+#: status line under it, which is what `core.interface_ready` accepts. The
+#: default is READY on purpose -- a bootstrap send against a never-ready fake
+#: would burn the real timeout in every test that builds a grid, and the
+#: happy path is the one the goldens should record.
+READY_CAPTURE = "some earlier output\n\n> \n\n  a status line under the composer"
+
+
 class FakePane:
     def __init__(self, window: FakeWindow, current_path: str = "/pane/current/path"):
         self.window = window
@@ -62,6 +70,8 @@ class FakePane:
         self.id = window.server.pane_id()
         self.pane_current_path = current_path
         self.options: dict[str, str] = {}
+        #: Successive `capture_pane` answers; the last one repeats forever.
+        self.captures: list[str] = [READY_CAPTURE]
 
     @property
     def log(self) -> list[tuple]:
@@ -83,8 +93,24 @@ class FakePane:
     def set_hook(self, name: str, command: str) -> None:
         self.log.append(("set_hook", self.id, name, command))
 
-    def send_keys(self, keys: str) -> None:
-        self.log.append(("send_keys", self.id, keys))
+    def send_keys(self, keys: str, **kwargs) -> None:
+        # kwargs are recorded, not ignored: `enter`, `suppress_history` and
+        # `literal` are the difference between a message that submits, one that
+        # arrives with a stray leading space, and one tmux reads as key names.
+        if kwargs:
+            self.log.append(("send_keys", self.id, keys, tuple(sorted(kwargs.items()))))
+        else:
+            self.log.append(("send_keys", self.id, keys))
+
+    def enter(self) -> FakePane:
+        self.log.append(("enter", self.id))
+        return self
+
+    def capture_pane(self) -> list[str]:
+        """Real libtmux returns a list of lines, not a string."""
+        self.log.append(("capture_pane", self.id))
+        text = self.captures[0] if len(self.captures) == 1 else self.captures.pop(0)
+        return text.splitlines()
 
 
 def new_window(socket_name: str = "amux-test") -> FakeWindow:

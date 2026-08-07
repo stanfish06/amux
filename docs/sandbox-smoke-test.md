@@ -536,6 +536,75 @@ sbx exec "$BOX" sh -lc '/usr/local/bin/amux integrate ws task; echo "exit=$?"'
 The last must refuse locally with a boundary message and `exit=2`, without
 reaching the service.
 
+### 6a. The skill is installed, and each agent kind was actually pointed at it
+
+Two separate claims, and both need checking per agent kind, because the
+mechanisms differ: `claude` gets the pointer as a launch flag, `codex` gets it as
+a message typed into its pane after its interface came up. An installed document
+nobody opens is the same as no document.
+
+```sh
+# The document itself, in each agent's own directory inside its own VM.
+for BOX in $(sbx ls --json | python3 -c \
+  'import json,sys; print(*[s["name"] for s in json.load(sys.stdin)["sandboxes"]])'); do
+  echo "== $BOX"
+  sbx exec "$BOX" sh -lc 'ls -l "$HOME"/.claude/skills/amux/SKILL.md \
+                                "$HOME"/.codex/skills/amux/SKILL.md 2>/dev/null'
+  sbx exec "$BOX" sh -lc 'head -3 "$HOME"/.*/skills/amux/SKILL.md 2>/dev/null | head -6'
+done
+```
+
+Expect exactly one `SKILL.md`, mode `-rw-r--r--`, in the directory belonging to
+that VM's agent and no other. Then check the activation, from the pane rather
+than from the VM:
+
+```sh
+# claude: the pointer rides the launch command, so it is visible in the argv.
+tmux -L amux-root list-panes -a -F '#{pane_id} #{@amux_agent}'
+sbx exec "$BOX" sh -lc 'ps -eo args | grep -m1 "[c]laude"'
+```
+
+The `claude` line must carry `--append-system-prompt` with the pointer as **one**
+argument — if it is split across many argv words, quoting broke at the attach
+seam.
+
+```sh
+# codex: the pointer arrives as a message. Look at what the pane received.
+tmux -L amux-root capture-pane -p -t <the codex pane> | head -40
+```
+
+Expect an `[amux]`-prefixed message in its transcript, **submitted** rather than
+sitting on the input line, and the agent having read the document rather than
+asking what to do with it. Then ask each agent directly — this is the only check
+that distinguishes a document that was delivered from one that was read:
+
+- in the `claude` pane: *"without looking anything up, what is `amux integrate`
+  for, and which amux commands refuse to run where you are?"*
+- in the `codex` pane: *"what was the first thing you did this session, and what
+  did you learn from it?"*
+
+A `claude` that cannot answer has an installed document and a broken pointer. A
+`codex` that reports no first action never received its bootstrap message — check
+amux's own output for a `was not given amux's skill pointer` line naming it, and
+whether the pane was parked on a trust-this-directory prompt when the send was
+attempted.
+
+### 6b. `--share-skills` gets its document from the host
+
+Under `--share-skills` amux deliberately does **not** write inside the VM, so the
+document must arrive from the host directory instead. Check both halves, or this
+configuration silently ends up with nothing:
+
+```sh
+amux spg "$WS" shared -p "$REPO" --runtime docker-sandbox --share-skills -a claude
+ls -l ~/.claude/skills/amux/SKILL.md          # written on the host, a real file
+BOX=$(sbx ls --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["sandboxes"][-1]["name"])')
+sbx exec "$BOX" sh -lc 'cat "$HOME/.claude/skills/amux/SKILL.md" | head -3'
+```
+
+The VM must be able to read it, and `sbx` must show no `cp` of a skill file into
+that sandbox.
+
 ---
 
 ## Step 7 — Blocked-network diagnostics

@@ -34,6 +34,27 @@ def plain(tmp_path):
     return str(d)
 
 
+def without_pointer(words) -> list[str]:
+    """Drop the amux skill pointer `inject-amux-skill-on-spawn` appends.
+
+    Both changes append to the same two seams, and every `claude` launch now
+    carries the pointer. These tests are about tuning composing onto whatever
+    was already there — the pointer's own content is covered by
+    `test_skill_pointer.py`, so scrubbing it here keeps each test measuring one
+    thing.
+    """
+    out: list[str] = []
+    skip = False
+    for word in words:
+        if skip:
+            skip = False
+        elif word == "--append-system-prompt":
+            skip = True
+        else:
+            out.append(word)
+    return out
+
+
 # --- host runtime -----------------------------------------------------------
 
 
@@ -57,14 +78,16 @@ def plain(tmp_path):
 )
 def test_tuning_is_appended_to_the_agent_command(agent, model, effort, expected, plain):
     """The existing command is kept whole and the flags land after it."""
-    assert prepare_one(agent, model, effort, cwd=plain) == (
-        runtime.AGENT_COMMANDS[agent] + expected,
+    (keys,) = prepare_one(agent, model, effort, cwd=plain)
+    assert without_pointer(shlex.split(keys)) == shlex.split(
+        runtime.AGENT_COMMANDS[agent] + expected
     )
 
 
 def test_an_untuned_spec_launches_todays_exact_command(plain):
     for agent, command in runtime.AGENT_COMMANDS.items():
-        assert prepare_one(agent, cwd=plain) == (command,)
+        (keys,) = prepare_one(agent, cwd=plain)
+        assert without_pointer(shlex.split(keys)) == shlex.split(command)
 
 
 def test_a_raw_command_is_left_alone(plain):
@@ -91,7 +114,7 @@ def test_hostile_values_arrive_as_one_shell_word(hostile, plain):
     """Values are unvalidated, so the pane's shell must never interpret them."""
     (keys,) = prepare_one("claude", hostile, cwd=plain)
     assert keys.startswith(runtime.AGENT_COMMANDS["claude"] + " ")
-    assert shlex.split(keys)[-2:] == ["--model", hostile]
+    assert without_pointer(shlex.split(keys))[-2:] == ["--model", hostile]
 
 
 def test_a_hostile_effort_is_quoted_inside_codexs_config_override(plain):
@@ -105,9 +128,10 @@ def test_a_hostile_effort_is_quoted_inside_codexs_config_override(plain):
 
 def test_sandboxed_claude_carries_its_flags():
     """claude has no AGENT_ATTACH_ARGS entry, so the `--` form must still appear."""
-    assert sandbox.attach_argv(
-        "sb1", "claude", AgentRequest("claude", "opus", "high")
-    ) == ("run", "--name", "sb1", "claude", "--", "--model", "opus", "--effort", "high")
+    argv = sandbox.attach_argv("sb1", "claude", AgentRequest("claude", "opus", "high"))
+    assert without_pointer(argv) == [
+        "run", "--name", "sb1", "claude", "--", "--model", "opus", "--effort", "high",
+    ]
 
 
 def test_sandboxed_codex_composes_with_the_hook_trust_flag():
@@ -135,14 +159,32 @@ def test_an_untuned_attach_is_unchanged():
         assert sandbox.attach_argv("sb1", agent) == sandbox.attach_argv(
             "sb1", agent, AgentRequest(agent)
         )
-    assert sandbox.attach_command("sb1", "claude") == "sbx run --name sb1"
+    # An untuned request adds nothing of its own. What is left after scrubbing
+    # the pointer is exactly what each agent needed before either change:
+    # `claude` reaches the `--` form through the pointer alone, and `codex`
+    # still carries only its hook-trust flag.
+    assert without_pointer(sandbox.attach_argv("sb1", "claude")) == [
+        "run",
+        "--name",
+        "sb1",
+        "claude",
+        "--",
+    ]
+    assert without_pointer(sandbox.attach_argv("sb1", "codex")) == [
+        "run",
+        "--name",
+        "sb1",
+        "codex",
+        "--",
+        sandbox.HOOK_TRUST_FLAG,
+    ]
 
 
 def test_the_attach_command_quotes_a_hostile_value():
     command = sandbox.attach_command(
         "sb1", "claude", AgentRequest("claude", "opus; id")
     )
-    assert shlex.split(command)[-1] == "opus; id"
+    assert without_pointer(shlex.split(command))[-1] == "opus; id"
 
 
 def test_both_runtimes_render_the_same_flags(plain):

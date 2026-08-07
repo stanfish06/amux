@@ -434,7 +434,7 @@
     [
       "send_keys",
       "%1",
-      "claude --dangerously-skip-permissions"
+      "claude --dangerously-skip-permissions --append-system-prompt '<POINTER>'"
     ],
     [
       "cmd",
@@ -485,7 +485,7 @@
     [
       "send_keys",
       "%4",
-      "claude --dangerously-skip-permissions"
+      "claude --dangerously-skip-permissions --append-system-prompt '<POINTER>'"
     ],
     [
       "cmd",
@@ -493,6 +493,37 @@
       "show-options",
       "-pqv",
       "@amux_label"
+    ],
+    [
+      "capture_pane",
+      "%3"
+    ],
+    [
+      "send_keys",
+      "%3",
+      "<BOOTSTRAP <HOME>/.codex/skills/amux/SKILL.md>",
+      [
+        [
+          "enter",
+          false
+        ],
+        [
+          "literal",
+          true
+        ],
+        [
+          "suppress_history",
+          false
+        ]
+      ]
+    ],
+    [
+      "enter",
+      "%3"
+    ],
+    [
+      "capture_pane",
+      "%3"
     ]
   ],
   "worktrees": [

@@ -1,0 +1,29 @@
+│ https://github.com/openai/codex/releases/latest │
+╰─────────────────────────────────────────────────╯
+
+⚠ Skipped loading 2 skill(s) due to invalid SKILL.md files.
+
+⚠ /Users/stan/.agents/skills/molecular-docking/SKILL.md: invalid YAML: mapping values are not allowed in this context at
+  line 2 column 356
+
+⚠ /Users/stan/.agents/skills/plotly/SKILL.md: invalid YAML: mapping values are not allowed in this context at line 2
+  column 355
+
+╭─────────────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.146.0)                              │
+│                                                         │
+│ model:       gpt-5.6-sol high   /model to change        │
+│ directory:   /private/tmp/claude-501/…/scratchpad/work4 │
+│ permissions: YOLO mode                                  │
+╰─────────────────────────────────────────────────────────╯
+
+  Tip: New Use /fast to enable our fastest inference with increased plan usage.
+
+
+› [amux] You are running inside an amux pane. amux is agent orchestration on top of tmux, and its own skill -- named
+  `amux`, invocable by that name -- is the authoritative vocabulary for this pane: coordination, spawning work,
+  messaging teammates, per-agent worktrees, and agent state. Read it before you do any of those, rather than guessing
+  at commands that do not exist. amux has installed it for you at /home/agent/.codex/skills/amux/SKILL.md; read it now,
+  before you answer anything else.
+
+  gpt-5.6-sol high · /private/tmp/claude-501/-Users-stan--local-state-amux-worktrees-amux-skill-inject-shiny-hawk/4b54b…

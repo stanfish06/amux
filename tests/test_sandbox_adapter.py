@@ -367,9 +367,12 @@ def test_allow_network_command_is_text_not_an_invocation(fake_sbx):
 
 
 def test_attach_omits_the_agent_so_a_sandbox_is_reattached_not_recreated():
+    """`run --name` alone is the reattach form. An agent is named only to carry
+    arguments after `--`, which is the same shape codex has used since the hook
+    trust flag; naming it does not turn a reattach into a create."""
     assert sandbox.attach_argv("sb1") == ("run", "--name", "sb1")
-    assert sandbox.attach_argv("sb1", "claude") == ("run", "--name", "sb1")
-    assert sandbox.attach_command("sb1", "claude") == "sbx run --name sb1"
+    assert sandbox.attach_command("sb1") == "sbx run --name sb1"
+    assert sandbox.attach_argv("sb1", "claude")[:3] == ("run", "--name", "sb1")
 
 
 def test_codex_attach_carries_the_hook_trust_flag():
