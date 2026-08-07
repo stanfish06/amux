@@ -55,10 +55,10 @@ survives with a configuration that is not the one you asked for.**
 agent did with it, so after a typo the two disagree. The agents differ in how
 much their own banner helps: claude's startup box shows the *effective* value
 (launch `--effort hgih` and it reads `with high effort`), while codex's `model:`
-row merely echoes what you passed and prints a nonexistent model verbatim. Codex
-does warn that it has no metadata for a model it does not know, but that fires
-for a real model newer than your codex too, so it is a hint and not a verdict —
-only the first API call settles whether the model was real.
+row merely echoes what you passed and prints a nonexistent model verbatim. For
+codex, only the first API call tells you whether the model was real — a pane
+left idle on a bogus model reports nothing at all, so a clean-looking startup is
+not confirmation.
 
 **Escape hatch.** `@`, `/` and `:` are delimiters, so a model id containing `/`
 (`openai/gpt-5`) or ending in `:<digits>` (a Bedrock id like `…-v1:0`) cannot
