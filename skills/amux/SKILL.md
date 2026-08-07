@@ -85,10 +85,17 @@ against `claude` 2.1.224 and `codex-cli` 0.146.0:
 So the pane comes up alive, and it is running on a configuration that is not the
 one you asked for. **`amux ctx` will not save you here**: it reports what the
 pane was *launched* with, and cannot know what the agent did with that. After a
-typo the two disagree, and only the agent's own startup box is authoritative. If
-you need to know what you are really running on, read your own banner —
-claude's says `Opus 5 with high effort`, codex's has a `model:` row — or ask the
-agent directly, rather than trusting `ctx`.
+typo the two disagree.
+
+**Be careful which banner you trust — the two agents differ.** claude's startup
+box reports the *effective* value: launch it with `--effort hgih` and the box
+reads `with high effort`, the default it actually fell back to, so it is a real
+confirmation. Codex's `model:` row is a bare **echo of what you passed** —
+`codex -m totally-bogus-model-zzz` prints that nonexistent model verbatim and
+runs until the first API call fails. So for codex the row confirms only that
+your flag arrived, never that the model exists or was accepted. To know a codex
+model is real, send it a prompt and see whether the request succeeds; nothing
+before that first call can tell you.
 
 What amux does reject is a malformed *shape* — `claude@`, `claude/`, and
 `claude@opus/` are errors, and nothing is created.
@@ -102,14 +109,17 @@ raw command instead:
 amux spg myproj fix -a 'claude --model openai/gpt-5 --dangerously-skip-permissions'
 ```
 
-A raw-command pane still gets its own worktree and branch like everyone else,
-and `amux integrate` merges its branch normally — nothing about your work is
-second-class. What it loses is the agent-kind identity: the pane cannot run
-under `docker-sandbox` at all, and `ctx` and `monitor` print the whole command
-string in the agent column instead of `claude` or `codex`. It must also spell
-out every flag itself, including the ones amux normally adds — which is why the
-example above repeats `--dangerously-skip-permissions`. Prefer the spec grammar
-when your model id fits it.
+You are trading the grammar for the flag. A raw spec carries no `@MODEL` or
+`/EFFORT` of its own, so it must spell out every flag itself — including the
+ones amux normally adds, which is why the example above repeats
+`--dangerously-skip-permissions`. It also cannot run under `docker-sandbox` at
+all, and `ctx` and `monitor` print the whole command string in the agent column
+instead of `claude` or `codex`. Prefer the spec grammar when your model id fits
+it.
+
+What a raw-command pane does **not** lose is its work. It still gets its own
+worktree and branch like everyone else, and `amux integrate` merges its branch
+normally — so commit and integrate exactly as you otherwise would.
 
 Shape resolution, given `n` total agents:
 

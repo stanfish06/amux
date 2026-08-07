@@ -277,3 +277,14 @@ def test_a_tuned_grid_writes_the_model_and_effort_pane_options(
     assert ("set-option", "-p", core.EFFORT_OPTION, "high") in opts
     assert sum(o[2] == core.MODEL_OPTION for o in opts) == 2
     assert sum(o[2] == core.EFFORT_OPTION for o in opts) == 2
+
+    # The other durable write of the same request, and the other undefended
+    # link: the host worktree row. Same argument as the pane option -- every
+    # test downstream of this reads a row it built by hand, so dropping the two
+    # kwargs in `setup_host_agents` breaks nothing without this.
+    rows = {r["name"]: r for r in store.worktrees_for("ws", "t0")}
+    tuning_by_agent = {(r["agent"], r["model"], r["effort"]) for r in rows.values()}
+    assert ("claude", "opus", "high") in tuning_by_agent
+    assert ("codex", "gpt-5.6-sol", "") in tuning_by_agent
+    assert ("claude", "", "xhigh") in tuning_by_agent
+    assert ("claude", "", "") in tuning_by_agent

@@ -52,9 +52,11 @@ either agent starts normally and only fails at the first API call. **The pane
 survives with a configuration that is not the one you asked for.**
 
 `amux ctx` reports what the pane was *launched* with and cannot know what the
-agent did with it, so after a typo the two disagree. The agent's own startup box
-is the authority — check there, not in `ctx`, when a pane seems to be on the
-wrong model.
+agent did with it, so after a typo the two disagree. The agents differ in how
+much their own banner helps: claude's startup box shows the *effective* value
+(launch `--effort hgih` and it reads `with high effort`), while codex's `model:`
+row merely echoes what you passed and prints a nonexistent model verbatim. For
+codex, only the first API call tells you whether the model was real.
 
 **Escape hatch.** `@`, `/` and `:` are delimiters, so a model id containing `/`
 (`openai/gpt-5`) or ending in `:<digits>` (a Bedrock id like `…-v1:0`) cannot
@@ -64,12 +66,15 @@ go in a spec. Launch it as a raw command instead:
 amux spg myproj fix -a 'claude --model openai/gpt-5 --dangerously-skip-permissions'
 ```
 
-A raw command still gets its own worktree and branch, and `amux integrate`
-merges it like any other agent's. What it gives up is the agent-kind identity:
-it cannot run under `docker-sandbox`, and `ctx` and `monitor` show the whole
-command string in the agent column instead of `claude` or `codex`. It also has
-to spell out every flag itself, including the ones amux normally supplies —
-which is why the example above repeats `--dangerously-skip-permissions`.
+You are trading the grammar for the flag: a raw spec carries no `@MODEL` or
+`/EFFORT` of its own, so every flag has to be spelled out — including the ones
+amux normally supplies, which is why the example above repeats
+`--dangerously-skip-permissions`. It also cannot run under `docker-sandbox`,
+and `ctx` and `monitor` print the whole command string in the agent column
+instead of `claude` or `codex`.
+
+What a raw command does *not* lose is its work: it still gets its own worktree
+and branch, and `amux integrate` merges it like any other agent's.
 
 # architecture
 
