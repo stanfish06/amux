@@ -48,15 +48,51 @@ locally. See *Sandboxed agents* for why, and for `--runtime docker-sandbox`.
 
 ## Agent specs and grid shape
 
-`-a AGENT[:COUNT]` is repeatable and fills panes row-major. `AGENT` is `claude`,
-`codex`, or any raw shell command. Default is one `claude`.
+`-a AGENT[@MODEL][/EFFORT][:COUNT]` is repeatable and fills panes row-major.
+`AGENT` is `claude`, `codex`, or any raw shell command. Every other part is
+optional. Default is one `claude`.
 
 ```sh
 amux spw myproj -p ~/Git/myproj -r 2 -c 2   # 2x2, all claude
 amux spg myproj review -a codex:2           # 1x2, both codex
 amux spg myproj fix -a claude:3 -a codex    # 2x2, 3 claude + 1 codex
 amux spg myproj shell -a bash               # raw command instead of an agent
+amux spg myproj plan -a claude@opus/high -a codex@gpt-5.6-sol/xhigh   # per-spec model + effort
 ```
+
+## Model and reasoning effort
+
+Each spec carries its own model and effort, so one grid can mix a cheap
+reviewer with an expensive implementer. Both work identically under the host
+and `docker-sandbox` runtimes, and `amux ctx` reports what your own pane was
+launched with, so you can check rather than guess.
+
+They become each CLI's own flags — `claude --model X --effort Y`, `codex -m X
+-c model_reasoning_effort=Y` — appended to the command amux already runs.
+
+**amux does not check the values.** A model or effort level released after this
+amux was built works immediately, and amux never refuses one it has not heard
+of. The cost is that a typo is rejected by the agent's CLI at startup, not by
+amux: the spec is accepted, the grid is created, and that one pane dies
+immediately at a dead shell. If a teammate's pane is dead right after spawn,
+suspect a mistyped model or effort first.
+
+What amux does reject is a malformed *shape* — `claude@`, `claude/`, and
+`claude@opus/` are errors, and nothing is created.
+
+**Escape hatch.** `@`, `/` and `:` are the delimiters, so a model id containing
+`/` (`openai/gpt-5`) or ending in `:<digits>` (a Bedrock-style `…-v1:0`) cannot
+go in a spec — it parses as an effort level or an invalid count. Launch it as a
+raw command instead:
+
+```sh
+amux spg myproj fix -a 'claude --model openai/gpt-5 --dangerously-skip-permissions'
+```
+
+A raw command is not one of amux's known agents, so that pane gets no sandbox
+support, no per-agent worktree, and no agent-kind identity in `ctx`, `monitor`
+or `integrate`, and it must spell out every flag itself — including the ones
+amux normally adds. Prefer a short alias in the spec grammar where one exists.
 
 Shape resolution, given `n` total agents:
 

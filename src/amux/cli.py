@@ -478,9 +478,13 @@ def _add_grid_args(parser: argparse.ArgumentParser):
         "--agent",
         action="append",
         default=None,
-        metavar="AGENT[:COUNT]",
+        metavar="AGENT[@MODEL][/EFFORT][:COUNT]",
         help=f"agent spec, repeatable: {'/'.join(core.AGENT_COMMANDS)} or a raw "
-        "command, with an optional pane count (e.g. -a claude:3 -a codex)",
+        "command, each with an optional model, reasoning effort and pane count "
+        "(e.g. -a claude@opus/high:2 -a codex@gpt-5.6-sol/xhigh). Model and "
+        "effort are passed to the agent's own CLI unchecked; a model id "
+        "containing '/' or ending in ':<digits>' must be launched as a raw "
+        "command instead (-a 'claude --model openai/gpt-5')",
     )
 
 

@@ -12,6 +12,7 @@
 amux spw myproj -p ~/Git/myproj -r 2 -c 2   # spawn workspace w/ 2x2 claude grid
 amux spg myproj review -a codex:2           # add a task (window) w/ 1x2 codex grid
 amux spg myproj fix -a claude:3 -a codex    # mixed 2x2: 3 claude + 1 codex (auto shape)
+amux spg myproj plan -a claude@opus/high -a codex@gpt-5.6-sol/xhigh   # per-agent model + effort
 amux lsw                                    # list workspaces
 amux lsg myproj                             # list tasks/agents in a workspace
 amux kg myproj review                       # kill a task
@@ -20,6 +21,45 @@ amux monitor                                # live dashboard of every workspace/
 amux monitor -W 160 -T 60                   # ...at 160 cols, 60 of them for the tree
 ```
 - runs on a dedicated tmux server (socket `amux-root`); attach: `tmux -L amux-root attach -t myproj`
+
+## agent specs
+
+`-a` takes `AGENT[@MODEL][/EFFORT][:COUNT]`. Every part is optional, and a spec
+with no `@` and no `/` launches exactly what it launched before. Each spec
+carries its own values, so a grid can mix a cheap reviewer with an expensive
+implementer:
+
+```sh
+amux spg myproj fix -r 2 -c 2 -a claude@opus/high:3 -a codex@gpt-5.6-sol/xhigh
+```
+
+Model and effort become each CLI's own flags — there is no shared spelling:
+
+| | model | effort |
+|---|---|---|
+| `claude` | `--model <value>` | `--effort <value>` |
+| `codex` | `-m <value>` | `-c model_reasoning_effort=<value>` |
+
+Both apply identically under the host and `docker-sandbox` runtimes, and
+`amux ctx` reports what a pane was launched with.
+
+**Values are not checked against any list amux maintains**, so a model or
+effort level released after your amux works immediately. The cost is that a
+typo is caught by the agent's CLI at startup rather than by amux: that pane
+dies at spawn instead of the spawn being refused.
+
+**Escape hatch.** `@`, `/` and `:` are delimiters, so a model id containing `/`
+(`openai/gpt-5`) or ending in `:<digits>` (a Bedrock id like `…-v1:0`) cannot
+go in a spec. Launch it as a raw command instead:
+
+```sh
+amux spg myproj fix -a 'claude --model openai/gpt-5 --dangerously-skip-permissions'
+```
+
+A raw command is not one of amux's known agents, so it gives up sandbox
+support, per-agent worktrees, and the agent-kind identity that `ctx`,
+`monitor`, and `integrate` use — the raw spec has to spell out every flag it
+wants, including the ones amux normally supplies.
 
 # architecture
 
