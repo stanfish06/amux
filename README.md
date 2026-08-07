@@ -140,6 +140,14 @@ launched with the pointer appended to its system prompt, and `codex`, which has
 no equivalent flag, is sent a short `[amux]`-prefixed message once its interface
 is up. A `codex` agent therefore spends its first turn reading the document.
 
+One thing to expect the first time you spawn into a repository: both agents ask
+whether you trust the directory, and amux gives every agent a *fresh worktree*.
+An agent parked on that prompt never reaches its input box, so amux waits, gives
+up, and says so by name — `was not given amux's skill pointer ... waiting on a
+prompt of its own`. Answer the prompt and the agent runs normally; it just was
+not told about the skill, so tell it, or respawn once the directory is trusted.
+amux does not answer trust prompts for you.
+
 **If you develop amux, this replaces your `make install_skills` symlink.** That
 target links `skills/amux` from your checkout into both directories; the next
 spawn replaces the link with a real file, and your edits to the checkout stop

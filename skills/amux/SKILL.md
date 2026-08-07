@@ -132,6 +132,12 @@ document — it is not idle, and it is not waiting for you. A `claude` agent get
 the same pointer in its system prompt and costs no turn. Either way the pointer
 says nothing about *your* task; that part is still yours to send.
 
+The exception, and it is common rather than rare: both agents ask whether to
+trust a directory they have not seen before, and every agent gets a fresh
+worktree. An agent sitting on that prompt never reaches its input box, so amux
+waits, gives up, and prints that it could not point that agent at the skill. If
+you spawned it, answer the prompt in its pane — then say what the task is.
+
 Reach for `spg` (a task in your workspace) before `spw` (a whole new workspace).
 Same repo means same workspace; only a different repo justifies `spw`.
 

@@ -345,6 +345,24 @@ def interface_ready(capture: str) -> bool:
     return any(_CARET.match(line) for line in lines[:last])
 
 
+def _not_ready_reason(capture: str, timeout: float) -> str:
+    """Why the wait ran out, from what the pane was showing when it did.
+
+    Worth the extra sentence because the chooser case is the ORDINARY one, not
+    an edge: every amux agent gets a fresh per-agent worktree, and both agents
+    ask about trusting a directory they have not seen before. Measured on a live
+    spawn -- a bare "not ready" there sends the operator looking for a bug in
+    amux rather than at the prompt sitting in the pane.
+    """
+    if _CHOOSER.search(capture):
+        return (
+            f"after {timeout:g}s it was still waiting on a prompt of its own, "
+            "most likely asking whether to trust this directory -- every agent "
+            "gets a fresh worktree, so answer it and the agent runs normally"
+        )
+    return f"its interface was not ready within {timeout:g}s"
+
+
 def _probe(text: str) -> str:
     return " ".join(text.split())[:_PROBE_CHARS]
 
@@ -400,10 +418,13 @@ def _send_bootstrap(
     pane: Pane, text: str, *, timeout: float, poll: float, pause: float, clock, sleep
 ) -> str:
     deadline = clock() + timeout
-    while not interface_ready(_capture(pane)):
+    while True:
+        capture = _capture(pane)
+        if interface_ready(capture):
+            break
         remaining = deadline - clock()
         if remaining <= 0:
-            return f"its interface was not ready within {timeout:g}s"
+            return _not_ready_reason(capture, timeout)
         sleep(min(poll, remaining))
 
     # `suppress_history=False`: libtmux otherwise prefixes a space so the line

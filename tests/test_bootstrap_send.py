@@ -195,6 +195,25 @@ def test_an_interface_that_never_comes_up_is_reported_and_left_running():
     assert clock.now == pytest.approx(10.0)
 
 
+def test_a_pane_parked_on_a_prompt_says_so_rather_than_just_timing_out():
+    """Measured on a live spawn, and the reason this reason exists: a real
+    `codex` timed out at 45s because it was asking whether to trust the
+    directory -- and every amux agent gets a FRESH worktree, so this is the
+    ordinary case. "Not ready" alone sends the operator hunting a bug in amux
+    instead of looking at the prompt sitting in the pane."""
+    problem = send(pane(capture("codex_0.146.0_trust_modal")), timeout=1.0)
+
+    assert "waiting on a prompt of its own" in problem
+    assert "trust" in problem
+
+
+def test_a_pane_that_simply_has_not_painted_yet_says_that_instead():
+    problem = send(pane(capture("codex_0.146.0_starting")), timeout=1.0)
+
+    assert "not ready" in problem
+    assert "trust" not in problem
+
+
 def test_the_wait_never_overshoots_its_deadline():
     """A poll interval longer than what is left of the timeout must not extend
     it -- a 45s budget polled every 30s would otherwise wait 60s."""
