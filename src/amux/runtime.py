@@ -71,6 +71,14 @@ def install_host_skills(
         # the loop itself -- and a caller who closed stdout is enough to reach
         # it. Partial results are kept: an agent whose skill did land should
         # still get its pointer.
+        #
+        # `report`, NEVER `print`, and this line is the whole broken-pipe
+        # defence -- measured, not assumed. A closed stdout raises inside the
+        # try, and then raises AGAIN out of this handler, from inside the except
+        # block, where nothing catches it. So this guard cannot defend against
+        # the failure it looks like it was written for; it earns its keep
+        # against everything else. Writing `print` here restores the note #108
+        # grid-destruction defect with the guard still visibly in place.
         report(f"amux: could not install amux's skill ({exc}); agents will run without it")
     return results
 
@@ -542,6 +550,14 @@ class SandboxRuntime:
 
         self._integration = worktree.setup_task_integration(repo, workspace, task)
 
+        # Once for the grid, not once per sandbox. `--share-skills` backs every
+        # VM's skill directory with the host's one, so there is exactly one
+        # destination per agent kind however many panes want it -- the same rule
+        # the host runtime follows, and the same spec scenario.
+        host_installed: dict[str, sandbox_bootstrap.HostSkillInstalled] = (
+            install_host_skills(panes) if self.config.resources.share_skills else {}
+        )
+
         launches = []
         for spec in panes:
             launches.append(
@@ -551,6 +567,7 @@ class SandboxRuntime:
                     task=task,
                     repo=repo,
                     socket=socket,
+                    host_installed=host_installed,
                 )
             )
         return launches
@@ -563,6 +580,7 @@ class SandboxRuntime:
         task: str,
         repo: str,
         socket: str,
+        host_installed: dict[str, sandbox_bootstrap.HostSkillInstalled],
     ) -> Launch:
         assert self._integration is not None
         branch = worktree.agent_branch(workspace, task, spec.name)
@@ -627,10 +645,22 @@ class SandboxRuntime:
         # instead. Skipping used to leave one configuration (a shared-skills
         # sandbox on a machine that never ran `make install_skills`) with no
         # document at all; now neither branch does.
+        #
+        # `skill_path` is what LANDED, never what a path resolver can compute.
+        # Resolving it would send a codex agent to spend its whole first turn
+        # reading a document the warning above has just said is missing.
         if self.config.resources.share_skills:
-            install_host_skills([spec])
+            # Under --share-skills the HOST write is what decides whether the
+            # in-VM path has anything behind it: the directory is the host's,
+            # and nothing was copied into this VM at all.
+            skill_path = (
+                sandbox_bootstrap.sandbox_skill_destination(spec.agent, installed)
+                if host_skill_path(host_installed, spec.agent)
+                else ""
+            )
         else:
             skill = sandbox_bootstrap.install_skill(handle, spec.agent, installed)
+            skill_path = skill.path if skill.ok else ""
             if not skill.ok:
                 report(
                     f"amux: {spec.name} has no amux skill installed "
@@ -656,10 +686,8 @@ class SandboxRuntime:
             # The IN-SANDBOX path, not the host one. Under --share-skills the
             # bytes come from the host directory, but the agent still reads them
             # through its own `$HOME`, and a host path means nothing inside a VM.
-            bootstrap=skill_bootstrap_message(
-                spec.agent,
-                sandbox_bootstrap.sandbox_skill_destination(spec.agent, installed),
-            ),
+            # Empty when the install did not land -- see `skill_path` above.
+            bootstrap=skill_bootstrap_message(spec.agent, skill_path),
         )
 
     @staticmethod

@@ -321,10 +321,23 @@ BOOTSTRAP_POLL_S = 0.5
 #: same `send-keys` call inconsistently -- it can be absorbed as a literal
 #: newline instead of submitting -- so the two are separate keystrokes.
 BOOTSTRAP_SUBMIT_PAUSE_S = 0.4
-#: How much of the message to look for when checking whether it was submitted.
-#: A short head only: the message wraps across several composer lines, and an
-#: exact match against a soft-wrapped capture fails on a message that did land.
-_PROBE_CHARS = 24
+#: How much of the message to look for when checking whether it was submitted,
+#: taken from its END. Both halves of that are measured, not chosen:
+#:
+#: The TAIL, because a composer keeps the cursor on screen and the cursor is
+#: after the last character typed. A 491-character message in an 80x8 pane --
+#: an ordinary quarter of a 2x2 grid -- scrolls its own head out of the
+#: composer, so a head-based probe reports a message that is plainly sitting
+#: there unsubmitted as submitted, at every probe length. The retry `Enter`
+#: then never fires and amux says nothing was wrong.
+#:
+#: SHORT, because the same truncation eventually eats the tail too: measured
+#: against a real capture of that 80x8 pane, anything from about 110 characters
+#: up starts failing. Short has its own floor -- at a handful of characters the
+#: probe stops identifying the message and matches the footer of a pane that
+#: submitted it cleanly. Both cliffs are pinned by fixtures in
+#: `test_pane_readiness_fixtures/`; this sits between them, near neither.
+_PROBE_CHARS = 40
 
 
 def interface_ready(capture: str) -> bool:
@@ -364,7 +377,8 @@ def _not_ready_reason(capture: str, timeout: float) -> str:
 
 
 def _probe(text: str) -> str:
-    return " ".join(text.split())[:_PROBE_CHARS]
+    """The end of `text`, whitespace-normalized so soft wrapping cannot hide it."""
+    return " ".join(text.split())[-_PROBE_CHARS:]
 
 
 def _held_in_the_composer(capture: str, text: str) -> bool:

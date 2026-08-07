@@ -63,22 +63,31 @@ def pane(*captures: str) -> fake_tmux.FakePane:
 
 
 class Clock:
-    """A clock that only moves when something sleeps on it."""
+    """A clock that only moves when something sleeps on it.
 
-    def __init__(self) -> None:
+    Given a pane, it records each sleep INTO THAT PANE'S LOG rather than into a
+    list of its own. The difference matters: a separate list can only say that
+    sleeping happened, while one shared timeline says *where* -- and the whole
+    point of the pause is that it falls between the text and its `Enter`.
+    """
+
+    def __init__(self, pane=None) -> None:
         self.now = 0.0
         self.slept: list[float] = []
+        self._pane = pane
 
     def time(self) -> float:
         return self.now
 
     def sleep(self, seconds: float) -> None:
         self.slept.append(seconds)
+        if self._pane is not None:
+            self._pane.log.append(("sleep", self._pane.id, seconds))
         self.now += seconds
 
 
 def send(p, text=MESSAGE, **kwargs) -> str:
-    clock = kwargs.pop("clock", None) or Clock()
+    clock = kwargs.pop("clock", None) or Clock(pane=p)
     return core.send_bootstrap(
         p, text, clock=clock.time, sleep=clock.sleep, **kwargs
     )
@@ -144,11 +153,21 @@ def verbs(p) -> list[str]:
 def test_a_ready_pane_gets_the_text_then_enter_as_a_separate_keystroke():
     """Agent TUIs read a trailing `Enter` in the same `send-keys` call
     inconsistently -- it can be absorbed as a literal newline instead of
-    submitting -- so the submit key goes on its own."""
+    submitting -- so the submit key goes on its own.
+
+    The `sleep` entries are the point, not noise. Asserting only the order of
+    the keystrokes leaves the pause itself unpinned: deleting it passes every
+    other test in this file and produces a real-world intermittent -- an `Enter`
+    that arrives too soon to be read as a submit -- that no test would ever see.
+    Whether the pause is nonzero is a separate question, pinned below; this pins
+    that there IS one, and where.
+    """
     p = pane(capture("codex_0.146.0_ready"), capture("codex_0.146.0_submitted"))
 
     assert send(p) == ""
-    assert verbs(p) == ["capture_pane", "send_keys", "enter", "capture_pane"]
+    assert verbs(p) == [
+        "capture_pane", "send_keys", "sleep", "enter", "sleep", "capture_pane"
+    ]
 
 
 def test_the_text_arrives_unmodified_and_as_literal_keys():
@@ -180,7 +199,10 @@ def test_a_starting_interface_is_waited_for_rather_than_typed_into():
     )
 
     assert send(p) == ""
-    assert verbs(p)[:4] == ["capture_pane", "capture_pane", "capture_pane", "send_keys"]
+    # It sleeps BETWEEN captures rather than spinning on `capture-pane`.
+    assert verbs(p)[:6] == [
+        "capture_pane", "sleep", "capture_pane", "sleep", "capture_pane", "send_keys"
+    ]
 
 
 def test_an_interface_that_never_comes_up_is_reported_and_left_running():
@@ -235,6 +257,12 @@ def test_text_left_on_the_input_line_gets_enter_again_never_the_text_again():
     assert send(p, text=STUCK) == ""
     assert verbs(p).count("send_keys") == 1
     assert verbs(p).count("enter") == 2
+    # The retry `Enter` gets its own pause too -- it is the same keystroke with
+    # the same reason to be read too early.
+    assert verbs(p) == [
+        "capture_pane", "send_keys", "sleep", "enter", "sleep", "capture_pane",
+        "enter", "sleep", "capture_pane",
+    ]
 
 
 def test_text_still_stuck_after_a_second_enter_is_reported():
@@ -262,6 +290,86 @@ def test_a_submitted_message_is_not_mistaken_for_a_stuck_one():
 
 
 
+
+
+# --- the REAL payload, which is 491 characters and wraps ----------------------
+#
+# Everything above uses a 65-character stand-in that fits on one composer line,
+# so none of it exercises what `_PROBE_CHARS` exists for. These four use the
+# actual message, captured sitting in a real composer at two pane sizes.
+
+
+REAL_STUCK_WIDE = "codex_0.146.0_120x30_real_message_stuck"
+REAL_SUBMITTED = "codex_0.146.0_120x30_real_message_submitted"
+REAL_STUCK_TINY = "codex_0.146.0_80x8_real_message_stuck"
+
+
+def test_the_real_message_wraps_across_the_composer():
+    """The premise the rest of this section rests on, asserted rather than
+    assumed: a stand-in that fits on one line proves nothing about wrapping."""
+    assert len(MESSAGE) > 400
+    composer = capture(REAL_STUCK_WIDE).splitlines()
+    carets = [i for i, line in enumerate(composer) if core._CARET.match(line)]
+    assert len(composer[carets[-1] :]) > 4  # the message occupies several lines
+
+
+def test_a_wrapped_stuck_message_is_recognised_as_stuck():
+    p = pane(capture("codex_0.146.0_ready"), capture(REAL_STUCK_WIDE), capture(REAL_SUBMITTED))
+
+    assert send(p) == ""
+    assert verbs(p).count("enter") == 2  # it retried, so it saw the message
+    assert verbs(p).count("send_keys") == 1
+
+
+def test_a_wrapped_submitted_message_is_recognised_as_submitted():
+    p = pane(capture("codex_0.146.0_ready"), capture(REAL_SUBMITTED))
+
+    assert send(p) == ""
+    assert verbs(p).count("enter") == 1
+
+
+def test_a_message_whose_head_scrolled_out_of_the_composer_is_still_stuck():
+    """The measurement that made the probe read from the END of the message.
+
+    An 80x8 pane is an ordinary quarter of a 2x2 grid, and the 491-character
+    message does not fit in its composer -- the top scrolls away and only the
+    tail is on screen. A probe taken from the HEAD of the message finds nothing
+    there, at ANY length, so a message plainly sitting unsubmitted reads as
+    submitted: no retry `Enter`, no warning, and the text sits in the box.
+    """
+    stuck = capture(REAL_STUCK_TINY)
+    assert MESSAGE[:40] not in " ".join(stuck.split())  # the head really is gone
+    assert MESSAGE[-40:] in " ".join(stuck.split())
+
+    p = pane(capture("codex_0.146.0_ready"), stuck, capture(REAL_SUBMITTED))
+
+    assert send(p) == ""
+    assert verbs(p).count("enter") == 2
+
+
+def test_the_probe_is_short_enough_to_survive_a_truncated_composer(monkeypatch):
+    """The upper cliff, measured: from about 110 characters the probe stops
+    fitting in what an 80x8 pane shows, and a stuck message reads as sent.
+
+    `monkeypatch` rather than save-and-restore on purpose. Restoring a literal
+    40 here would put the value back whatever the module said, so a mutated
+    default would be masked for every test after this one -- the test would
+    hold the code correct by overwriting it.
+    """
+    monkeypatch.setattr(core, "_PROBE_CHARS", 200)
+    assert not core._held_in_the_composer(capture(REAL_STUCK_TINY), MESSAGE)
+    monkeypatch.undo()
+    assert core._held_in_the_composer(capture(REAL_STUCK_TINY), MESSAGE)
+
+
+def test_the_probe_is_long_enough_to_identify_the_message(monkeypatch):
+    """The lower cliff, from the same captures: a probe of one or two characters
+    is punctuation, and matches the footer of a pane that submitted cleanly --
+    which costs a live agent a spurious extra `Enter` on an empty prompt."""
+    monkeypatch.setattr(core, "_PROBE_CHARS", 1)
+    assert core._held_in_the_composer(capture(REAL_SUBMITTED), MESSAGE)
+    monkeypatch.undo()
+    assert not core._held_in_the_composer(capture(REAL_SUBMITTED), MESSAGE)
 
 
 # --- it cannot cost anyone their grid -----------------------------------------

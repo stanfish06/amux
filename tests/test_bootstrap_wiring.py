@@ -132,6 +132,51 @@ def test_a_shared_skills_sandbox_is_still_pointed_at_its_own_home(sandbox_launch
     assert "/home/agent/.codex/skills/amux/SKILL.md" in launch.bootstrap
 
 
+def test_a_failed_in_vm_install_sends_nobody_to_read_it(sandbox_launch, capsys):
+    """The sandbox half of the rule the host half already kept.
+
+    This site used to RESOLVE the in-VM path rather than report what landed, so
+    it was non-empty whatever happened -- amux warned that the agent had no
+    skill and then typed a message telling that agent to go read it. The cost is
+    the agent's entire first turn on a file that is not there.
+    """
+    launch = sandbox_launch("codex", skill_reason="no space left on device")
+
+    assert launch.bootstrap == ""
+    assert "no amux skill installed" in capsys.readouterr().out
+
+
+def test_a_failed_host_install_sends_nobody_to_read_it_under_shared_skills(
+    sandbox_launch, capsys
+):
+    """The same defect by the other route. With `--share-skills` nothing is
+    copied into the VM at all, so it is the HOST write that decides whether the
+    in-VM path has anything behind it."""
+    launch = sandbox_launch("codex", share_skills=True, host_reason="disk on fire")
+
+    assert launch.bootstrap == ""
+    assert "no amux skill installed" in capsys.readouterr().out
+
+
+def test_a_shared_skills_grid_writes_once_per_kind_not_once_per_pane(
+    sandbox_prepare,
+):
+    """`Repeated agents of one kind write once` is not scoped to the host
+    runtime. `--share-skills` backs every VM with the same host directory, so
+    there is one destination per agent kind however many panes want it."""
+    sandbox_prepare("claude", "claude", "codex", "claude", share_skills=True)
+
+    assert sandbox_prepare.host_install_calls == ["claude", "codex"]
+
+
+def test_a_sandbox_grid_without_shared_skills_writes_no_host_destination(
+    sandbox_prepare,
+):
+    sandbox_prepare("claude", "codex")
+
+    assert sandbox_prepare.host_install_calls == []
+
+
 # --- one pane's failure is one pane's failure ---------------------------------
 
 
@@ -212,11 +257,39 @@ def test_the_report_names_the_agent_and_leaves_the_pane_running(
 
 
 @pytest.fixture
-def sandbox_launch(git_repo, fake_sbx, isolate_home, monkeypatch):
-    """One prepared sandbox launch, with `sbx` and the in-VM work faked out."""
+def sandbox_prepare(git_repo, fake_sbx, isolate_home, monkeypatch):
+    """Prepare a real sandbox grid, with `sbx` and the in-VM work faked out.
+
+    The `install_skill` fake resolves the destination the same way the real one
+    does rather than returning a stand-in path. An earlier version returned
+    `/home/agent/x` and always succeeded, which is precisely why the suite could
+    not see a failed install still sending an agent to read the document.
+    """
     from amux import sandbox
 
-    def make(agent: str, *, share_skills: bool = False) -> runtime.Launch:
+    calls: list[str] = []
+
+    def make(
+        *agents: str,
+        share_skills: bool = False,
+        skill_reason: str = "",
+        host_reason: str = "",
+    ) -> list[runtime.Launch]:
+        def install_skill(_ops, agent, installed, **_kw):
+            if skill_reason:
+                return sandbox_bootstrap.SkillInstalled(reason=skill_reason)
+            return sandbox_bootstrap.SkillInstalled(
+                path=sandbox_bootstrap.sandbox_skill_destination(agent, installed)
+            )
+
+        def install_host_skill(agent, **_kw):
+            calls.append(agent)
+            if host_reason:
+                return sandbox_bootstrap.HostSkillInstalled(reason=host_reason)
+            return sandbox_bootstrap.HostSkillInstalled(
+                path=str(Path.home() / f".{agent}/skills/amux/SKILL.md")
+            )
+
         monkeypatch.setattr(
             sandbox_bootstrap,
             "install_client",
@@ -224,15 +297,12 @@ def sandbox_launch(git_repo, fake_sbx, isolate_home, monkeypatch):
                 shim_path="/opt/amux", config_path="/opt/ctx.json", home="/home/agent"
             ),
         )
-        monkeypatch.setattr(
-            sandbox_bootstrap,
-            "install_skill",
-            lambda *a, **kw: sandbox_bootstrap.SkillInstalled(path="/home/agent/x"),
-        )
+        monkeypatch.setattr(sandbox_bootstrap, "install_skill", install_skill)
+        monkeypatch.setattr(sandbox_bootstrap, "install_host_skill", install_host_skill)
         monkeypatch.setattr(
             sandbox_bootstrap,
             "install_hooks",
-            lambda *a, **kw: sandbox_bootstrap.HooksInstalled(
+            lambda _ops, agent, *a, **kw: sandbox_bootstrap.HooksInstalled(
                 agent=agent,
                 settings_path="/home/agent/settings.json",
                 missing_kinds=(),
@@ -249,13 +319,24 @@ def sandbox_launch(git_repo, fake_sbx, isolate_home, monkeypatch):
                 resources=sandbox.Resources(share_skills=share_skills)
             )
         )
-        (launch,) = rt.prepare(
-            specs(("%1", agent, "alpha")),
+        return rt.prepare(
+            specs(*[(f"%{i}", a, f"a{i}") for i, a in enumerate(agents, start=1)]),
             workspace="ws",
             task="t0",
             cwd=str(git_repo),
             socket="amux-test",
         )
+
+    make.host_install_calls = calls  # type: ignore[attr-defined]
+    return make
+
+
+@pytest.fixture
+def sandbox_launch(sandbox_prepare):
+    """One prepared sandbox launch."""
+
+    def make(agent: str, **kwargs) -> runtime.Launch:
+        (launch,) = sandbox_prepare(agent, **kwargs)
         return launch
 
     return make

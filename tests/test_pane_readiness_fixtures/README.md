@@ -39,6 +39,29 @@ a string literal in a test:
   one. An agent parked on a trust prompt never becomes ready, its bootstrap send
   times out and says so, and the pane is left exactly as it was for its human.
 
+## The three `real_message` captures
+
+`codex_0.146.0_text_on_the_input_line.txt` and `..._submitted.txt` were taken
+with a 65-character stand-in that fits on one composer line. The actual bootstrap
+message is **491 characters** and wraps across five or more lines, so those two
+exercise none of the wrapping the submission check has to survive. These three
+hold the real payload, typed into a real composer:
+
+- `codex_0.146.0_120x30_real_message_stuck.txt` — wrapped, whole message visible.
+- `codex_0.146.0_120x30_real_message_submitted.txt` — the same message after
+  `Enter`. Note it is *still on screen*, in the transcript above the composer:
+  looking for the text anywhere in the pane reads every success as a failure.
+- `codex_0.146.0_80x8_real_message_stuck.txt` — the same message in a pane the
+  size of one quarter of a 2x2 grid. **The composer scrolls its own head away**,
+  leaving only the tail. This is the capture that decided `_probe` reads from the
+  END of the message: a head-based probe finds nothing here at any length, so a
+  message plainly sitting unsubmitted reads as submitted, the retry `Enter` never
+  fires, and amux reports no problem.
+
+Together they pin both cliffs behaviourally rather than by asserting a constant:
+a probe of ~1 character matches the footer of a cleanly submitted pane, and one
+of ~110 or more no longer fits in what the 80x8 capture shows.
+
 `codex_0.146.0_shell_prompt_after_exit.txt` is this developer's shell prompt,
 kept because it is the shape a capture takes when the agent is not running at
 all. `synthetic_caret_shell_prompt.txt` is the only invented file, marked as
