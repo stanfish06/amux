@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from amux import core
-from amux.shared import AgentRequest, render_tuning
+from amux import core, runtime
+from amux.shared import AGENT_TUNING, AgentRequest, render_tuning
 
 
 def parse(*specs: str, rows=None, cols=None) -> list[AgentRequest]:
@@ -40,9 +40,10 @@ def test_model_and_effort():
 
 
 def test_model_effort_and_count():
-    assert parse("claude@opus/high:2") == [
-        AgentRequest("claude", model="opus", effort="high")
-    ] * 2
+    assert (
+        parse("claude@opus/high:2")
+        == [AgentRequest("claude", model="opus", effort="high")] * 2
+    )
 
 
 def test_count_alone_is_unchanged():
@@ -164,3 +165,20 @@ def test_the_invalid_count_error_points_at_the_escape_hatch():
 )
 def test_each_cli_gets_its_own_spelling(request_, expected):
     assert render_tuning(request_) == expected
+
+
+def test_the_parser_and_the_renderer_gate_on_the_same_agents():
+    """Two tables in two modules deciding one question.
+
+    `_parse_agent_spec` accepts tuning for anything in `runtime.AGENT_COMMANDS`;
+    `render_tuning` emits flags for anything in `AGENT_TUNING`. If they ever
+    disagree, a spec parses fine and launches with its flags dropped.
+    """
+    assert set(AGENT_TUNING) == set(runtime.AGENT_COMMANDS)
+
+
+@pytest.mark.parametrize("field", ["model", "effort"])
+def test_tuning_an_agent_with_no_flag_spelling_is_loud(field):
+    """The failure mode the two tables could produce, made impossible to miss."""
+    with pytest.raises(ValueError, match=f"no {field} flag"):
+        render_tuning(AgentRequest("gemini", **{field: "whatever"}))

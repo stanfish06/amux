@@ -52,6 +52,9 @@ def context_to_string(ctx: dict) -> list[str]:
     runtime_line = sandbox_client.runtime_to_string(me)
     if runtime_line:
         lines.append(runtime_line)
+    tuning_line = sandbox_client.tuning_to_string(me)
+    if tuning_line:
+        lines.append(tuning_line)
     if me.get("state_degraded"):
         lines.append(
             f"  note: {DEGRADED_MARK} marks a state this agent cannot fully "

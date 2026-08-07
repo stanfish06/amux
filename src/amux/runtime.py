@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from amux import sandbox, sandbox_bootstrap, store, worktree
-from amux.shared import DEFAULT_SOCKET, AgentRequest, append_args, render_tuning
+from amux.shared import DEFAULT_SOCKET, AgentRequest, render_command, render_tuning
 
 HOST = "host"
 DOCKER_SANDBOX = "docker-sandbox"
@@ -127,7 +127,7 @@ class HostRuntime:
             # A raw command spec is its own agent string and carries no tuning
             # by construction, so `render_tuning` returns () and nothing is
             # appended to it.
-            command = append_args(
+            command = render_command(
                 AGENT_COMMANDS.get(spec.agent, spec.agent),
                 render_tuning(spec.request),
             )
@@ -168,7 +168,7 @@ class HostRuntime:
                 repo,
                 workspace,
                 task,
-                [(spec.pane, spec.agent, spec.name) for spec in panes],
+                [(spec.pane, spec.request, spec.name) for spec in panes],
             )
         except worktree.WorktreeError as exc:
             print(f"amux: worktree isolation unavailable: {exc}")
@@ -532,6 +532,8 @@ class SandboxRuntime:
             sandbox_name=name,
             sandbox_id=handle.id,
             socket_name=socket or DEFAULT_SOCKET,
+            model=spec.model,
+            effort=spec.effort,
         )
 
         if acquired.reattached:

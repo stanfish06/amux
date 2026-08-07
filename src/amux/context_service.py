@@ -246,6 +246,8 @@ class Identity:
     runtime_status: str = ""
     sandbox_name: str = ""
     sandbox_id: str = ""
+    model: str = ""
+    effort: str = ""
     status: str = "active"
     socket: str = DEFAULT_SOCKET
     permissions: frozenset[str] = frozenset()
@@ -272,6 +274,8 @@ def identity_from_record(
         runtime_status=record["runtime_status"] or "",
         sandbox_name=record["sandbox_name"] or "",
         sandbox_id=record["sandbox_id"] or "",
+        model=record["model"] or "",
+        effort=record["effort"] or "",
         status=record["status"] or "active",
         socket=record["socket_name"] or default_socket,
         permissions=frozenset(record["permissions"]),
@@ -517,6 +521,14 @@ class ContextService:
             "sandbox_name": identity.sandbox_name,
             "sandbox_id": identity.sandbox_id,
         }
+        # From the worktree row, because a sandboxed agent cannot read tmux
+        # pane options. Same omit-when-absent rule as the host path.
+        for key in ("model", "effort"):
+            value = getattr(identity, key)
+            if value:
+                context["self"][key] = value
+            else:
+                context["self"].pop(key, None)
         for entry in [
             context["self"],
             *(a for t in context["team"] for a in t["agents"]),

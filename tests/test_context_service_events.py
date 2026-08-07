@@ -98,7 +98,9 @@ class Probe:
     def _request(self, method, path, token, body=None, headers=None, timeout=10):
         sent = dict(headers or {})
         sent["Authorization"] = f"Bearer {token}"
-        conn = http.client.HTTPConnection(cs.LOOPBACK, self.handle.port, timeout=timeout)
+        conn = http.client.HTTPConnection(
+            cs.LOOPBACK, self.handle.port, timeout=timeout
+        )
         try:
             conn.request(method, path, body=body, headers=sent)
             response = conn.getresponse()
@@ -160,7 +162,9 @@ def crane(events_probe):
 
 
 def test_an_event_is_recorded_and_attributed_to_the_caller(events_probe, crane):
-    status, payload = events_probe.post("/v1/events", {"kind": "busy", "detail": "Edit"}, crane)
+    status, payload = events_probe.post(
+        "/v1/events", {"kind": "busy", "detail": "Edit"}, crane
+    )
     assert status == 200
     event = payload["event"]
     assert event["kind"] == "busy"
@@ -208,7 +212,9 @@ def test_every_event_kind_maps_to_the_native_state(events_probe, crane, kind, st
 def test_a_needs_input_event_resolves_the_pane_to_needs_input(events_probe, crane):
     """The scenario from the spec: a hook posts a notification, and the host
     pane resolves to `needs-input`."""
-    events_probe.post("/v1/events", {"kind": "notify", "detail": "which branch?"}, crane)
+    events_probe.post(
+        "/v1/events", {"kind": "notify", "detail": "which branch?"}, crane
+    )
     assert events_probe.events_tmux.options()[-1][2] == "needs-input"
     state = events.resolve_state(
         alive=True,
@@ -240,9 +246,9 @@ def test_an_event_stays_attributed_after_the_pane_id_is_recycled(events_probe):
 
     _, payload = events_probe.post("/v1/events", {"kind": "busy"}, old_token)
     assert payload["event"]["worktree_id"] == old_id
-    assert [e["worktree_id"] for e in store.iter_events(pane="%1", db_path=events_probe.db)] == [
-        old_id
-    ]
+    assert [
+        e["worktree_id"] for e in store.iter_events(pane="%1", db_path=events_probe.db)
+    ] == [old_id]
 
 
 def test_an_event_for_a_vanished_pane_is_still_recorded(events_probe):
@@ -316,8 +322,21 @@ def test_posting_an_event_needs_the_write_capability(events_probe):
 # --- GET /v1/events/state ---
 
 
-def _pane_line(pane: str, name: str, workspace: str, task: str, state: str) -> str:
-    """One row of `events._PANE_FORMAT`."""
+def _pane_line(
+    pane: str,
+    name: str,
+    workspace: str,
+    task: str,
+    state: str,
+    model: str = "",
+    effort: str = "",
+) -> str:
+    """One row of `events._PANE_FORMAT`.
+
+    Field count is load-bearing: `_parse_pane` drops the whole free-text block
+    unless the row has exactly as many fields as the format, so a row written
+    by hand has to grow with the format rather than relying on the sentinel.
+    """
     return "\x1f".join(
         [
             pane,
@@ -331,8 +350,17 @@ def _pane_line(pane: str, name: str, workspace: str, task: str, state: str) -> s
             "/sandbox",
             workspace,
             task,
+            model,
+            effort,
             "amux",
         ]
+    )
+
+
+def test_the_hand_written_pane_row_matches_the_live_format():
+    """This helper is only as good as its field count; pin it to the format."""
+    assert len(_pane_line("%1", "a", "ws", "t0", "idle").split("\x1f")) == len(
+        events._PANE_FIELDS  # noqa: SLF001
     )
 
 
@@ -340,8 +368,14 @@ def test_state_reports_the_panes_in_the_callers_workspace(events_probe, crane):
     # Three panes, because there are three shapes to guard and two of them are
     # protected by different checks: %1 has a sandbox row, %2 has a *host* row,
     # and %3 has no row at all.
-    events_probe.agent("%2", "host-agent", runtime="host", runtime_status="",
-                       sandbox_name="", sandbox_id="")
+    events_probe.agent(
+        "%2",
+        "host-agent",
+        runtime="host",
+        runtime_status="",
+        sandbox_name="",
+        sandbox_id="",
+    )
     events_probe.events_tmux.listing = [
         _pane_line("%1", "swift-crane", "proj", "fix", "busy"),
         _pane_line("%2", "host-agent", "proj", "fix", "idle"),
@@ -459,7 +493,9 @@ def test_wait_is_released_by_a_sandbox_event(events_probe, crane):
     events_probe.events_tmux.facts["%1"] = events.PaneFacts(
         alive=True, kind="amux", created=1000.0, state_option="needs-input"
     )
-    events_probe.post("/v1/events", {"kind": "notify", "detail": "which branch?"}, crane)
+    events_probe.post(
+        "/v1/events", {"kind": "notify", "detail": "which branch?"}, crane
+    )
     thread.join(20)
     assert not thread.is_alive()
     status, payload = answer["result"]
@@ -605,7 +641,9 @@ def test_wait_refuses_a_pane_outside_the_scope(events_probe, crane):
         db_path=events_probe.db,
     )
     for pane in ("%9", "%404"):
-        status, payload = events_probe.get(f"/v1/events/wait?pane=%25{pane[1:]}&timeout=1", crane)
+        status, payload = events_probe.get(
+            f"/v1/events/wait?pane=%25{pane[1:]}&timeout=1", crane
+        )
         assert status == 403, pane
         assert payload["error"]["code"] == "forbidden"
         assert payload["error"]["message"] == f"pane {pane} is not in proj/fix"

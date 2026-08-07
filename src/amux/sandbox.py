@@ -6,14 +6,13 @@ import hashlib
 import json
 import os
 import re
-import shlex
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from amux.shared import AgentRequest, render_tuning
+from amux.shared import AgentRequest, render_command, render_tuning
 
 SBX = "sbx"
 
@@ -339,7 +338,7 @@ def attach_argv(
 def attach_command(
     name: str, agent: str = "", request: AgentRequest | None = None
 ) -> str:
-    return shlex.join((SBX, *attach_argv(name, agent, request)))
+    return render_command(SBX, attach_argv(name, agent, request))
 
 
 def stop(name: str) -> None:

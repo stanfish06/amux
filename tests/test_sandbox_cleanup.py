@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from amux import runtime, sandbox, store, worktree
+from amux.shared import AgentRequest
 from test_host_grid_snapshot import git
 from test_sandbox_runtime import (  # noqa: F401 - `minted` is a fixture
     make_runtime,
@@ -75,7 +76,10 @@ def build(git_repo, fake_sbx, *names, tmp_path=None, commits=True):
     rt = make_runtime()
     rt.prepare(
         specs(*[(f"%{i}", "claude", n) for i, n in enumerate(names, start=1)]),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
     return rt
 
@@ -84,7 +88,11 @@ def with_status(fake_sbx, names, status_by_name):
     """Answer `git status --porcelain` per sandbox, before `ready`'s catch-all."""
     for name in names:
         fake_sbx.respond(
-            "exec", name, "git", "status", "--porcelain",
+            "exec",
+            name,
+            "git",
+            "status",
+            "--porcelain",
             stdout=status_by_name.get(name, ""),
         )
 
@@ -92,7 +100,9 @@ def with_status(fake_sbx, names, status_by_name):
 # --- the clean case ---
 
 
-def test_a_clean_sandbox_is_removed_and_its_row_marked(git_repo, fake_sbx, tmp_path, minted):
+def test_a_clean_sandbox_is_removed_and_its_row_marked(
+    git_repo, fake_sbx, tmp_path, minted
+):
     names = names_for(git_repo, "alpha")
     with_status(fake_sbx, names, {})
     ready(fake_sbx, names)
@@ -219,8 +229,13 @@ def test_an_unreadable_working_tree_counts_as_dirty(git_repo, fake_sbx, tmp_path
     exactly the sandboxes that are already misbehaving."""
     names = names_for(git_repo, "alpha")
     fake_sbx.respond(
-        "exec", names[0], "git", "status", "--porcelain",
-        stderr="ERROR: sandbox is not running\n", returncode=1,
+        "exec",
+        names[0],
+        "git",
+        "status",
+        "--porcelain",
+        stderr="ERROR: sandbox is not running\n",
+        returncode=1,
     )
     ready(fake_sbx, names)
     build(git_repo, fake_sbx, "alpha", tmp_path=tmp_path)
@@ -246,7 +261,9 @@ def test_force_removes_a_dirty_sandbox(git_repo, fake_sbx, tmp_path):
     assert rows()["alpha"]["status"] == "removed"
 
 
-def test_force_still_preserves_the_committed_tip(git_repo, fake_sbx, tmp_path, monkeypatch):
+def test_force_still_preserves_the_committed_tip(
+    git_repo, fake_sbx, tmp_path, monkeypatch
+):
     """`--force` gives up the *uncommitted* work only."""
     names = names_for(git_repo, "alpha")
     with_status(fake_sbx, names, {names[0]: DIRTY})
@@ -315,7 +332,7 @@ def test_a_sandbox_with_nothing_committed_is_still_removable(
 
 def test_host_agents_are_left_to_the_worktree_path(git_repo, fake_sbx, tmp_path):
     integration = worktree.setup_task_integration(str(git_repo), "ws", "t0")
-    worktree.setup_host_agents(integration, [("%1", "claude", "hosty")])
+    worktree.setup_host_agents(integration, [("%1", AgentRequest("claude"), "hosty")])
 
     assert runtime.clean_task("ws", "t0") == []
     assert not fake_sbx.calls
@@ -376,7 +393,9 @@ def test_an_integrated_task_still_stops_its_sandboxes(git_repo, fake_sbx, tmp_pa
     assert rows()["alpha"]["runtime_status"] == "stopped"
 
 
-def test_cleaning_a_merged_row_does_not_rewrite_its_merge_history(git_repo, fake_sbx, tmp_path):
+def test_cleaning_a_merged_row_does_not_rewrite_its_merge_history(
+    git_repo, fake_sbx, tmp_path
+):
     """The two axes stay independent: the work really was merged, and only the
     VM went away. Overwriting `merged` with `removed` would lose that."""
     names = names_for(git_repo, "alpha")
@@ -470,7 +489,9 @@ def test_an_unreadable_tip_refuses_even_with_force(git_repo, fake_sbx, tmp_path)
     ready(fake_sbx, names)
     build(git_repo, fake_sbx, "alpha", tmp_path=tmp_path)
     # The VM's git daemon answers nothing.
-    git(git_repo, "remote", "set-url", worktree.sandbox_remote(names[0]), "/nonexistent")
+    git(
+        git_repo, "remote", "set-url", worktree.sandbox_remote(names[0]), "/nonexistent"
+    )
     CLONES[names[0]] = "/nonexistent"
 
     with pytest.raises(sandbox.SandboxError) as caught:
@@ -486,16 +507,19 @@ def test_an_unreadable_tip_refuses_even_with_force(git_repo, fake_sbx, tmp_path)
     assert rows()["alpha"]["status"] == "active"
 
 
-def test_a_sandbox_that_cannot_be_started_is_not_removed(
-    git_repo, fake_sbx, tmp_path
-):
+def test_a_sandbox_that_cannot_be_started_is_not_removed(git_repo, fake_sbx, tmp_path):
     names = names_for(git_repo, "alpha")
     ready(fake_sbx, names)
     build(git_repo, fake_sbx, "alpha", tmp_path=tmp_path)
-    fake_sbx._responses.insert(0, {  # noqa: SLF001 - ordering is the point
-        "argv": ["exec", names[0], "true"],
-        "stdout": "", "stderr": "ERROR: sandbox failed to start\n", "returncode": 1,
-    })
+    fake_sbx._responses.insert(
+        0,
+        {  # noqa: SLF001 - ordering is the point
+            "argv": ["exec", names[0], "true"],
+            "stdout": "",
+            "stderr": "ERROR: sandbox failed to start\n",
+            "returncode": 1,
+        },
+    )
     fake_sbx.script.write_text(__import__("json").dumps(fake_sbx._responses))
 
     with pytest.raises(sandbox.SandboxError, match="NOT saved on the host"):
@@ -584,14 +608,16 @@ def test_kw_does_not_kill_the_session_when_a_sandbox_survives(monkeypatch):
     session = FakeSess(["t0"])
     monkeypatch.setattr(cli, "_get_session", lambda server, ws: session)
     monkeypatch.setattr(
-        cli.runtime, "clean_task",
+        cli.runtime,
+        "clean_task",
         lambda ws, task, force=False: (_ for _ in ()).throw(
             sandbox.SandboxError("box-1: could not be removed (busy)")
         ),
     )
     monkeypatch.setattr(cli.worktree, "remove_task", lambda ws, task: [])
     monkeypatch.setattr(
-        cli.core, "load_agent_space",
+        cli.core,
+        "load_agent_space",
         lambda s: (_ for _ in ()).throw(AssertionError("must not terminate")),
     )
     args = type("A", (), {"workspace": "ws", "clean": True, "force": False})()
@@ -614,7 +640,8 @@ def test_kw_still_kills_the_session_when_cleanup_succeeds(monkeypatch):
     monkeypatch.setattr(cli.runtime, "clean_task", lambda ws, task, force=False: [])
     monkeypatch.setattr(cli.worktree, "remove_task", lambda ws, task: [])
     monkeypatch.setattr(
-        cli.core, "load_agent_space",
+        cli.core,
+        "load_agent_space",
         lambda s: type("G", (), {"terminate": lambda self: terminated.append(True)})(),
     )
     args = type("A", (), {"workspace": "ws", "clean": True, "force": False})()
@@ -665,17 +692,20 @@ def reattach(git_repo, fake_sbx, tmp_path, agent_name="alpha"):
     build(git_repo, fake_sbx, agent_name, tmp_path=tmp_path)
     make_runtime().prepare(
         specs(("%2", "claude", agent_name)),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
     name = sandbox.sandbox_name("ws", "t0", agent_name, str(git_repo))
-    assert len([r for r in store.worktrees_for("ws", "t0")
-                if r["sandbox_name"] == name]) == 2
+    assert (
+        len([r for r in store.worktrees_for("ws", "t0") if r["sandbox_name"] == name])
+        == 2
+    )
     return name
 
 
-def test_two_rows_for_one_sandbox_remove_it_exactly_once(
-    git_repo, fake_sbx, tmp_path
-):
+def test_two_rows_for_one_sandbox_remove_it_exactly_once(git_repo, fake_sbx, tmp_path):
     name = reattach(git_repo, fake_sbx, tmp_path)
 
     removed = runtime.clean_task("ws", "t0")
@@ -718,10 +748,15 @@ def test_a_vanished_sandbox_is_retired_not_reported_as_a_survivor(
     ready(fake_sbx, names)
     build(git_repo, fake_sbx, "alpha", tmp_path=tmp_path)
     # sbx no longer knows about it -- removed by hand, or a part-way pass.
-    fake_sbx._responses.insert(0, {  # noqa: SLF001 - ordering is the point
-        "argv": ["ls", "--json"], "stdout": '{"sandboxes": []}',
-        "stderr": "", "returncode": 0,
-    })
+    fake_sbx._responses.insert(
+        0,
+        {  # noqa: SLF001 - ordering is the point
+            "argv": ["ls", "--json"],
+            "stdout": '{"sandboxes": []}',
+            "stderr": "",
+            "returncode": 0,
+        },
+    )
     fake_sbx.script.write_text(__import__("json").dumps(fake_sbx._responses))
 
     removed = runtime.clean_task("ws", "t0")  # must not raise
@@ -734,19 +769,21 @@ def test_a_vanished_sandbox_is_retired_not_reported_as_a_survivor(
     assert runtime.clean_task("ws", "t0") == []
 
 
-def test_a_vanished_sandbox_does_not_block_a_healthy_one(
-    git_repo, fake_sbx, tmp_path
-):
+def test_a_vanished_sandbox_does_not_block_a_healthy_one(git_repo, fake_sbx, tmp_path):
     """The un-cleanable workspace: one stale row must not stop the rest."""
     names = names_for(git_repo, "alpha", "beta")
     with_status(fake_sbx, names, {})
     ready(fake_sbx, names)
     build(git_repo, fake_sbx, "alpha", "beta", tmp_path=tmp_path)
-    fake_sbx._responses.insert(0, {  # noqa: SLF001
-        "argv": ["ls", "--json"],
-        "stdout": '{"sandboxes": [{"name": "%s", "id": "sbx_2"}]}' % names[1],
-        "stderr": "", "returncode": 0,
-    })
+    fake_sbx._responses.insert(
+        0,
+        {  # noqa: SLF001
+            "argv": ["ls", "--json"],
+            "stdout": '{"sandboxes": [{"name": "%s", "id": "sbx_2"}]}' % names[1],
+            "stderr": "",
+            "returncode": 0,
+        },
+    )
     fake_sbx.script.write_text(__import__("json").dumps(fake_sbx._responses))
 
     removed = runtime.clean_task("ws", "t0")
@@ -769,7 +806,9 @@ def test_a_fetch_failure_also_restores_a_stopped_vm(git_repo, fake_sbx, tmp_path
     build(git_repo, fake_sbx, "alpha", tmp_path=tmp_path)
     runtime.stop_task("ws", "t0")
     # The tip cannot be read, so cleanup gives up before `sbx rm`.
-    git(git_repo, "remote", "set-url", worktree.sandbox_remote(names[0]), "/nonexistent")
+    git(
+        git_repo, "remote", "set-url", worktree.sandbox_remote(names[0]), "/nonexistent"
+    )
     CLONES[names[0]] = "/nonexistent"
     stops_before = len([c for c in fake_sbx.calls if c[0] == "stop"])
 
@@ -789,10 +828,15 @@ def test_a_wake_failure_does_not_try_to_stop_what_never_started(
     fake_sbx.respond("stop")
     build(git_repo, fake_sbx, "alpha", tmp_path=tmp_path)
     runtime.stop_task("ws", "t0")
-    fake_sbx._responses.insert(0, {  # noqa: SLF001
-        "argv": ["exec", names[0], "true"], "stdout": "",
-        "stderr": "ERROR: sandbox failed to start\n", "returncode": 1,
-    })
+    fake_sbx._responses.insert(
+        0,
+        {  # noqa: SLF001
+            "argv": ["exec", names[0], "true"],
+            "stdout": "",
+            "stderr": "ERROR: sandbox failed to start\n",
+            "returncode": 1,
+        },
+    )
     fake_sbx.script.write_text(__import__("json").dumps(fake_sbx._responses))
 
     with pytest.raises(sandbox.SandboxError, match="NOT saved on the host"):
@@ -822,9 +866,12 @@ def test_a_stopped_sandbox_is_cleaned_after_sbx_drops_its_remote(
     runtime.stop_task("ws", "t0")
     # What sbx actually does on stop.
     git(git_repo, "remote", "remove", worktree.sandbox_remote(names[0]))
-    assert worktree.sandbox_remote(names[0]) not in worktree._git(  # noqa: SLF001
-        str(git_repo), "remote"
-    ).stdout
+    assert (
+        worktree.sandbox_remote(names[0])
+        not in worktree._git(  # noqa: SLF001
+            str(git_repo), "remote"
+        ).stdout
+    )
 
     removed = runtime.clean_task("ws", "t0")
 
@@ -851,7 +898,8 @@ def test_the_git_source_is_resolved_after_waking_not_before(
     order: list[str] = []
     real = sandbox.git_url
     monkeypatch.setattr(
-        sandbox, "git_url",
+        sandbox,
+        "git_url",
         lambda name, repo: (order.append("resolve"), CLONES.get(name))[1],
     )
     real_exec = sandbox.Sandbox.exec
@@ -894,7 +942,7 @@ def test_a_retired_task_is_not_offered_again(git_repo, fake_sbx, tmp_path):
 
 def test_host_tasks_are_not_offered(git_repo):
     integration = worktree.setup_task_integration(str(git_repo), "ws", "t0")
-    worktree.setup_host_agents(integration, [("%1", "claude", "hosty")])
+    worktree.setup_host_agents(integration, [("%1", AgentRequest("claude"), "hosty")])
 
     assert runtime.sandbox_tasks("ws") == []
 
@@ -908,12 +956,14 @@ def test_kw_reaches_a_windowless_task(monkeypatch):
     monkeypatch.setattr(cli, "_get_session", lambda server, ws: session)
     monkeypatch.setattr(cli.runtime, "sandbox_tasks", lambda ws: ["t0", "t1"])
     monkeypatch.setattr(
-        cli.runtime, "clean_task",
+        cli.runtime,
+        "clean_task",
         lambda ws, task, force=False: cleaned.append(task) or [],
     )
     monkeypatch.setattr(cli.worktree, "remove_task", lambda ws, task: [])
     monkeypatch.setattr(
-        cli.core, "load_agent_space",
+        cli.core,
+        "load_agent_space",
         lambda s: type("G", (), {"terminate": lambda self: None})(),
     )
     args = type("A", (), {"workspace": "ws", "clean": True, "force": False})()
@@ -939,7 +989,8 @@ def test_kw_does_not_remove_host_worktrees_for_a_windowless_task(monkeypatch):
         cli.worktree, "remove_task", lambda ws, task: removed.append(task) or []
     )
     monkeypatch.setattr(
-        cli.core, "load_agent_space",
+        cli.core,
+        "load_agent_space",
         lambda s: type("G", (), {"terminate": lambda self: None})(),
     )
     args = type("A", (), {"workspace": "ws", "clean": True, "force": False})()
@@ -955,14 +1006,16 @@ def test_a_windowless_refusal_still_spares_the_session(monkeypatch):
     monkeypatch.setattr(cli, "_get_session", lambda server, ws: session)
     monkeypatch.setattr(cli.runtime, "sandbox_tasks", lambda ws: ["t0"])
     monkeypatch.setattr(
-        cli.runtime, "clean_task",
+        cli.runtime,
+        "clean_task",
         lambda ws, task, force=False: (_ for _ in ()).throw(
             sandbox.SandboxError("box-1: could not be removed")
         ),
     )
     monkeypatch.setattr(cli.worktree, "remove_task", lambda ws, task: [])
     monkeypatch.setattr(
-        cli.core, "load_agent_space",
+        cli.core,
+        "load_agent_space",
         lambda s: (_ for _ in ()).throw(AssertionError("must not terminate")),
     )
     args = type("A", (), {"workspace": "ws", "clean": True, "force": False})()
@@ -980,11 +1033,13 @@ def test_kw_without_clean_does_not_sweep_the_registry(monkeypatch):
     session = type("S", (), {"windows": []})()
     monkeypatch.setattr(cli, "_get_session", lambda server, ws: session)
     monkeypatch.setattr(
-        cli.runtime, "sandbox_tasks",
+        cli.runtime,
+        "sandbox_tasks",
         lambda ws: (_ for _ in ()).throw(AssertionError("must not sweep")),
     )
     monkeypatch.setattr(
-        cli.core, "load_agent_space",
+        cli.core,
+        "load_agent_space",
         lambda s: type("G", (), {"terminate": lambda self: None})(),
     )
     args = type("A", (), {"workspace": "ws", "clean": False, "force": False})()

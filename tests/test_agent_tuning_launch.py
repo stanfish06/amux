@@ -70,9 +70,17 @@ def test_an_untuned_spec_launches_todays_exact_command(plain):
 def test_a_raw_command_is_left_alone(plain):
     """Raw specs carry no tuning by construction, so nothing is appended."""
     assert prepare_one("echo hi", cwd=plain) == ("echo hi",)
-    # Even if one somehow arrived carrying values, there is no flag table entry
-    # to render them with, so the command still cannot be rewritten.
-    assert prepare_one("echo hi", "opus", "high", cwd=plain) == ("echo hi",)
+
+
+def test_a_raw_command_carrying_tuning_fails_loudly(plain):
+    """Unreachable through the parser, and it must stay that way audibly.
+
+    There is no flag spelling for an arbitrary command, so the only choices are
+    to drop the values or to refuse. Dropping them is the thing the spec calls
+    out by name — neither runtime may silently ignore a model a user asked for.
+    """
+    with pytest.raises(ValueError, match="no model flag"):
+        prepare_one("echo hi", "opus", "high", cwd=plain)
 
 
 @pytest.mark.parametrize(

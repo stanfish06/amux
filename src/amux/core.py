@@ -594,6 +594,13 @@ def _roster_entry(pane: Pane) -> dict:
             {"kind": last.kind, "ts": last.ts, "detail": last.detail} if last else None
         ),
     }
+    # Pane options, not the worktree row: a host agent in a non-repo directory
+    # has no row at all. Absent stays absent — amux chose neither value, so it
+    # reports neither rather than a guessed default.
+    if facts.model:
+        entry["model"] = facts.model
+    if facts.effort:
+        entry["effort"] = facts.effort
     if wt:
         entry["branch"] = wt["branch"]
         entry["worktree"] = wt["path"]

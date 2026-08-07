@@ -38,7 +38,10 @@ def create_one(git_repo, fake_sbx, name="alpha", agent="claude"):
     rt = make_runtime()
     rt.prepare(
         specs(("%1", agent, name)),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
     return rt
 
@@ -101,7 +104,10 @@ def test_a_stubborn_sandbox_does_not_block_the_rest(git_repo, fake_sbx, capsys):
     rt = make_runtime()
     rt.prepare(
         specs(("%1", "claude", "alpha"), ("%2", "codex", "beta")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
 
     stopped = runtime.stop_task("ws", "t0")
@@ -118,7 +124,7 @@ def test_stop_task_ignores_host_agents(git_repo, fake_sbx):
     from amux import worktree
 
     integration = worktree.setup_task_integration(str(git_repo), "ws", "t0")
-    worktree.setup_host_agents(integration, [("%1", "claude", "hosty")])
+    worktree.setup_host_agents(integration, [("%1", AgentRequest("claude"), "hosty")])
 
     assert runtime.stop_task("ws", "t0") == []
     assert not fake_sbx.calls
@@ -140,7 +146,10 @@ def test_a_later_spawn_reattaches_to_the_same_sandbox(git_repo, fake_sbx):
     rt2 = make_runtime()
     (launch,) = rt2.prepare(
         specs(("%2", "claude", "alpha")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
 
     # No second VM was built...
@@ -163,7 +172,10 @@ def test_resuming_checks_out_the_existing_branch_rather_than_creating_it(
     create_one(git_repo, fake_sbx)
     make_runtime().prepare(
         specs(("%2", "claude", "alpha")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
     checkouts = [c for c in fake_sbx.calls if "checkout" in c]
     assert checkouts[0][-3:] == ["checkout", "-b", "amux/ws/t0/alpha"]
@@ -180,7 +192,10 @@ def test_resuming_supersedes_the_previous_row(git_repo, fake_sbx, minted):
 
     make_runtime().prepare(
         specs(("%2", "claude", "alpha")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
 
     assert len(active_rows()) == 1
@@ -201,7 +216,10 @@ def test_a_resumed_sandbox_is_never_destroyed_by_a_rollback(git_repo, fake_sbx):
     rt2 = make_runtime()
     rt2.prepare(
         specs(("%2", "claude", "alpha")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
     rt2.rollback()
 
@@ -253,8 +271,14 @@ def test_a_respawned_grid_lands_on_its_prior_names(git_repo, fake_sbx, tmux_call
         window = fake_tmux.new_window()
         random.seed(seed)
         return core._build_grid(  # noqa: SLF001
-            window, 1, 2, [AgentRequest("claude")] * 2, str(git_repo),
-            workspace="ws", task="t0", runtime=_naming_runtime(),
+            window,
+            1,
+            2,
+            [AgentRequest("claude")] * 2,
+            str(git_repo),
+            workspace="ws",
+            task="t0",
+            runtime=_naming_runtime(),
         )
 
     first = sorted(p.name for p in build_grid(4321).agent_panes)
@@ -274,14 +298,22 @@ def _naming_runtime():
             repo = str(cwd)
             for spec in panes:
                 store.register_worktree(
-                    pane=spec.pane, workspace=workspace or "", task=task or "",
-                    agent=spec.agent, name=spec.name, path="",
-                    branch=f"amux/{workspace}/{task}/{spec.name}", base_ref="abc",
-                    repo=repo, runtime="docker-sandbox", runtime_status="stopped",
+                    pane=spec.pane,
+                    workspace=workspace or "",
+                    task=task or "",
+                    agent=spec.agent,
+                    name=spec.name,
+                    path="",
+                    branch=f"amux/{workspace}/{task}/{spec.name}",
+                    base_ref="abc",
+                    repo=repo,
+                    runtime="docker-sandbox",
+                    runtime_status="stopped",
                     sandbox_name=sandbox.sandbox_name(
                         workspace or "", task or "", spec.name, repo
                     ),
-                    sandbox_id=f"sbx_{spec.name}", socket_name="amux-root",
+                    sandbox_id=f"sbx_{spec.name}",
+                    socket_name="amux-root",
                 )
             return [runtime.Launch(pane=s.pane, cwd="", keys=()) for s in panes]
 
@@ -290,9 +322,7 @@ def _naming_runtime():
     )
 
 
-def test_a_live_pane_keeps_its_name_and_the_respawn_takes_the_other(
-    git_repo, fake_sbx
-):
+def test_a_live_pane_keeps_its_name_and_the_respawn_takes_the_other(git_repo, fake_sbx):
     """Two panes must never share a name: notes, events and worktrees are
     addressed by it. A name still worn by a live pane is skipped."""
     names = names_for(git_repo, "alpha", "beta")
@@ -300,7 +330,10 @@ def test_a_live_pane_keeps_its_name_and_the_respawn_takes_the_other(
     rt = make_runtime()
     rt.prepare(
         specs(("%1", "claude", "alpha"), ("%2", "claude", "beta")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
     offered = rt.resumable_names(workspace="ws", task="t0", cwd=str(git_repo))
     assert offered["claude"] == ["alpha", "beta"]
@@ -336,9 +369,9 @@ def test_another_repository_does_not_adopt_these_sandboxes(
     create_one(git_repo, fake_sbx)
     other = git_factory("other")
 
-    assert make_runtime().resumable_names(
-        workspace="ws", task="t0", cwd=str(other)
-    ) == {}
+    assert (
+        make_runtime().resumable_names(workspace="ws", task="t0", cwd=str(other)) == {}
+    )
 
 
 def test_a_removed_sandbox_is_not_offered_back(git_repo, fake_sbx):
@@ -349,13 +382,17 @@ def test_a_removed_sandbox_is_not_offered_back(git_repo, fake_sbx):
     (row,) = store.worktrees_for("ws", "t0")
     store.set_worktree_runtime(row["id"], runtime_status="removed")
 
-    assert make_runtime().resumable_names(
-        workspace="ws", task="t0", cwd=str(git_repo)
-    ) == {}
+    assert (
+        make_runtime().resumable_names(workspace="ws", task="t0", cwd=str(git_repo))
+        == {}
+    )
 
 
 def test_the_host_runtime_offers_nothing(git_repo):
     """Reusing a host name would fail `worktree add`, not resume anything."""
-    assert runtime.HostRuntime().resumable_names(
-        workspace="ws", task="t0", cwd=str(git_repo)
-    ) == {}
+    assert (
+        runtime.HostRuntime().resumable_names(
+            workspace="ws", task="t0", cwd=str(git_repo)
+        )
+        == {}
+    )
