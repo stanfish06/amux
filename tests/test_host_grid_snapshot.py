@@ -84,6 +84,18 @@ def _scrub(value, subs: list[tuple[str, str]]) -> Any:
     return value
 
 
+def _bootstrap_subs() -> list[tuple[str, str]]:
+    """Scrub the codex bootstrap message's prose, but keep the path it names.
+
+    The path is the structure -- which document this agent was sent to read, and
+    under whose `$HOME` -- so it stays (normalized to `<HOME>` below). The
+    sentences around it are prose, pinned by `test_skill_pointer`; leaving them
+    here would make every reword read as a change in grid building.
+    """
+    before, _, after = shared.skill_bootstrap_message("codex", "\x00").partition("\x00")
+    return [(before, "<BOOTSTRAP "), (after, ">")]
+
+
 def snapshot(
     window: fake_tmux.FakeWindow,
     tmux_calls: list[tuple],
@@ -98,7 +110,14 @@ def snapshot(
     # pinned by `test_skill_pointer`, and leaving it inline would make every
     # reworded sentence look like a change in grid building.
     subs = [
+        # Longest first: the bootstrap message CONTAINS the pointer, so scrubbing
+        # the pointer first would leave "<POINTER> amux has installed it..." in
+        # the golden and put the prose back in by the side door.
+        *_bootstrap_subs(),
         (shared.SKILL_POINTER, "<POINTER>"),
+        # The bootstrap message names the installed document, which lives under
+        # the per-test `$HOME`. Unscrubbed it makes the goldens unreproducible.
+        (str(Path.home()), "<HOME>"),
         (str(state), "<STATE>"),
         (str(repo), "<REPO>"),
     ]

@@ -15,7 +15,10 @@ Every test injects `home`, so none of them touch a real `$HOME`.
 from __future__ import annotations
 
 import os
+import shutil
 import stat
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -202,9 +205,91 @@ def test_an_unresolvable_source_document_is_reported_not_raised(
     assert not (home / ".claude").exists()
 
 
+def test_an_unresolvable_home_is_reported_not_raised(home, monkeypatch):
+    """`Path.home()` raises `RuntimeError` where its pwd fallback also fails.
+
+    Not an `OSError`, so a named catch list misses it -- and this call sits
+    inside `HostRuntime.prepare`, where anything raising is converted into a
+    `GridCreationError` *with runtime rollback*. Under `docker-sandbox` that
+    destroys the grid's microVMs, over a markdown file.
+    """
+
+    def no_home() -> object:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr("pathlib.Path.home", staticmethod(no_home))
+
+    result = sb.install_host_skill("claude")
+
+    assert not result.ok
+    assert "home directory" in result.reason
+
+
+def test_a_failure_with_an_empty_message_still_reports_something(home, monkeypatch):
+    """`str(exc)` is empty for a bare raise; a blank reason reads as no reason."""
+
+    def blow_up(*_args, **_kwargs) -> object:
+        raise RuntimeError
+
+    monkeypatch.setattr(sb, "host_skill_destination", blow_up)
+
+    result = sb.install_host_skill("claude", home=home)
+
+    assert not result.ok
+    assert result.reason == "RuntimeError"
+
+
 def test_an_injected_source_is_what_gets_written(home, checkout):
     """`source` is how the sandbox path and tests avoid re-resolving the document."""
     result = sb.install_host_skill("claude", home=home, source=checkout)
 
     assert result.ok
     assert (home / ".claude/skills/amux/SKILL.md").read_bytes() == checkout.read_bytes()
+
+
+# --- the documented recovery ---------------------------------------------------
+
+
+def test_make_install_skills_restores_the_link_this_install_replaced(home):
+    """The one mitigation the design offers for breaking the dogfooding loop.
+
+    `README`, `design.md` and the `install_skills` comment all promise that
+    re-running the target turns the frozen copy back into a live checkout link.
+    That promise was false: `ln -sfn` replaces a *symlink* to a directory but
+    does nothing when the destination IS a real directory, which after an install
+    it always is -- it linked *inside* it instead, exited 0, and reported
+    success while the agent kept reading the frozen copy.
+
+    Asserted by running the target, not by reading it: the failure was silent
+    and self-congratulating, so only the resulting inode settles it.
+    """
+    make = shutil.which("make")
+    if make is None:
+        pytest.skip("make is not installed")
+    repo = Path(__file__).resolve().parents[1]
+    destination = home / ".claude" / "skills" / "amux"
+
+    def install_skills() -> None:
+        # `HOME=` twice: as a make override, which wins over the environment, and
+        # in the environment too, so a mechanism change cannot silently redirect
+        # this at the developer's own skill directory.
+        subprocess.run(
+            (make, "-s", "-C", str(repo), "install_skills", f"HOME={home}"),
+            env={**os.environ, "HOME": str(home)},
+            capture_output=True,
+            check=True,
+        )
+
+    install_skills()
+    assert destination.is_symlink()
+
+    sb.install_host_skill("claude", home=home)
+    assert not destination.is_symlink() and destination.is_dir()
+
+    install_skills()
+
+    assert destination.is_symlink()
+    assert destination.resolve() == (repo / "skills" / "amux").resolve()
+    # The shape the old target produced: a live-looking link nested one level
+    # down, inside a real directory the agent never reads through.
+    assert not (destination / "amux").exists()

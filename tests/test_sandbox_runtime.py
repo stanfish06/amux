@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from amux import context_service, runtime, sandbox, store, worktree
+from amux import context_service, runtime, sandbox, sandbox_bootstrap, store, worktree
 
 VERSION_LINE = "sbx version: v0.37.1 2d4f32448c7a94d7fa525517dfca21aa36599829\n"
 
@@ -411,7 +411,8 @@ def test_a_sandboxed_agent_gets_the_amux_skill(git_repo, fake_sbx):
 def test_shared_skills_leaves_the_hosts_skill_directory_alone(git_repo, fake_sbx):
     """With --share-skills the in-VM skill directory is backed by the host's own,
     where `make install_skills` keeps a symlink into this repository. Writing
-    there would push a file across the boundary in the direction amux forbids."""
+    there FROM INSIDE THE VM would push a file across the boundary in the
+    direction amux forbids, so nothing is copied in."""
     ready(fake_sbx, names_for(git_repo, "alpha"))
     rt = make_runtime(
         resources=sandbox.Resources(cpus=2, memory="4g", share_skills=True)
@@ -425,6 +426,46 @@ def test_shared_skills_leaves_the_hosts_skill_directory_alone(git_repo, fake_sbx
     assert not any("skills" in d for d in delivered)
     # The shim still goes in: sharing skills says nothing about the context client.
     assert "/usr/local/bin/amux" in delivered
+
+
+def test_shared_skills_is_covered_by_the_host_side_install_instead(
+    git_repo, fake_sbx, isolate_home
+):
+    """The skip is now half a split, not a refusal.
+
+    Skipping the in-VM write used to be the whole story, which left exactly one
+    configuration -- a shared-skills sandbox on a machine that never ran
+    `make install_skills` -- with no document anywhere. amux writes the host
+    directory on every spawn now, so that is where this agent's copy comes from.
+    """
+    ready(fake_sbx, names_for(git_repo, "alpha"))
+    rt = make_runtime(
+        resources=sandbox.Resources(cpus=2, memory="4g", share_skills=True)
+    )
+    assert not (isolate_home / ".claude").exists()
+
+    rt.prepare(
+        specs(("%1", "claude", "alpha")),
+        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+    )
+
+    installed = isolate_home / ".claude" / "skills" / "amux" / "SKILL.md"
+    assert installed.read_bytes() == sandbox_bootstrap.skill_source().read_bytes()
+
+
+def test_without_shared_skills_the_host_directory_is_not_touched(
+    git_repo, fake_sbx, isolate_home
+):
+    """The other half. A sandbox that is NOT sharing the host's skills has no
+    business writing into the user's own `~/.claude/skills` -- its copy went in
+    through `sbx cp`, which the test above this one pins."""
+    ready(fake_sbx, names_for(git_repo, "alpha"))
+    make_runtime().prepare(
+        specs(("%1", "claude", "alpha")),
+        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+    )
+
+    assert not (isolate_home / ".claude").exists()
 
 
 def test_hook_installation_records_what_the_agent_cannot_report(git_repo, fake_sbx):

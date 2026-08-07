@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import random
+import re
+import time
 from dataclasses import dataclass
 
 from libtmux import Pane, Server, Session, Window
@@ -15,7 +17,7 @@ from amux.runtime import (
     PaneSpec,
     Runtime,
 )
-from amux.shared import ALIAS, DEFAULT_SOCKET
+from amux.shared import ALIAS, DEFAULT_SOCKET, report
 
 AGENT_OPTION = "@amux_agent"
 LABEL_OPTION = "@amux_label"
@@ -291,6 +293,228 @@ def _discard(what: str, teardown) -> str | None:
     return None
 
 
+# --- sending a message to an agent that has only just started ----------------
+#
+# Readiness has no signal to subscribe to. A freshly spawned pane is stamped
+# `starting` and settles to `idle` a few seconds later precisely BECAUSE nothing
+# on the agent side announces "my prompt is ready", so `amux event wait` returns
+# before the TUI exists. A bounded `capture-pane` poll is the only honest
+# mechanism available, and it is a heuristic over rendered text: every rule
+# below is pinned to a real capture in `tests/test_pane_readiness_fixtures/`,
+# and every failure is a reported timeout rather than a hang or a lost grid.
+
+#: An input caret at the start of a line. `\s` rather than `[ \t]` on purpose:
+#: `claude`'s composer line is `❯` followed by a NON-BREAKING space (U+00A0),
+#: so an ASCII-only class silently never matches and `claude` times out forever.
+_CARET = re.compile(r"^\s*[>›❯]\s*(?:\S.*)?$")
+
+#: A numbered chooser waiting on a keypress: codex's update prompt, and both
+#: agents' trust-this-directory prompt. These appear BEFORE the composer, own
+#: the keyboard, and render a caret exactly like a composer does. Sending a
+#: message into codex's update modal types it into a menu whose first entry runs
+#: `npm install -g @openai/codex`, so this exclusion is load-bearing, not tidy.
+#:
+#: `[1-9]`, not `[2-9]`, and the first option is the one that matters. In an
+#: 80x8 pane -- an ordinary quarter of a 2x2 grid -- the trust modal's `2. No,
+#: quit` and `Press enter to continue` lines fall BELOW THE VISIBLE AREA, so a
+#: matcher that needs to see a second option sees a lone `> 1. Yes, continue`
+#: and calls the modal a composer. The `Enter` that follows the message would
+#: then land on the highlighted first option, which is amux silently answering a
+#: trust prompt on the user's behalf -- the one thing this change must not do.
+#:
+#: Matching a `1.` in ordinary agent output costs a refusal to send, which is a
+#: reported timeout. That is the safe direction and this errs towards it.
+_CHOOSER = re.compile(r"^\W*[1-9]\.\s+\S", re.MULTILINE)
+
+BOOTSTRAP_READY_TIMEOUT_S = 45.0
+BOOTSTRAP_POLL_S = 0.5
+#: Between the text and its `Enter`. Agent TUIs read a trailing `Enter` in the
+#: same `send-keys` call inconsistently -- it can be absorbed as a literal
+#: newline instead of submitting -- so the two are separate keystrokes.
+BOOTSTRAP_SUBMIT_PAUSE_S = 0.4
+#: How much of the message to look for when checking whether it was submitted,
+#: taken from its END. Both halves of that are measured, not chosen:
+#:
+#: The TAIL, because a composer keeps the cursor on screen and the cursor is
+#: after the last character typed. A 491-character message in an 80x8 pane --
+#: an ordinary quarter of a 2x2 grid -- scrolls its own head out of the
+#: composer, so a head-based probe reports a message that is plainly sitting
+#: there unsubmitted as submitted, at every probe length. The retry `Enter`
+#: then never fires and amux says nothing was wrong.
+#:
+#: SHORT, because the same truncation eventually eats the tail too. Measured
+#: against the real 80x8 capture: 189 characters still matches, 190 does not.
+#: Short has its own floor, and it is lower than it looks -- only a 1-character
+#: probe false-matches the footer of a pane that submitted cleanly; 2 is already
+#: clean. So the safe band is 2..189 and 40 sits well inside it, with about 150
+#: characters of headroom above.
+#:
+#: Both cliffs are pinned by fixtures in `test_pane_readiness_fixtures/`, which
+#: is what to trust: these numbers are a property of one capture at one pane
+#: size, and re-recording that capture moves them. An earlier version of this
+#: comment said 110, carried over from a capture that was later replaced.
+_PROBE_CHARS = 40
+
+
+def interface_ready(capture: str) -> bool:
+    """Does this `capture-pane` show an agent composer waiting for input?
+
+    Two clauses, each measured rather than reasoned:
+
+    - A caret line with something rendered BELOW it. A composer has a status
+      footer under it; a shell prompt is the last thing on the screen. Without
+      this, the common `❯ ` zsh prompt reads as ready and the message is typed
+      into a shell, which then runs it.
+    - No blocking chooser FROM THE LAST CARET DOWN. It renders a caret too, and
+      it is not a composer.
+
+    The chooser scan is bounded rather than whole-pane because a chooser's caret
+    marks its selected option and the rest of the menu is beneath it, while a
+    numbered list in an agent's transcript is always above. Scanning everything
+    makes any pane that has ever printed "1. do this" read as never-ready --
+    free at spawn, where the transcript is empty, and the feature silently not
+    working for the `amux send` this helper is meant to be reused by. Verified
+    verdict-identical to the whole-pane scan across every captured fixture.
+
+    Two known limits, stated because neither is pinned by a test. A chooser
+    whose options are not numbered is invisible to this and to the whole-pane
+    scan alike -- no real capture has one. And every real chooser numbers the
+    caret line itself, so the part of the scan that reaches BELOW the caret is
+    deliberate breadth for a shape nothing has exhibited, not a measured need.
+    """
+    lines = capture.splitlines()
+    last = max((i for i, line in enumerate(lines) if line.strip()), default=-1)
+    carets = [i for i, line in enumerate(lines) if _CARET.match(line)]
+    if not any(i < last for i in carets):
+        return False
+    return not chooser_in_view(capture)
+
+
+def chooser_in_view(capture: str) -> bool:
+    """Is a blocking chooser occupying the bottom of this pane?
+
+    One function because there are two callers -- the readiness decision and the
+    sentence explaining a timeout -- and a bounded scan in one with a whole-pane
+    scan in the other means they can disagree: readiness correctly finding no
+    chooser while the timeout blames a trust prompt that is not there. Wrong
+    explanation rather than wrong action, but the reason to bound the scan at
+    all was that this helper outlives the spawn it was written for.
+    """
+    lines = capture.splitlines()
+    carets = [i for i, line in enumerate(lines) if _CARET.match(line)]
+    if not carets:
+        return False
+    return bool(_CHOOSER.search("\n".join(lines[carets[-1] :])))
+
+
+def _not_ready_reason(capture: str, timeout: float) -> str:
+    """Why the wait ran out, from what the pane was showing when it did.
+
+    Worth the extra sentence because the chooser case is the ORDINARY one, not
+    an edge: every amux agent gets a fresh per-agent worktree, and both agents
+    ask about trusting a directory they have not seen before. Measured on a live
+    spawn -- a bare "not ready" there sends the operator looking for a bug in
+    amux rather than at the prompt sitting in the pane.
+    """
+    if chooser_in_view(capture):
+        return (
+            f"after {timeout:g}s it was still waiting on a prompt of its own, "
+            "most likely asking whether to trust this directory -- every agent "
+            "gets a fresh worktree, so answer it and the agent runs normally"
+        )
+    return f"its interface was not ready within {timeout:g}s"
+
+
+def _probe(text: str) -> str:
+    """The end of `text`, whitespace-normalized so soft wrapping cannot hide it."""
+    return " ".join(text.split())[-_PROBE_CHARS:]
+
+
+def _held_in_the_composer(capture: str, text: str) -> bool:
+    """Is `text` still sitting unsubmitted on the input line?
+
+    Only from the last caret line down. A submitted message is still on screen
+    -- it moves into the transcript ABOVE the composer -- so "the text appears
+    somewhere in the pane" would read every success as a failure.
+    """
+    lines = capture.splitlines()
+    carets = [i for i, line in enumerate(lines) if _CARET.match(line)]
+    if not carets:
+        return False
+    return _probe(text) in " ".join(" ".join(lines[carets[-1] :]).split())
+
+
+def send_bootstrap(
+    pane: Pane,
+    text: str,
+    *,
+    timeout: float | None = None,
+    poll: float | None = None,
+    pause: float | None = None,
+    clock=time.monotonic,
+    sleep=time.sleep,
+) -> str:
+    """Wait for `pane`'s agent, send `text`, submit it. Returns '' or a reason.
+
+    NEVER RAISES, and that is a hard requirement rather than politeness: this
+    runs inside `_build_grid`, whose callers answer any exception by killing the
+    whole session (`spw`) or the whole task window (`spg`). A capture against a
+    pane that just died must cost that agent its message and nothing else.
+    """
+    # Resolved here rather than as argument defaults, which bind at import: the
+    # constants would then be unpatchable, and the test suite would silently pay
+    # the real pause on every codex pane it builds.
+    timeout = BOOTSTRAP_READY_TIMEOUT_S if timeout is None else timeout
+    poll = BOOTSTRAP_POLL_S if poll is None else poll
+    pause = BOOTSTRAP_SUBMIT_PAUSE_S if pause is None else pause
+    try:
+        return _send_bootstrap(
+            pane, text, timeout=timeout, poll=poll, pause=pause, clock=clock, sleep=sleep
+        )
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:  # noqa: BLE001 - see the docstring
+        return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+
+
+def _send_bootstrap(
+    pane: Pane, text: str, *, timeout: float, poll: float, pause: float, clock, sleep
+) -> str:
+    deadline = clock() + timeout
+    while True:
+        capture = _capture(pane)
+        if interface_ready(capture):
+            break
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return _not_ready_reason(capture, timeout)
+        sleep(min(poll, remaining))
+
+    # `suppress_history=False`: libtmux otherwise prefixes a space so the line
+    # is kept out of shell history. There is no shell here -- that space is a
+    # literal first character of the message. `enter=False` for the same reason
+    # the skill gives humans: the submit key goes separately, below.
+    pane.send_keys(text, enter=False, suppress_history=False, literal=True)
+    sleep(pause)
+    pane.enter()
+    sleep(pause)
+
+    if not _held_in_the_composer(_capture(pane), text):
+        return ""
+    # Send `Enter` again, never the text again: the text is demonstrably already
+    # in the composer, so re-sending it would submit the message twice.
+    pane.enter()
+    sleep(pause)
+    if _held_in_the_composer(_capture(pane), text):
+        return "its interface did not accept the message; it is on the input line"
+    return ""
+
+
+def _capture(pane: Pane) -> str:
+    captured = pane.capture_pane()
+    return captured if isinstance(captured, str) else "\n".join(captured)
+
+
 def _split_evenly(
     pane: Pane, n: int, direction: PaneDirection, cwd: str | None
 ) -> list[Pane]:
@@ -373,6 +597,22 @@ def _build_grid(
                 name=name,
             )
         )
+
+    # After every pane's launch keys have gone out, not inline per pane: a
+    # readiness wait is seconds long, and inline it would delay the NEXT pane's
+    # launch rather than only its own activation. The panes all exist by here,
+    # so the wait costs activation latency and nothing else.
+    for pane, _agent, name in panes_info:
+        bootstrap = launches[pane.id or ""].bootstrap
+        if not bootstrap:
+            continue
+        problem = send_bootstrap(pane, bootstrap)
+        if problem:
+            report(
+                f"amux: {name} was not given amux's skill pointer "
+                f"({problem}); it is running and will need telling by hand"
+            )
+
     return AgentGrid(
         window=window,
         agent_panes=agent_panes,

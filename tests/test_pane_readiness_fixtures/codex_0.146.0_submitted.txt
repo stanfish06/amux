@@ -1,0 +1,29 @@
+
+  Tip: New Use /fast to enable our fastest inference with increased plan usage.
+
+⚠ Skipped loading 2 skill(s) due to invalid SKILL.md files.
+
+⚠ /Users/stan/.agents/skills/molecular-docking/SKILL.md: invalid YAML: mapping values are not allowed in this context at
+  line 2 column 356
+
+⚠ /Users/stan/.agents/skills/plotly/SKILL.md: invalid YAML: mapping values are not allowed in this context at line 2
+  column 355
+
+
+› [amux] read the amux skill at /tmp/x/SKILL.md before coordinating
+
+
+⚠ Exceeded skills context budget of 2%. All skill descriptions were removed and 1047 additional skills were not included
+  in the model-visible skills list.
+
+• UserPromptSubmit hook (completed)
+  hook context: [skill-first reminder] Before substantive work (coding, debugging, code/PR
+    review, docs, repo maintenance, data analysis, scientific workflows, browser
+    … +6 lines (ctrl + t to view transcript)
+
+• Working (1s • esc to interrupt)
+
+
+› Implement {feature}
+
+  gpt-5.6-sol high · /private/tmp/claude-501/-Users-stan--local-state-amux-worktrees-amux-skill-inject-shiny-hawk/4b54b…

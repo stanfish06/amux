@@ -49,21 +49,34 @@ install: build install_skills
 	ln -sfn $(AMUX_BIN) $(BIN_DIR)/amux
 	@echo "linked $(BIN_DIR)/amux -> $(AMUX_BIN)"
 
-# -n so an existing symlink is replaced, not followed into as a directory
+# This link is TRANSIENT. Spawning any grid installs amux's own skill as a real
+# file at the same path, so the next `amux spw` or `amux spg` replaces the link
+# with a frozen copy and edits to this checkout stop reaching newly spawned
+# agents. Re-run this target to restore the live link; that is the whole
+# recovery, and it is only true because of the `rm -rf` below.
+#
+# The rm is load-bearing, not tidiness. `ln -sfn` replaces a symlink to a
+# directory, but it does NOTHING when the destination IS a real directory -- and
+# after the first spawn, that is what the destination always is. It would link
+# into it instead, creating a nested `$$dir/$$skill/$$skill`, exit 0, and report
+# success while every agent kept reading the frozen copy.
 install_skills:
 	@for dir in $(SKILL_DIRS); do \
 		mkdir -p $$dir; \
 		for skill in $(SKILLS); do \
+			rm -rf $$dir/$$skill; \
 			ln -sfn $(CURDIR)/skills/$$skill $$dir/$$skill; \
 			echo "linked $$dir/$$skill -> $(CURDIR)/skills/$$skill"; \
 		done; \
 	done
 
+# -r for the same reason: after a spawn the destination is a real directory, and
+# `rm -f` on a directory removes nothing while the loop still says "removed".
 uninstall:
 	rm -f $(BIN_DIR)/amux
 	@for dir in $(SKILL_DIRS); do \
 		for skill in $(SKILLS); do \
-			rm -f $$dir/$$skill; \
+			rm -rf $$dir/$$skill; \
 			echo "removed $$dir/$$skill"; \
 		done; \
 	done

@@ -241,6 +241,37 @@
       "show-options",
       "-pqv",
       "@amux_label"
+    ],
+    [
+      "capture_pane",
+      "%2"
+    ],
+    [
+      "send_keys",
+      "%2",
+      "<BOOTSTRAP <HOME>/.codex/skills/amux/SKILL.md>",
+      [
+        [
+          "enter",
+          false
+        ],
+        [
+          "literal",
+          true
+        ],
+        [
+          "suppress_history",
+          false
+        ]
+      ]
+    ],
+    [
+      "enter",
+      "%2"
+    ],
+    [
+      "capture_pane",
+      "%2"
     ]
   ],
   "worktrees": []

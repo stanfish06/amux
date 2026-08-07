@@ -1,0 +1,7 @@
+
+
+› do any of those, rather than guessing at commands that do not exist. amux has
+  installed it for you at /home/agent/.codex/skills/amux/SKILL.md; read it now,
+  before you answer anything else.
+
+  gpt-5.6-sol high · /private/tmp/claude-501/-Users-stan--local-state-amux-work…

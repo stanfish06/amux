@@ -181,14 +181,24 @@ def install_skill(
     """
     try:
         document = source or skill_source()
-        skills = sandbox_hooks.hooks_for(agent).skills_relpath
-        destination = posixpath.join(installed.home, skills, SKILL_NAME, SKILL_FILE)
+        destination = sandbox_skill_destination(agent, installed)
         who = _identity(ops, "")
         _exec(ops, "", ["mkdir", "-p", posixpath.dirname(destination)])
         _deliver(ops, "", document, destination, who, SKILL_MODE)
         return SkillInstalled(path=destination)
     except (BootstrapError, sandbox_hooks.HookMergeError) as exc:
         return SkillInstalled(reason=str(exc))
+
+
+def sandbox_skill_destination(agent: str, installed: Installed) -> str:
+    """Where `agent` reads amux's skill from inside its sandbox.
+
+    Resolved rather than reported, because under `--share-skills` nothing is
+    written inside the VM at all -- the directory is backed by the host's -- and
+    the agent still has to be told where to look.
+    """
+    skills = sandbox_hooks.hooks_for(agent).skills_relpath
+    return posixpath.join(installed.home, skills, SKILL_NAME, SKILL_FILE)
 
 
 def host_skill_destination(agent: str, *, home: Path | None = None) -> Path:
@@ -223,8 +233,14 @@ def install_host_skill(
         destination.write_bytes(payload)
         destination.chmod(int(SKILL_MODE, 8))
         return HostSkillInstalled(path=str(destination), changed=changed)
-    except (OSError, BootstrapError, sandbox_hooks.HookMergeError) as exc:
-        return HostSkillInstalled(reason=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        # Deliberately everything. This runs inside `HostRuntime.prepare`, and
+        # core turns anything escaping prepare into a `GridCreationError` *with
+        # runtime rollback* -- which for a docker-sandbox grid destroys the
+        # microVMs over a markdown file. A named catch list is a bet on knowing
+        # every way `$HOME` can fail: `Path.home()` alone raises `RuntimeError`
+        # where its pwd fallback fails, which the previous list did not cover.
+        return HostSkillInstalled(reason=str(exc) or type(exc).__name__)
 
 
 def _clear_host_destination(destination: Path, payload: bytes) -> bool:
