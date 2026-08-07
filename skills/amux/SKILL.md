@@ -93,9 +93,16 @@ reads `with high effort`, the default it actually fell back to, so it is a real
 confirmation. Codex's `model:` row is a bare **echo of what you passed** —
 `codex -m totally-bogus-model-zzz` prints that nonexistent model verbatim and
 runs until the first API call fails. So for codex the row confirms only that
-your flag arrived, never that the model exists or was accepted. To know a codex
-model is real, send it a prompt and see whether the request succeeds; nothing
-before that first call can tell you.
+your flag arrived, never that the model exists or was accepted.
+
+Codex does give you **one hint short of a decision**: for a model its build has
+no metadata for it prints `warning: Model metadata for <X> not found.
+Defaulting to fallback metadata`, and for a known model it prints nothing.
+Treat that as a prompt to double-check your spelling, **not** as proof the model
+is fake — it fires on any model this codex does not know, *including a real one
+newer than your codex*, which is exactly the case pass-through exists to
+support. The only thing that settles it is the first API call: a bad model comes
+back `400 ... model is not supported`.
 
 What amux does reject is a malformed *shape* — `claude@`, `claude/`, and
 `claude@opus/` are errors, and nothing is created.
