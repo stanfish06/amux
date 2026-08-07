@@ -81,6 +81,26 @@ def isolate_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return amux_state
 
 
+@pytest.fixture(autouse=True)
+def isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point `$HOME` at a per-test scratch directory.
+
+    Spawning installs amux's own skill into `~/.claude/skills/amux/SKILL.md`,
+    and this suite is run from inside a live amux session on the machine that
+    develops amux. Without this, any test reaching `HostRuntime.prepare` would
+    overwrite the developer's real skill directory -- including the checkout
+    symlink `make install_skills` leaves there -- as a side effect of running
+    the tests. Same rule as `isolate_state`: autouse and unconditional.
+
+    `Path.home()` resolves `$HOME` on every read, so unlike `STATE_DIR` there
+    is no import-time binding to chase.
+    """
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
 @pytest.fixture
 def db_path(isolate_state: Path) -> Path:
     """An isolated `context.db`. Absent until the first `store` call creates it."""

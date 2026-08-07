@@ -434,7 +434,7 @@
     [
       "send_keys",
       "%1",
-      "claude --dangerously-skip-permissions"
+      "claude --dangerously-skip-permissions --append-system-prompt '<POINTER>'"
     ],
     [
       "cmd",
@@ -485,7 +485,7 @@
     [
       "send_keys",
       "%4",
-      "claude --dangerously-skip-permissions"
+      "claude --dangerously-skip-permissions --append-system-prompt '<POINTER>'"
     ],
     [
       "cmd",

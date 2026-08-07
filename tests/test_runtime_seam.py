@@ -42,7 +42,12 @@ def test_host_runtime_prepares_a_worktree_per_agent(repo):
         strict=True,
     ):
         assert launch.cwd.endswith(f"/worktrees/ws/t0/{name}")
-        assert launch.keys == (f"cd {launch.cwd}", expected)
+        # `startswith`: a claude launch also carries the skill pointer, which
+        # `test_skill_pointer` owns. What this test is about is the `cd` and the
+        # agent command reaching the pane, in that order.
+        cd, command = launch.keys
+        assert cd == f"cd {launch.cwd}"
+        assert command.startswith(expected)
         assert Path(launch.cwd).is_dir()
 
 
@@ -232,7 +237,8 @@ def test_an_unresolved_cwd_isolates_nothing(repo, isolate_state, capsys):
     assert launch.cwd == ""
     # No `cd`, so the pane keeps whatever tmux gave it -- which is exactly why
     # this looked fine for so long.
-    assert launch.keys == (runtime.AGENT_COMMANDS["claude"],)
+    (command,) = launch.keys
+    assert command.startswith(runtime.AGENT_COMMANDS["claude"])
     assert store.worktrees_for("ws", "t0") == []
     assert not Path(worktree.task_worktree_root("ws", "t0")).exists()
     # Still fail-soft, but no longer silent: an unresolved directory is a

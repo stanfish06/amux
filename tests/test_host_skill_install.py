@@ -23,10 +23,13 @@ from amux import sandbox_bootstrap as sb
 
 
 @pytest.fixture
-def home(tmp_path):
-    root = tmp_path / "home"
-    root.mkdir()
-    return root
+def home(isolate_home):
+    """Alias: these tests inject `home` explicitly rather than reading `$HOME`.
+
+    It is the same directory conftest redirects `$HOME` to, so a test that
+    forgot to inject would still not reach the developer's own skill directory.
+    """
+    return isolate_home
 
 
 @pytest.fixture

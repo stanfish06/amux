@@ -139,10 +139,12 @@ def test_mixed_grid_creates_one_capped_sandbox_per_pane(git_repo, fake_sbx):
     # Each pane attaches to its own sandbox rather than creating a new one.
     # Codex additionally needs its per-invocation hook-trust flag, without
     # which it silently runs none of the hooks amux just installed.
-    assert [l.keys for l in launches] == [
-        (f"sbx run --name {names[0]}",),
-        (f"sbx run --name {names[1]} codex -- --dangerously-bypass-hook-trust",),
+    assert [l.keys[0] for l in launches] == [
+        sandbox.attach_command(names[0], "claude"),
+        sandbox.attach_command(names[1], "codex"),
     ]
+    assert sandbox.HOOK_TRUST_FLAG in launches[1].keys[0]
+    assert sandbox.HOOK_TRUST_FLAG not in launches[0].keys[0]
 
 
 def test_each_agent_gets_its_own_branch_off_the_task_base(git_repo, fake_sbx):
@@ -347,9 +349,10 @@ def test_attachment_reattaches_rather_than_relaunching(git_repo, fake_sbx):
         specs(("%1", "claude", "alpha")),
         workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
     )
-    # No agent positional: `sbx run --name` resumes the agent already inside.
-    assert launch.keys == (f"sbx run --name {names[0]}",)
-    assert "claude" not in launch.keys[0]
+    # `sbx run --name` resumes the agent already inside; the agent is named
+    # only to carry arguments after `--`, never to create a second VM.
+    assert launch.keys[0].startswith(f"sbx run --name {names[0]}")
+    assert "create" not in launch.keys[0]
     # The pane's directory lives in the VM, so the host contributes none.
     assert launch.cwd == ""
 
