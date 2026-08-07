@@ -97,7 +97,11 @@ def ready(fake_sbx, names, *, codex_version=None):
         fake_sbx.respond("exec", name, *IDENTITY_PROBE, stdout=IDENTITY)
         if codex_version is not None:
             fake_sbx.respond(
-                "exec", name, "sh", "-lc", "codex --version 2>/dev/null",
+                "exec",
+                name,
+                "sh",
+                "-lc",
+                "codex --version 2>/dev/null",
                 stdout=codex_version + "\n",
             )
     # Everything else: succeed silently. An image that ships no hook document is
@@ -108,9 +112,7 @@ def ready(fake_sbx, names, *, codex_version=None):
 
 
 def names_for(repo, *agent_names):
-    return [
-        sandbox.sandbox_name("ws", "t0", n, str(repo)) for n in agent_names
-    ]
+    return [sandbox.sandbox_name("ws", "t0", n, str(repo)) for n in agent_names]
 
 
 # --- the headline scenario ---
@@ -133,9 +135,17 @@ def test_mixed_grid_creates_one_capped_sandbox_per_pane(git_repo, fake_sbx):
     assert len(creates) == 2
     for call, agent, name in zip(creates, ("claude", "codex"), names, strict=True):
         assert call == [
-            "create", "--clone", "--name", name,
-            "--cpus", "2", "--memory", "4g", "--no-share-skills",
-            agent, str(git_repo),
+            "create",
+            "--clone",
+            "--name",
+            name,
+            "--cpus",
+            "2",
+            "--memory",
+            "4g",
+            "--no-share-skills",
+            agent,
+            str(git_repo),
         ]
     # Each pane attaches to its own sandbox rather than creating a new one.
     # Codex additionally needs its per-invocation hook-trust flag, without
@@ -151,10 +161,16 @@ def test_each_agent_gets_its_own_branch_off_the_task_base(git_repo, fake_sbx):
     ready(fake_sbx, names)
     make_runtime().prepare(
         specs(("%1", "claude", "alpha"), ("%2", "codex", "beta")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
-    checkouts = [c for c in fake_sbx.calls if c[:2] == ["exec", names[0]]
-                 or c[:2] == ["exec", names[1]]]
+    checkouts = [
+        c
+        for c in fake_sbx.calls
+        if c[:2] == ["exec", names[0]] or c[:2] == ["exec", names[1]]
+    ]
     branches = [c[-1] for c in checkouts if "checkout" in c]
     assert branches == ["amux/ws/t0/alpha", "amux/ws/t0/beta"]
 
@@ -164,7 +180,10 @@ def test_registry_rows_record_sandbox_identity(git_repo, fake_sbx):
     ready(fake_sbx, names)
     make_runtime().prepare(
         specs(("%1", "claude", "alpha"), ("%2", "codex", "beta")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
     rows = {r["name"]: r for r in store.worktrees_for("ws", "t0")}
     assert set(rows) == {"alpha", "beta"}
@@ -183,12 +202,42 @@ def test_registry_rows_record_sandbox_identity(git_repo, fake_sbx):
         assert row["socket_name"] == "amux-root"
 
 
+def test_registry_rows_record_the_requested_model_and_effort(git_repo, fake_sbx):
+    """The sandbox row is the *only* source a sandboxed `ctx` has.
+
+    A sandboxed agent cannot read tmux pane options, so if `_launch` stops
+    writing these two the agent silently reports no model and no effort for
+    ever -- and that is indistinguishable from an untuned pane, which the spec
+    deliberately makes silent. Nothing else in the suite reads them back from
+    the code that writes them.
+    """
+    names = names_for(git_repo, "alpha", "beta")
+    ready(fake_sbx, names)
+    make_runtime().prepare(
+        [
+            runtime.PaneSpec("%1", "claude", "alpha", "opus", "high"),
+            runtime.PaneSpec("%2", "codex", "beta"),
+        ],
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
+    )
+    rows = {r["name"]: r for r in store.worktrees_for("ws", "t0")}
+    assert (rows["alpha"]["model"], rows["alpha"]["effort"]) == ("opus", "high")
+    # Empty, not a default amux invented for a pane that asked for nothing.
+    assert (rows["beta"]["model"], rows["beta"]["effort"]) == ("", "")
+
+
 def test_no_host_worktree_is_created_for_a_sandbox_agent(git_repo, fake_sbx):
     names = names_for(git_repo, "alpha")
     ready(fake_sbx, names)
     make_runtime().prepare(
         specs(("%1", "claude", "alpha")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
     root = Path(worktree.task_worktree_root("ws", "t0"))
     # The shared integration worktree exists; the agent's own does not.
@@ -202,7 +251,10 @@ def test_the_integration_worktree_is_shared_with_the_host_runtime(git_repo, fake
     ready(fake_sbx, names)
     make_runtime().prepare(
         specs(("%1", "claude", "alpha")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
     (row,) = store.worktrees_for("ws", "t0")
     assert row["base_ref"]
@@ -217,7 +269,10 @@ def test_each_agent_gets_its_own_capability(git_repo, fake_sbx, minted):
     ready(fake_sbx, names)
     make_runtime().prepare(
         specs(("%1", "claude", "alpha"), ("%2", "codex", "beta")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
     rows = {r["name"]: r["id"] for r in store.worktrees_for("ws", "t0")}
     assert len(minted) == 2
@@ -233,7 +288,10 @@ def test_permissions_come_from_the_shared_constant(git_repo, fake_sbx, minted):
     ready(fake_sbx, names)
     make_runtime().prepare(
         specs(("%1", "claude", "alpha")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
     assert minted[0]["permissions"] == tuple(context_service.AGENT_PERMISSIONS)
 
@@ -246,7 +304,10 @@ def test_the_token_never_appears_in_an_sbx_argument(git_repo, fake_sbx, minted):
     ready(fake_sbx, names)
     make_runtime().prepare(
         specs(("%1", "claude", "alpha")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
     flat = " ".join(" ".join(call) for call in fake_sbx.calls)
     assert minted
@@ -269,7 +330,10 @@ def test_no_state_directory_or_tmux_socket_is_handed_to_a_sandbox(
     ready(fake_sbx, names)
     make_runtime().prepare(
         specs(("%1", "claude", "alpha")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
     flat = " ".join(" ".join(call) for call in fake_sbx.calls)
 
@@ -279,7 +343,9 @@ def test_no_state_directory_or_tmux_socket_is_handed_to_a_sandbox(
     # A host path may legitimately appear as the *source* of `sbx cp` -- that is
     # how the capability is delivered. What must never happen is the state
     # directory becoming reachable *inside* the VM, so check the destinations.
-    destinations = [call[2].split(":", 1)[1] for call in fake_sbx.calls if call[0] == "cp"]
+    destinations = [
+        call[2].split(":", 1)[1] for call in fake_sbx.calls if call[0] == "cp"
+    ]
     assert destinations  # the shim and its config really were delivered
     for destination in destinations:
         assert str(isolate_state) not in destination
@@ -329,7 +395,10 @@ def test_prepare_refuses_a_non_repository(tmp_path, fake_sbx):
     with pytest.raises(sandbox.SandboxError, match="not a git repository"):
         make_runtime().prepare(
             specs(("%1", "claude", "alpha")),
-            workspace="ws", task="t0", cwd=str(plain), socket="amux-root",
+            workspace="ws",
+            task="t0",
+            cwd=str(plain),
+            socket="amux-root",
         )
 
 
@@ -337,7 +406,10 @@ def test_prepare_requires_a_scope(git_repo, fake_sbx):
     with pytest.raises(sandbox.SandboxError, match="workspace, task and path"):
         make_runtime().prepare(
             specs(("%1", "claude", "alpha")),
-            workspace=None, task=None, cwd=str(git_repo), socket="amux-root",
+            workspace=None,
+            task=None,
+            cwd=str(git_repo),
+            socket="amux-root",
         )
 
 
@@ -349,7 +421,10 @@ def test_attachment_reattaches_rather_than_relaunching(git_repo, fake_sbx):
     ready(fake_sbx, names)
     (launch,) = make_runtime().prepare(
         specs(("%1", "claude", "alpha")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
     # No agent positional: `sbx run --name` resumes the agent already inside.
     assert launch.keys == (f"sbx run --name {names[0]}",)
@@ -372,7 +447,10 @@ def test_both_bootstrap_halves_run(git_repo, fake_sbx):
     rt = make_runtime()
     rt.prepare(
         specs(("%1", "claude", "alpha")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
 
     # The client half: the shim and its config were delivered.
@@ -402,7 +480,10 @@ def test_a_sandboxed_agent_gets_the_amux_skill(git_repo, fake_sbx):
     rt = make_runtime()
     rt.prepare(
         specs(("%1", "claude", "alpha")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
 
     delivered = [c[2].split(":", 1)[1] for c in fake_sbx.calls if c[0] == "cp"]
@@ -419,7 +500,10 @@ def test_shared_skills_leaves_the_hosts_skill_directory_alone(git_repo, fake_sbx
     )
     rt.prepare(
         specs(("%1", "claude", "alpha")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
 
     delivered = [c[2].split(":", 1)[1] for c in fake_sbx.calls if c[0] == "cp"]
@@ -436,7 +520,10 @@ def test_hook_installation_records_what_the_agent_cannot_report(git_repo, fake_s
     rt = make_runtime()
     rt.prepare(
         specs(("%1", "codex", "alpha")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
     hooks = rt.hooks["%1"]
     # The version was read from the image, not assumed...
@@ -453,7 +540,10 @@ def test_a_current_codex_image_is_not_degraded(git_repo, fake_sbx):
     rt = make_runtime()
     rt.prepare(
         specs(("%1", "codex", "alpha")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
     hooks = rt.hooks["%1"]
     assert hooks.agent_version == "codex-cli 0.146.0"
@@ -479,7 +569,10 @@ def test_a_sandbox_without_the_skill_is_announced_not_swallowed(
     rt = make_runtime()
     rt.prepare(
         specs(("%1", "claude", "alpha")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
 
     out = capsys.readouterr().out
@@ -487,8 +580,9 @@ def test_a_sandbox_without_the_skill_is_announced_not_swallowed(
     assert "boundary" in out
 
 
-def test_a_degraded_agent_is_announced_not_swallowed(git_repo, fake_sbx, capsys,
-                                                     monkeypatch):
+def test_a_degraded_agent_is_announced_not_swallowed(
+    git_repo, fake_sbx, capsys, monkeypatch
+):
     names = names_for(git_repo, "alpha")
     ready(fake_sbx, names)
 
@@ -509,7 +603,10 @@ def test_a_degraded_agent_is_announced_not_swallowed(git_repo, fake_sbx, capsys,
     rt = make_runtime()
     rt.prepare(
         specs(("%1", "codex", "alpha")),
-        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
     )
     out = capsys.readouterr().out
     assert "cannot report" in out

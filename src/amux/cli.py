@@ -685,8 +685,9 @@ def main(argv: list[str] | None = None) -> int:
         "--agent",
         action="append",
         default=None,
-        metavar="AGENT[:COUNT]",
-        help="agent spec to check, repeatable (default: claude)",
+        metavar="AGENT[@MODEL][/EFFORT][:COUNT]",
+        help="agent spec to check, repeatable (default: claude); tuning is "
+        "parsed but only the agent kind is checked",
     )
     # Unlike spw/spg, doctor exists *to* inspect the optional backend, so
     # checking it is the useful default.

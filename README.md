@@ -45,8 +45,20 @@ Both apply identically under the host and `docker-sandbox` runtimes, and
 
 **Values are not checked against any list amux maintains**, so a model or
 effort level released after your amux works immediately. The cost is that a
-typo is caught by the agent's CLI at startup rather than by amux: that pane
-dies at spawn instead of the spawn being refused.
+typo is not caught anywhere, and it is quiet rather than loud. Measured against
+`claude` 2.1.224 and `codex-cli` 0.146.0: a bad `--effort` makes claude warn and
+run on its default, codex accepts the string and displays it, and a bad model on
+either agent starts normally and only fails at the first API call. **The pane
+survives with a configuration that is not the one you asked for.**
+
+`amux ctx` reports what the pane was *launched* with and cannot know what the
+agent did with it, so after a typo the two disagree. The agents differ in how
+much their own banner helps: claude's startup box shows the *effective* value
+(launch `--effort hgih` and it reads `with high effort`), while codex's `model:`
+row merely echoes what you passed and prints a nonexistent model verbatim. For
+codex, only the first API call tells you whether the model was real — a pane
+left idle on a bogus model reports nothing at all, so a clean-looking startup is
+not confirmation.
 
 **Escape hatch.** `@`, `/` and `:` are delimiters, so a model id containing `/`
 (`openai/gpt-5`) or ending in `:<digits>` (a Bedrock id like `…-v1:0`) cannot
@@ -56,10 +68,15 @@ go in a spec. Launch it as a raw command instead:
 amux spg myproj fix -a 'claude --model openai/gpt-5 --dangerously-skip-permissions'
 ```
 
-A raw command is not one of amux's known agents, so it gives up sandbox
-support, per-agent worktrees, and the agent-kind identity that `ctx`,
-`monitor`, and `integrate` use — the raw spec has to spell out every flag it
-wants, including the ones amux normally supplies.
+You are trading the grammar for the flag: a raw spec carries no `@MODEL` or
+`/EFFORT` of its own, so every flag has to be spelled out — including the ones
+amux normally supplies, which is why the example above repeats
+`--dangerously-skip-permissions`. It also cannot run under `docker-sandbox`,
+and `ctx` and `monitor` print the whole command string in the agent column
+instead of `claude` or `codex`.
+
+What a raw command does *not* lose is its work: it still gets its own worktree
+and branch, and `amux integrate` merges it like any other agent's.
 
 # architecture
 
