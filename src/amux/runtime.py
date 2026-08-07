@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from amux import sandbox, sandbox_bootstrap, store, worktree
-from amux.shared import DEFAULT_SOCKET
+from amux.shared import DEFAULT_SOCKET, render_command, skill_pointer_args
 
 HOST = "host"
 DOCKER_SANDBOX = "docker-sandbox"
@@ -42,6 +42,43 @@ class PaneSpec:
     pane: str
     agent: str
     name: str
+
+
+def install_host_skills(
+    panes: Sequence[PaneSpec],
+) -> dict[str, sandbox_bootstrap.HostSkillInstalled]:
+    """Install amux's own skill into the host skill directory of each agent kind.
+
+    Once per kind, not once per pane: four `claude` agents resolve one
+    destination and write once. Failure is still attributed to every agent that
+    wanted it, since that is what the operator needs to know.
+
+    Never raises. The document informs an agent; the agent still runs without
+    it, so this cannot be allowed to cost anyone their grid.
+    """
+    results: dict[str, sandbox_bootstrap.HostSkillInstalled] = {}
+    for spec in panes:
+        # A raw command spec is not an agent amux knows, so it has no skill
+        # directory to install into and no flags amux may speak for.
+        if spec.agent not in AGENT_COMMANDS:
+            continue
+        result = results.get(spec.agent)
+        if result is None:
+            result = results[spec.agent] = sandbox_bootstrap.install_host_skill(
+                spec.agent
+            )
+            if result.ok and result.changed:
+                # Named only when it replaced something. This is a directory the
+                # user curates by hand, and a developer whose `make install_skills`
+                # symlink just went away needs to see why their edits to the
+                # checkout copy stopped reaching newly spawned agents.
+                print(f"amux: installed amux's skill at {result.path}")
+        if not result.ok:
+            print(
+                f"amux: {spec.name} has no amux skill installed "
+                f"({result.reason}); it will not know amux's vocabulary"
+            )
+    return results
 
 
 @dataclass(frozen=True)
@@ -116,9 +153,13 @@ class HostRuntime:
         socket: str = "",
     ) -> list[Launch]:
         paths = self._worktrees(panes, workspace=workspace, task=task, cwd=cwd)
+        install_host_skills(panes)
         launches = []
         for spec in panes:
-            command = AGENT_COMMANDS.get(spec.agent, spec.agent)
+            command = render_command(
+                AGENT_COMMANDS.get(spec.agent, spec.agent),
+                skill_pointer_args(spec.agent),
+            )
             path = paths.get(spec.pane)
             keys = []
             if path:

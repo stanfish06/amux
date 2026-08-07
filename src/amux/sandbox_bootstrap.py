@@ -78,6 +78,25 @@ class SkillInstalled:
 
 
 @dataclass(frozen=True)
+class HostSkillInstalled:
+    """Where amux's own skill landed on the host, or why it did not.
+
+    Mirrors `SkillInstalled` so `runtime.py` can report a host failure and a
+    sandbox failure in one voice. `changed` is the extra field the host needs:
+    the destination is a directory the user curates by hand, so amux names the
+    path when it actually replaced something and stays quiet otherwise.
+    """
+
+    path: str = ""
+    reason: str = ""
+    changed: bool = False
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.path)
+
+
+@dataclass(frozen=True)
 class HooksInstalled:
     """The result of wiring one agent's hooks, including what it cannot report."""
 
@@ -170,6 +189,65 @@ def install_skill(
         return SkillInstalled(path=destination)
     except (BootstrapError, sandbox_hooks.HookMergeError) as exc:
         return SkillInstalled(reason=str(exc))
+
+
+def host_skill_destination(agent: str, *, home: Path | None = None) -> Path:
+    """Where `agent` reads amux's skill from on the host.
+
+    The same per-agent directory the sandbox install uses, resolved under a
+    host `$HOME` instead of the sandbox's.
+    """
+    skills = sandbox_hooks.hooks_for(agent).skills_relpath
+    root = Path.home() if home is None else home
+    return root / skills / SKILL_NAME / SKILL_FILE
+
+
+def install_host_skill(
+    agent: str,
+    *,
+    home: Path | None = None,
+    source: Path | None = None,
+) -> HostSkillInstalled:
+    """Install amux's skill into the host skill directory `agent` reads.
+
+    A host agent's copy used to come from `make install_skills`, so an amux
+    installed any other way left the agent with no document at all. Spawning
+    writes it instead, unconditionally, which is also what keeps it current.
+    """
+    try:
+        document = source or skill_source()
+        destination = host_skill_destination(agent, home=home)
+        payload = document.read_bytes()
+        changed = _clear_host_destination(destination, payload)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+        destination.chmod(int(SKILL_MODE, 8))
+        return HostSkillInstalled(path=str(destination), changed=changed)
+    except (OSError, BootstrapError, sandbox_hooks.HookMergeError) as exc:
+        return HostSkillInstalled(reason=str(exc))
+
+
+def _clear_host_destination(destination: Path, payload: bytes) -> bool:
+    """Replace a symlinked destination, and say whether the write changes anything.
+
+    `make install_skills` symlinks `~/.claude/skills/amux` into a checkout, so
+    writing through it would edit `skills/amux/SKILL.md` in the developer's own
+    working tree. The link is unlinked and replaced by a real directory instead;
+    the file it pointed at is left exactly as it was.
+    """
+    replaced = False
+    for path in (destination.parent, destination):
+        if path.is_symlink():
+            path.unlink()
+            replaced = True
+    if replaced:
+        return True
+    try:
+        return destination.read_bytes() != payload
+    except OSError:
+        # Absent, unreadable, or not a file: amux cannot show it is a no-op,
+        # and claiming one would hide the overwrite it is about to do.
+        return True
 
 
 def stage_config_file(endpoint: str, token: str, *, directory: Path) -> Path:
