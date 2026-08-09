@@ -239,6 +239,20 @@ def test_body_limit_is_checked_before_persistence(delivery) -> None:
     assert store.visible_messages("ws", "/repo", "%1") == []
 
 
+@pytest.mark.parametrize("timeout", [0.5, 3600.1, float("nan")])
+def test_timeout_limit_is_checked_before_persistence(delivery, timeout) -> None:
+    with pytest.raises(ValueError, match="between 1 and 3600"):
+        messages.send(
+            delivery.server,
+            "%1",
+            "%2",
+            "review",
+            timeout=timeout,
+            state_dir=delivery.state_dir,
+        )
+    assert store.visible_messages("ws", "/repo", "%1") == []
+
+
 def test_two_lock_handles_for_one_target_do_not_enter_together(tmp_path) -> None:
     now = time.monotonic()
     first = messages.TargetLock(tmp_path, "amux-root", "%2", deadline=now + 10.0)

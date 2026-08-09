@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
-from pathlib import Path
 from collections import Counter
+from pathlib import Path
 
 from amux import (
     context_service,
     core,
     events,
+    messages,
     monitor,
     runtime,
     sandbox,
@@ -223,6 +225,40 @@ def _cmd_kg(server, args) -> int:
         runtime.stop_task(args.workspace, args.task)
     core.load_agent_grid(window).terminate()
     print(f"killed {ALIAS['window']} '{args.task}' in '{args.workspace}'")
+    return 0
+
+
+def _cmd_send(server, args) -> int:
+    sender = events.self_pane_id()
+    if sender is None:
+        raise ValueError("not inside an amux agent pane")
+    result = messages.send(
+        server, sender, args.target, " ".join(args.text), timeout=args.timeout
+    )
+    print(
+        messages.result_line(result),
+        file=sys.stderr if result.exit_code else sys.stdout,
+    )
+    return result.exit_code
+
+
+def _cmd_messages(server, args) -> int:
+    pane = args.pane or events.self_pane_id()
+    if pane is None:
+        raise ValueError("not inside an amux agent pane; pass --pane")
+    caller = messages.actor_for(server, pane)
+    rows = store.visible_messages(
+        caller.workspace,
+        caller.repo,
+        pane,
+        status=args.status,
+        limit=args.n,
+    )
+    for row in rows:
+        if args.json:
+            print(json.dumps(row, separators=(",", ":"), default=str))
+        else:
+            print(messages.message_line(row, pane))
     return 0
 
 
@@ -476,6 +512,21 @@ def _add_grid_args(parser: argparse.ArgumentParser):
     )
 
 
+def _message_timeout(value: str) -> float:
+    try:
+        timeout = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("timeout must be a number") from exc
+    if not math.isfinite(timeout) or not (
+        messages.MIN_TIMEOUT_S <= timeout <= messages.MAX_TIMEOUT_S
+    ):
+        raise argparse.ArgumentTypeError(
+            f"timeout must be between {messages.MIN_TIMEOUT_S:g} and "
+            f"{messages.MAX_TIMEOUT_S:g} seconds"
+        )
+    return timeout
+
+
 def main(argv: list[str] | None = None) -> int:
     scrub_pyinstaller_env()
     parser = argparse.ArgumentParser(prog="amux", description=__doc__)
@@ -542,6 +593,30 @@ def main(argv: list[str] | None = None) -> int:
         "loss; the committed tip is preserved first)",
     )
     p_kg.set_defaults(func=_cmd_kg)
+
+    p_send = sub.add_parser(
+        "send", help="send a message and confirm target processing"
+    )
+    p_send.add_argument("target", help="target pane id, e.g. %%42")
+    p_send.add_argument("text", nargs="+", help="message body")
+    p_send.add_argument(
+        "--timeout",
+        type=_message_timeout,
+        default=messages.DEFAULT_TIMEOUT_S,
+        help=f"total delivery deadline (default: {messages.DEFAULT_TIMEOUT_S:g}s)",
+    )
+    p_send.set_defaults(func=_cmd_send)
+
+    p_messages = sub.add_parser(
+        "messages", help="list sent and received messages"
+    )
+    p_messages.add_argument("-n", type=int, default=20, help="max messages")
+    p_messages.add_argument(
+        "--status", choices=store.MESSAGE_STATUSES, default=None
+    )
+    p_messages.add_argument("--json", action="store_true", help="JSONL output")
+    p_messages.add_argument("--pane", default=None, help=argparse.SUPPRESS)
+    p_messages.set_defaults(func=_cmd_messages)
 
     p_note = sub.add_parser(
         "note", help="publish a scoped note (decision/finding/blocker/note)"
@@ -712,6 +787,7 @@ def main(argv: list[str] | None = None) -> int:
         return args.func(server, args)
     except (
         ValueError,
+        messages.DeliveryFailure,
         worktree.WorktreeError,
         sandbox.SandboxError,
         context_service.ServiceLifecycleError,

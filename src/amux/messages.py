@@ -12,6 +12,7 @@ from amux import core, events, store, worktree
 from amux.shared import DEFAULT_SOCKET, STATE_DIR
 
 DEFAULT_TIMEOUT_S = 300.0
+MIN_TIMEOUT_S = 1.0
 MAX_TIMEOUT_S = 3600.0
 MAX_BODY_CHARS = 4000
 
@@ -188,8 +189,10 @@ def send(
     wall=time.time,
     sleep=time.sleep,
 ) -> DeliveryResult:
-    if not 0 < timeout <= MAX_TIMEOUT_S:
-        raise ValueError(f"timeout must be between 0 and {MAX_TIMEOUT_S:g} seconds")
+    if not MIN_TIMEOUT_S <= timeout <= MAX_TIMEOUT_S:
+        raise ValueError(
+            f"timeout must be between {MIN_TIMEOUT_S:g} and {MAX_TIMEOUT_S:g} seconds"
+        )
     if not body.strip():
         raise ValueError("message body cannot be empty")
     if len(body) > MAX_BODY_CHARS:
@@ -334,3 +337,18 @@ def result_line(result: DeliveryResult) -> str:
         f"{result.target_name} ({result.target_pane})"
     )
     return f"{line}: {result.reason}" if result.reason else line
+
+
+def message_line(row: dict, caller_pane: str) -> str:
+    outgoing = row["sender_pane"] == caller_pane
+    direction = "to" if outgoing else "from"
+    peer = (
+        row["target_name"] or row["target_pane"]
+        if outgoing
+        else row["sender_name"] or row["sender_pane"]
+    )
+    suffix = f" ({row['reason']})" if row["reason"] else ""
+    return (
+        f"{row['id']:>3}  {row['status']:<12} {direction:<5} "
+        f"{peer:<12} {row['body']}{suffix}"
+    )
