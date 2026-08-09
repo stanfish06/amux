@@ -21,12 +21,16 @@ NOTE_SCOPES = ("agent", "task", "workspace")
 NOTE_KINDS = ("note", "decision", "finding", "blocker")
 EVENT_KINDS = ("busy", "exit", "notify", "spawn", "stop")
 WAIT_STATES = ("idle", "needs-input", "dead")
+MESSAGE_STATUSES = ("pending", "delivered", "undelivered")
 
 DETAIL_LIMIT = 2000
 
 MIN_REDACTABLE_TOKEN = 16
 
 DEFAULT_TIMEOUT_S = 15.0
+MESSAGE_DEFAULT_TIMEOUT_S = 300.0
+MESSAGE_MIN_TIMEOUT_S = 1.0
+MESSAGE_MAX_TIMEOUT_S = 3600.0
 POLL_WINDOW_S = 25.0
 POLL_SLACK_S = 5.0
 POLL_FLOOR_S = 0.05
@@ -48,7 +52,7 @@ HOST_ONLY = {
 }
 HOST_ONLY_EVENT = {"tail": "streams raw host event rows"}
 
-SUPPORTED = "ctx, notes, note, event emit|state|wait"
+SUPPORTED = "ctx, send, messages, notes, note, event emit|state|wait"
 
 
 class UsageError(Exception):
@@ -281,6 +285,21 @@ def note_to_string(note: dict) -> str:
     )
 
 
+def message_to_string(message: dict, caller_pane: str) -> str:
+    outgoing = message["sender_pane"] == caller_pane
+    direction = "to" if outgoing else "from"
+    peer = (
+        message["target_name"] or message["target_pane"]
+        if outgoing
+        else message["sender_name"] or message["sender_pane"]
+    )
+    suffix = f" ({message['reason']})" if message["reason"] else ""
+    return (
+        f"{message['id']:>3}  {message['status']:<12} {direction:<5} "
+        f"{peer:<12} {message['body']}{suffix}"
+    )
+
+
 def _one_of(value: str | None, allowed: tuple[str, ...], flag: str) -> str | None:
     if value is None or value in allowed:
         return value
@@ -304,6 +323,43 @@ def cmd_ctx(client: ContextClient, args: argparse.Namespace) -> int:
         print(json.dumps(ctx))
     else:
         print("\n".join(context_to_string(ctx)))
+    return EXIT_OK
+
+
+def cmd_send(client: ContextClient, args: argparse.Namespace) -> int:
+    text = " ".join(args.text).strip()
+    if not text:
+        raise UsageError("message text is empty")
+    document = client.post(
+        "/v1/messages",
+        {"target": args.target, "text": text, "timeout": args.timeout},
+        timeout=args.timeout + POLL_SLACK_S,
+    )
+    message = document.get("message")
+    summary = document.get("summary")
+    if not isinstance(message, dict) or message.get("status") not in MESSAGE_STATUSES:
+        raise ClientError("the amux context service returned a malformed message")
+    if not isinstance(summary, str) or not summary:
+        raise ClientError("the amux context service returned no message summary")
+    delivered = message["status"] == "delivered"
+    print(summary, file=sys.stdout if delivered else sys.stderr)
+    return EXIT_OK if delivered else EXIT_FAIL
+
+
+def cmd_messages(client: ContextClient, args: argparse.Namespace) -> int:
+    status = _one_of(args.status, MESSAGE_STATUSES, "--status")
+    document = client.get(
+        "/v1/messages", {"status": status, "limit": args.n}
+    )
+    rows = document.get("messages")
+    caller_pane = document.get("caller_pane")
+    if not isinstance(rows, list) or not isinstance(caller_pane, str):
+        raise ClientError("the amux context service returned malformed messages")
+    for message in rows:
+        if args.json:
+            print(json.dumps(message, separators=(",", ":"), default=str))
+        else:
+            print(message_to_string(message, caller_pane))
     return EXIT_OK
 
 
@@ -432,6 +488,19 @@ def _screen_host_only(argv: list[str]) -> str | None:
     return None
 
 
+def _message_timeout(value: str) -> float:
+    try:
+        timeout = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("timeout must be a number") from exc
+    if not MESSAGE_MIN_TIMEOUT_S <= timeout <= MESSAGE_MAX_TIMEOUT_S:
+        raise argparse.ArgumentTypeError(
+            f"timeout must be between {MESSAGE_MIN_TIMEOUT_S:g} and "
+            f"{MESSAGE_MAX_TIMEOUT_S:g} seconds"
+        )
+    return timeout
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="amux",
@@ -447,6 +516,29 @@ def build_parser() -> argparse.ArgumentParser:
     p_ctx.add_argument("--json", action="store_true", help="machine-readable output")
     p_ctx.add_argument("--pane", default=None, help=argparse.SUPPRESS)
     p_ctx.set_defaults(func=cmd_ctx)
+
+    p_send = sub.add_parser(
+        "send", help="send a message and confirm target processing"
+    )
+    p_send.add_argument("target", help="target pane id, e.g. %%42")
+    p_send.add_argument("text", nargs="+", help="message body")
+    p_send.add_argument(
+        "--timeout",
+        type=_message_timeout,
+        default=MESSAGE_DEFAULT_TIMEOUT_S,
+        help=f"total delivery deadline (default: {MESSAGE_DEFAULT_TIMEOUT_S:g}s)",
+    )
+    p_send.set_defaults(func=cmd_send)
+
+    p_messages = sub.add_parser(
+        "messages", help="list sent and received messages"
+    )
+    p_messages.add_argument("-n", type=int, default=20, help="max messages")
+    p_messages.add_argument(
+        "--status", default=None, help=f"one of {'/'.join(MESSAGE_STATUSES)}"
+    )
+    p_messages.add_argument("--json", action="store_true", help="JSONL output")
+    p_messages.set_defaults(func=cmd_messages)
 
     p_notes = sub.add_parser("notes", help="list notes visible to this agent")
     p_notes.add_argument("--task", default=None, help="task filter")

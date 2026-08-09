@@ -819,7 +819,7 @@ def _messages(service: ContextService, request: Request) -> tuple[int, dict[str,
         limit=limit,
         db_path=service.db_path,
     )
-    return 200, {"messages": rows}
+    return 200, {"messages": rows, "caller_pane": caller.pane}
 
 
 EVENT_KINDS: tuple[str, ...] = tuple(events.STATE_BY_KIND)

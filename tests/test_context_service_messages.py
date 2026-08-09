@@ -208,7 +208,7 @@ def test_get_messages_is_capability_scoped(service, monkeypatch) -> None:
     )
 
     assert status == 200
-    assert payload == {"messages": rows}
+    assert payload == {"messages": rows, "caller_pane": "%1"}
     assert calls == [
         (
             ("ws", "/repo", "%1"),
