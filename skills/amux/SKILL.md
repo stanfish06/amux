@@ -38,6 +38,8 @@ commands use the left.
 | `amux kg <ws> <task> [--clean]` | kill one task (--clean also removes its worktrees) |
 | `amux kw <ws> [--clean]` | kill a whole workspace |
 | `amux ctx [--json] [--pane ID]` | this agent's identity + workspace team roster + visible notes |
+| `amux send <pane> <text...> [--timeout S]` | wait for idle, send an attributed message, and confirm a fresh busy event |
+| `amux messages [-n N] [--status STATUS] [--json]` | list durable messages sent or received by this agent |
 | `amux note <text> [--scope agent\|task\|workspace] [--kind note\|decision\|finding\|blocker]` | publish a scoped context note |
 | `amux notes [--workspace WS] [--task T] [--scope S] [--kind K] [-n N] [--json]` | list scoped notes |
 | `amux integrate <ws> <task> [--agent NAME...] [--all]` | merge agent worktree branches into the task integration branch |
@@ -50,8 +52,9 @@ commands use the left.
 to `task0`. Global `-L/--socket-name` must come **before** the subcommand.
 
 Every command above runs on the host. Inside a Docker Sandbox agent only `ctx`,
-`notes`, `note` and `event emit|state|wait` are available — the rest refuse
-locally. See *Sandboxed agents* for why, and for `--runtime docker-sandbox`.
+`send`, `messages`, `notes`, `note` and `event emit|state|wait` are available —
+the rest refuse locally. See *Sandboxed agents* for why, and for
+`--runtime docker-sandbox`.
 
 ## Agent specs and grid shape
 
@@ -318,11 +321,8 @@ Sandboxes microVM. amux keeps every coordination concern on the host — workspa
 task, roster, notes, events, integration — and the agent gets a boundary it
 cannot reach across.
 
-> **Status: opt-in prototype, not yet wired to the CLI.** The adapter, preflight,
-> host context service, in-VM client and hook bootstrap are implemented; grid
-> creation lands with task 4.5 and the `--runtime` / `--cpus` / `--memory` /
-> doctor flags with 5.5. Items below marked **(pending)** do not exist yet.
-> `docs/sandbox-smoke-test.md` is the procedure that verifies it on a real host.
+This is an opt-in backend. `docs/sandbox-smoke-test.md` is the procedure that
+verifies it on a real host.
 
 ### Am I in a sandbox?
 
@@ -342,11 +342,11 @@ are not on the host. Host agents never see it, so its absence means host. In
 ### What works, and what refuses
 
 Inside a sandbox, `amux` is a small standalone client that talks to a host
-service over HTTP. It supports exactly the context subset:
+service over HTTP. It supports exactly this messaging and context subset:
 
 | Works in a sandbox | Refuses locally |
 |---|---|
-| `ctx`, `notes`, `note` | `spw`, `spg`, `kg`, `kw` |
+| `ctx`, `send`, `messages`, `notes`, `note` | `spw`, `spg`, `kg`, `kw` |
 | `event emit`, `event state`, `event wait` | `integrate`, `monitor`, `lsw`, `lsg`, `event tail` |
 
 A refusal is immediate, exits 2, and names the command — it is not a transient
@@ -394,10 +394,10 @@ is removed. The host derives your workspace, task, repository, pane, agent and
 name from that record — identity fields in a request body are rejected, not
 trusted, so you cannot post as a teammate even by accident.
 
-The vocabulary has three permissions: `context:read`, `notes:write`,
-`events:write`. **Every agent token is currently minted with all three, so this
-is not least privilege today** and should not be described as if it were. Two
-things about it are true and load-bearing:
+The vocabulary has four permissions: `context:read`, `notes:write`,
+`events:write`, `messages:write`. **Every agent token is currently minted with
+all four, so this is not least privilege today** and should not be described as
+if it were. Two things about it are true and load-bearing:
 
 - **Host control is inexpressible.** Spawning, killing, integrating, cleaning and
   monitoring have no permission that could grant them, so no token — leaked,
@@ -467,8 +467,8 @@ Scopes, least-to-most visible: `agent` (only you) → `task` (your task window)
 
 Both reach your teammates, but they cost the receiver very differently. A note
 is *pull*: it lands in the store and a teammate reads it when they next run
-`amux ctx`. A `send-keys` message is *push*: it types into a running agent's
-prompt and interrupts whatever it was doing.
+`amux ctx`. `amux send` is *push*: it waits for an idle receiver, types into its
+prompt, and wakes it immediately.
 
 **Prefer `amux note`** — the default — when you are recording rather than
 asking:
@@ -489,63 +489,40 @@ is a note. "Please review `%67`'s branch and reply" is a message. Status pushed
 into a pane interrupts an agent mid-task to tell it something it never asked
 for; the same text as a note costs nothing until it is wanted.
 
-Notes also outlive the pane. A message exists only in that agent's scrollback,
-so it is gone when the pane dies; a note keeps its worktree, repo, scope, and
-kind, and is still queryable afterwards with `amux notes`.
+Both are durable. `amux messages` retains the sender, receiver, body, deadline,
+and delivery result; `amux notes` additionally retains an explicit scope and
+kind for knowledge meant to be pulled later.
 
 ## Messaging teammates
 
-There is no `amux send`/`read` yet — it's a project goal. Today you push text
-into a teammate's pane with raw tmux:
+Address the receiver by the `%N` pane id shown by `amux ctx`:
 
 ```sh
-tmux -L amux-root send-keys -t %9 'your message' Enter
+amux send %9 "auth tests pass; please review src/auth and reply to %7"
 ```
 
-**Always lead with your own identity.** `send-keys` types raw keystrokes into
-the target agent's prompt — there is no envelope, no sender field, nothing that
-distinguishes your message from the receiver's own human operator or from a
-third teammate. An unattributed message leaves the receiver unable to reply or
-to weigh who is asking. Take your name, label, and pane id from `amux ctx` and
-prefix every message:
+Do not build an envelope yourself. Amux resolves your live identity and types:
+
+```text
+[amux brave-hawk @r0c1 %7 message #42] auth tests pass; please review src/auth and reply to %7
+```
+
+The command waits behind any other sender, waits until the target is exactly
+`idle`, revalidates the pane, and submits once. It reports `delivered` only when
+that same pane emits a fresh `busy` event after submission. The default 300
+second timeout covers the whole transaction; use `--timeout S` to change it.
+
+Failures print `undelivered` to stderr, exit nonzero, and remain queryable:
 
 ```sh
-# from brave-hawk (@r0c1 %7) asking golden-owl (%9) for a review
-tmux -L amux-root send-keys -t %9 \
-  '[amux brave-hawk @r0c1 %7] auth tests pass; please review src/auth and reply to %7' Enter
+amux messages --status undelivered
+amux messages --json -n 20
 ```
 
-Include the pane id, not just the name — it's what the other agent needs to
-address you back. When you expect a reply, say so explicitly and name your pane;
-the receiver has no return channel otherwise.
-
-### Send the text, then Enter separately
-
-A message with no submit key just sits in the receiver's input box. Nothing
-errors, the sender sees success, and the other agent never wakes up. Agent TUIs
-also read a trailing `Enter` in the *same* `send-keys` call inconsistently — it
-can be absorbed into the input as a literal newline instead of submitting. Send
-the text, pause, then send `Enter` on its own:
-
-```sh
-tmux -L amux-root send-keys -t %9 '[amux brave-hawk @r0c1 %7] please review src/auth and reply to %7'
-sleep 0.3
-tmux -L amux-root send-keys -t %9 Enter
-```
-
-Then confirm it actually went through — the receiver's state should leave `idle`
-(`amux ctx`), or look at the pane and check the box is empty:
-
-```sh
-tmux -L amux-root capture-pane -p -t %9 | tail -5
-```
-
-If your text is still visible on the input line, it was never submitted; send
-`Enter` again rather than re-sending the message (that would duplicate it).
-
-Before sending, check the target's state in `amux ctx` (or block on
-`amux event wait %9`) — keystrokes sent to a `busy` agent land mid-run and may
-be swallowed by whatever prompt is active.
+This evidence is intentionally conservative. If the receiver processed the
+prompt but its hooks emitted no `busy` event, amux still records `undelivered`.
+Do not bypass that result with raw `tmux send-keys`; report it and inspect
+`amux messages` so the sender remains aware that processing was not confirmed.
 
 ## Attaching
 
@@ -558,14 +535,13 @@ tmux -L amux-root ls                    # raw view of the amux server
 
 - **`amux -L foo spw` vs `amux spw -L foo`** — the socket flag is global and
   must precede the subcommand.
-- **Inventing a messaging command.** There is no `amux send`/`read` yet — see
-  *Messaging teammates* for the `send-keys` workaround.
-- **Sending an unsigned message.** A bare `send-keys` payload arrives with no
-  sender. Prefix `[amux <name> @<label> <pane>]` so the receiver knows who wrote
-  it and where to reply.
-- **Forgetting to submit.** Text sent without a separate `Enter` sits in the
-  receiver's input box forever and silently succeeds from your side. Send the
-  text, pause, send `Enter`, then verify the input line is clear.
+- **Using a name or label as a message target.** `amux send` takes the explicit
+  `%N` pane id from `amux ctx`, avoiding name and grid-label collisions.
+- **Treating tmux keystroke acceptance as delivery.** Use `amux send`, not raw
+  `send-keys`; only a fresh target `busy` event records `delivered`.
+- **Ignoring an undelivered result.** It is durable and intentionally
+  conservative. Inspect `amux messages --status undelivered`; do not silently
+  resend through tmux.
 - **Expecting events outside amux.** `emit` and `wait` are no-ops unless `$TMUX`
   points at the `amux-root` socket. `ctx` without `--pane` needs `$TMUX_PANE`;
   from outside, pass `--pane %7` explicitly.

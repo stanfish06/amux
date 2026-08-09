@@ -1,6 +1,6 @@
 # project goals
 - [x] manage agent spawn and close in terminal multiplexers
-- [ ] send/read messages across panes/windows, human->agent and agent->agent
+- [x] send/read messages across panes/windows, human->agent and agent->agent
 - [ ] persistence, session/window management, automation
 - Design
     - sessions = workspaces
@@ -15,12 +15,34 @@ amux spg myproj fix -a claude:3 -a codex    # mixed 2x2: 3 claude + 1 codex (aut
 amux spg myproj plan -a claude@opus/high -a codex@gpt-5.6-sol/xhigh   # per-agent model + effort
 amux lsw                                    # list workspaces
 amux lsg myproj                             # list tasks/agents in a workspace
+amux send %9 "please review src/auth"       # wait for idle, send, confirm processing
+amux messages --status undelivered          # inspect durable delivery results
 amux kg myproj review                       # kill a task
 amux kw myproj                              # kill a workspace
 amux monitor                                # live dashboard of every workspace/agent
 amux monitor -W 160 -T 60                   # ...at 160 cols, 60 of them for the tree
 ```
 - runs on a dedicated tmux server (socket `amux-root`); attach: `tmux -L amux-root attach -t myproj`
+
+## messaging
+
+`amux send <pane> <text...> [--timeout SECONDS]` waits until the target agent is
+exactly `idle`, submits one attributed message, and reports `delivered` only
+after that same pane emits a fresh `busy` event. The default total deadline is
+300 seconds; it also covers waiting behind another sender and waiting for the
+target to become idle.
+
+Delivery attempts are durable. `amux messages [-n N] [--status STATUS]
+[--json]` lists messages sent or received by the calling pane, where `STATUS`
+is `pending`, `delivered`, or `undelivered`. An undelivered result is printed to
+stderr and exits nonzero, so the sender cannot mistake tmux accepting
+keystrokes for the agent processing them.
+
+The result is intentionally conservative: if an agent processes the prompt but
+its hooks never emit `busy`, amux records `undelivered` because it has no stable
+evidence of processing. Check the record with `amux messages`; do not retry with
+raw `tmux send-keys`, which bypasses idle waiting, attribution, serialization,
+and delivery evidence.
 
 ## agent specs
 
@@ -86,7 +108,7 @@ flowchart TB
     accDescr: The CLI and monitor TUI drive one of two runtimes, host tmux panes or Docker sandbox microVMs, agents report state either directly or through an authenticated loopback context service, and both paths converge on one host-side context database.
 
     subgraph frontend ["Frontend"]
-        cli["amux CLI<br/>spw · spg · kg · kw · integrate<br/>note · ctx · doctor · context-service"]
+        cli["amux CLI<br/>spw · spg · kg · kw · integrate<br/>send · messages · note · ctx · doctor · context-service"]
         tui["amux monitor<br/>read-only Ink TUI, tui/"]
     end
 
@@ -100,14 +122,14 @@ flowchart TB
     subgraph comms ["Communication"]
         hooks["agent hooks<br/>spawn · busy · stop · notify · exit"]
         emit["amux event emit<br/>events.py, in process on the host"]
-        shim["in-VM amux shim<br/>sandbox_client.py, context subset only"]
-        svc["context service<br/>loopback HTTP :47317, bearer capability<br/>context:read · notes:write · events:write"]
+        shim["in-VM amux shim<br/>sandbox_client.py, messaging + context subset"]
+        svc["context service<br/>loopback HTTP :47317, bearer capability<br/>context:read · notes:write · events:write · messages:write"]
         bus["tmux bus<br/>@amux_state option + wait-for channel"]
     end
 
     subgraph contextl ["Context"]
-        store["store.py<br/>schema · migration · token hashing"]
-        db[("context.db<br/>events · notes · worktrees · tokens")]
+        store["store.py<br/>schema · migration · message delivery · token hashing"]
+        db[("context.db<br/>messages · events · notes · worktrees · tokens")]
         trees["git worktrees<br/>amux/ws/task/name off the integration branch"]
     end
 
