@@ -1,4 +1,4 @@
-"""Schema migrations: version 2 to 3, and version 3 to 4.
+"""Schema migrations from frozen older databases to the current schema.
 
 The version 2 DDL is frozen here on purpose. Importing it from `store` would
 make these tests follow the schema as it changes and quietly stop testing the
@@ -141,6 +141,19 @@ def _columns(db: Path, table: str) -> set[str]:
         conn.close()
 
 
+def _tables(db: Path) -> set[str]:
+    conn = sqlite3.connect(db)
+    try:
+        return {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+    finally:
+        conn.close()
+
+
 def _user_version(db: Path) -> int:
     conn = sqlite3.connect(db)
     try:
@@ -153,11 +166,12 @@ def _user_version(db: Path) -> int:
 
 
 def test_v2_database_upgrades_to_the_current_version(v2_db: Path) -> None:
-    """A version 2 file skips straight to 4; the upgrades are not sequential
+    """A version 2 file skips straight to current; upgrades are not sequential
     runs, they are one pass that applies every additive widening it is missing."""
     store.worktree_by_id(1, db_path=v2_db)
-    assert _user_version(v2_db) == 4
-    assert store.SCHEMA_VERSION == 4
+    assert _user_version(v2_db) == 5
+    assert store.SCHEMA_VERSION == 5
+    assert "messages" in _tables(v2_db)
 
 
 def test_migration_adds_every_runtime_column(v2_db: Path) -> None:
@@ -173,9 +187,9 @@ def test_migration_adds_every_tuning_column(v2_db: Path) -> None:
 # --- the 3 to 4 upgrade ---
 
 
-def test_v3_database_upgrades_to_version_4(v3_db: Path) -> None:
+def test_v3_database_upgrades_to_current_version(v3_db: Path) -> None:
     store.worktree_by_id(1, db_path=v3_db)
-    assert _user_version(v3_db) == 4
+    assert _user_version(v3_db) == 5
     assert _V4_WORKTREE_COLUMNS <= _columns(v3_db, "worktrees")
 
 
@@ -201,7 +215,7 @@ def test_the_v3_upgrade_preserves_the_runtime_identity(v3_db: Path) -> None:
 def test_the_v3_upgrade_is_idempotent(v3_db: Path) -> None:
     store.worktree_by_id(1, db_path=v3_db)
     store.worktree_by_id(1, db_path=v3_db)
-    assert _user_version(v3_db) == 4
+    assert _user_version(v3_db) == 5
 
 
 def test_pre_existing_row_reads_as_host_runtime(v2_db: Path) -> None:
@@ -270,7 +284,7 @@ def test_fresh_database_is_created_at_the_current_version(db_path: Path) -> None
         branch="amux/proj/task0/a",
         db_path=db_path,
     )
-    assert _user_version(db_path) == 4
+    assert _user_version(db_path) == 5
     assert _V3_WORKTREE_COLUMNS | _V4_WORKTREE_COLUMNS <= _columns(db_path, "worktrees")
 
 

@@ -14,16 +14,18 @@ from amux.shared import STATE_DIR
 
 DB_PATH = STATE_DIR / "context.db"
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 NoteScope = Literal["agent", "task", "workspace"]
 NoteKind = Literal["note", "decision", "finding", "blocker"]
 WorktreeStatus = Literal["active", "merged", "removed"]
 Runtime = Literal["host", "docker-sandbox"]
+MessageStatus = Literal["pending", "delivered", "undelivered"]
 
 NOTE_SCOPES = ("agent", "task", "workspace")
 NOTE_KINDS = ("note", "decision", "finding", "blocker")
 RUNTIMES = ("host", "docker-sandbox")
+MESSAGE_STATUSES = ("pending", "delivered", "undelivered")
 
 _RUNTIME_COLUMNS = (
     ("runtime", "TEXT NOT NULL DEFAULT 'host'"),
@@ -114,6 +116,39 @@ CREATE TABLE IF NOT EXISTS context_tokens (
 );
 CREATE INDEX IF NOT EXISTS idx_tokens_hash ON context_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS idx_tokens_worktree ON context_tokens(worktree_id);
+
+CREATE TABLE IF NOT EXISTS messages (
+  id INTEGER PRIMARY KEY,
+  created_ts REAL NOT NULL,
+  updated_ts REAL NOT NULL,
+  deadline_ts REAL NOT NULL,
+  submitted_ts REAL,
+  delivered_ts REAL,
+  sender_worktree_id INTEGER REFERENCES worktrees(id),
+  target_worktree_id INTEGER REFERENCES worktrees(id),
+  repo TEXT NOT NULL DEFAULT '',
+  workspace TEXT NOT NULL,
+  sender_task TEXT NOT NULL,
+  sender_pane TEXT NOT NULL,
+  sender_agent TEXT NOT NULL DEFAULT '',
+  sender_name TEXT NOT NULL DEFAULT '',
+  target_task TEXT NOT NULL,
+  target_pane TEXT NOT NULL,
+  target_agent TEXT NOT NULL DEFAULT '',
+  target_name TEXT NOT NULL DEFAULT '',
+  target_created_ts REAL NOT NULL,
+  body TEXT NOT NULL,
+  envelope TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  reason_code TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_messages_sender
+  ON messages(workspace, repo, sender_pane, id);
+CREATE INDEX IF NOT EXISTS idx_messages_target
+  ON messages(workspace, repo, target_pane, id);
+CREATE INDEX IF NOT EXISTS idx_messages_status
+  ON messages(status, deadline_ts, id);
 """
 )
 
@@ -446,6 +481,153 @@ def query_notes(
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
     sql, params = _page(sql, params, after, limit)
+    with _session(db_path) as conn:
+        return _rows(conn, sql, params)
+
+
+def create_message(
+    *,
+    created_ts: float,
+    deadline_ts: float,
+    sender_worktree_id: int | None,
+    target_worktree_id: int | None,
+    repo: str,
+    workspace: str,
+    sender_task: str,
+    sender_pane: str,
+    sender_agent: str,
+    sender_name: str,
+    target_task: str,
+    target_pane: str,
+    target_agent: str,
+    target_name: str,
+    target_created_ts: float,
+    body: str,
+    db_path: Path | None = None,
+) -> int:
+    with _session(db_path) as conn:
+        cur = conn.execute(
+            "INSERT INTO messages"
+            " (created_ts, updated_ts, deadline_ts, sender_worktree_id,"
+            "  target_worktree_id, repo, workspace, sender_task, sender_pane,"
+            "  sender_agent, sender_name, target_task, target_pane, target_agent,"
+            "  target_name, target_created_ts, body)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                created_ts,
+                created_ts,
+                deadline_ts,
+                sender_worktree_id,
+                target_worktree_id,
+                repo,
+                workspace,
+                sender_task,
+                sender_pane,
+                sender_agent,
+                sender_name,
+                target_task,
+                target_pane,
+                target_agent,
+                target_name,
+                target_created_ts,
+                body,
+            ),
+        )
+        return cur.lastrowid or 0
+
+
+def set_message_envelope(
+    message_id: int, envelope: str, db_path: Path | None = None
+) -> bool:
+    with _session(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE messages SET envelope = ?"
+            " WHERE id = ? AND status = 'pending'",
+            (envelope, message_id),
+        )
+        return cur.rowcount == 1
+
+
+def mark_message_submitted(
+    message_id: int, submitted_ts: float, db_path: Path | None = None
+) -> bool:
+    with _session(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE messages SET submitted_ts = ?, updated_ts = ?"
+            " WHERE id = ? AND status = 'pending'",
+            (submitted_ts, submitted_ts, message_id),
+        )
+        return cur.rowcount == 1
+
+
+def finish_message(
+    message_id: int,
+    status: MessageStatus,
+    reason_code: str = "",
+    reason: str = "",
+    now: float | None = None,
+    db_path: Path | None = None,
+) -> bool:
+    if status not in ("delivered", "undelivered"):
+        raise ValueError("message can finish only as delivered or undelivered")
+    now = time.time() if now is None else now
+    delivered_ts = now if status == "delivered" else None
+    with _session(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE messages SET status = ?, reason_code = ?, reason = ?,"
+            " updated_ts = ?, delivered_ts = ?"
+            " WHERE id = ? AND status = 'pending'",
+            (status, reason_code, reason, now, delivered_ts, message_id),
+        )
+        return cur.rowcount == 1
+
+
+def expire_messages(now: float | None = None, db_path: Path | None = None) -> int:
+    now = time.time() if now is None else now
+    with _session(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE messages SET status = 'undelivered',"
+            " reason_code = 'deadline_expired',"
+            " reason = 'delivery deadline expired before confirmation',"
+            " updated_ts = ?"
+            " WHERE status = 'pending' AND deadline_ts <= ?",
+            (now, now),
+        )
+        return cur.rowcount
+
+
+def message_by_id(
+    message_id: int, db_path: Path | None = None
+) -> dict[str, Any] | None:
+    with _session(db_path) as conn:
+        rows = _rows(conn, "SELECT * FROM messages WHERE id = ?", (message_id,))
+    return rows[0] if rows else None
+
+
+def visible_messages(
+    workspace: str,
+    repo: str,
+    pane: str,
+    status: MessageStatus | None = None,
+    limit: int = 20,
+    now: float | None = None,
+    db_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    if status is not None and status not in MESSAGE_STATUSES:
+        raise ValueError(f"status must be one of {MESSAGE_STATUSES}, got '{status}'")
+    if limit < 1:
+        raise ValueError("limit must be positive")
+    expire_messages(now, db_path)
+    sql = (
+        "SELECT * FROM messages WHERE workspace = ? AND repo = ?"
+        " AND (sender_pane = ? OR target_pane = ?)"
+    )
+    params: tuple = (workspace, repo, pane, pane)
+    if status is not None:
+        sql += " AND status = ?"
+        params += (status,)
+    sql += " ORDER BY id DESC LIMIT ?"
+    params += (limit,)
     with _session(db_path) as conn:
         return _rows(conn, sql, params)
 
