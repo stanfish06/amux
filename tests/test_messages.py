@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 
 import fake_tmux
@@ -63,7 +64,7 @@ def send(delivery, text: str = "review") -> messages.DeliveryResult:
 def test_busy_target_is_waited_for_before_any_text_is_sent(
     delivery, monkeypatch
 ) -> None:
-    states = iter(["busy", "idle"])
+    states = iter(["busy", "idle", "idle"])
     monkeypatch.setattr(
         events, "current_state", lambda *args, **kwargs: next(states)
     )
@@ -102,6 +103,56 @@ def test_submission_boundary_is_passed_to_fresh_event_wait(
 
     row = store.message_by_id(result.message_id)
     assert seen == [row["submitted_ts"]]
+
+
+def test_target_becoming_busy_at_submission_boundary_is_not_typed(
+    delivery, monkeypatch
+) -> None:
+    states = iter(["idle", "idle", "busy"])
+    monkeypatch.setattr(
+        events, "current_state", lambda *args, **kwargs: next(states)
+    )
+
+    result = send(delivery)
+
+    row = store.message_by_id(result.message_id)
+    assert (result.status, result.reason_code) == (
+        "undelivered",
+        "target_not_idle",
+    )
+    assert row["submitted_ts"] is None
+    assert "submit" not in delivery.timeline
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"created": 200.0},
+        {"workspace": "other"},
+    ],
+)
+def test_target_identity_change_at_submission_boundary_is_not_typed(
+    delivery, monkeypatch, changes
+) -> None:
+    replacement = replace(delivery.target_actor, **changes)
+    target_resolutions = iter(
+        [delivery.target_actor, delivery.target_actor, replacement]
+    )
+
+    def resolve(server, pane, db_path=None):
+        return delivery.sender_actor if pane == "%1" else next(target_resolutions)
+
+    monkeypatch.setattr(messages, "actor_for", resolve)
+
+    result = send(delivery)
+
+    row = store.message_by_id(result.message_id)
+    assert (result.status, result.reason_code) == (
+        "undelivered",
+        "target_replaced",
+    )
+    assert row["submitted_ts"] is None
+    assert "submit" not in delivery.timeline
 
 
 def test_no_fresh_busy_event_is_durably_undelivered(

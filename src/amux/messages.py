@@ -138,6 +138,18 @@ def _remaining(deadline: float, clock, code: str, reason: str) -> float:
     return remaining
 
 
+def _assert_same_target(server, target: Actor, db_path: Path | None) -> None:
+    current = actor_for(server, target.pane, db_path)
+    if current.created != target.created:
+        raise DeliveryFailure(
+            "target_replaced", "target pane was replaced before submission"
+        )
+    if (current.workspace, current.repo) != (target.workspace, target.repo):
+        raise DeliveryFailure(
+            "target_replaced", "target identity changed before submission"
+        )
+
+
 def _wait_until_idle(
     target: Actor,
     socket: str,
@@ -284,18 +296,7 @@ def send(
             sleep=sleep,
         ):
             _wait_until_idle(target, socket, deadline, clock)
-            current_target = actor_for(server, target.pane, db_path)
-            if current_target.created != target.created:
-                raise DeliveryFailure(
-                    "target_replaced", "target pane was replaced before submission"
-                )
-            if (current_target.workspace, current_target.repo) != (
-                target.workspace,
-                target.repo,
-            ):
-                raise DeliveryFailure(
-                    "target_replaced", "target identity changed before submission"
-                )
+            _assert_same_target(server, target, db_path)
             _wait_until_idle(target, socket, deadline, clock)
             cursor = events.event_cursor(target.pane, target.created, db_path)
             pane = _pane_by_id(server, target.pane)
@@ -303,6 +304,12 @@ def send(
 
             def mark_submitted() -> None:
                 nonlocal submitted_ts
+                _assert_same_target(server, target, db_path)
+                if events.current_state(target.pane, socket) != "idle":
+                    raise DeliveryFailure(
+                        "target_not_idle",
+                        "target was no longer idle immediately before submission",
+                    )
                 submitted_ts = wall()
 
             try:
