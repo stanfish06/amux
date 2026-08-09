@@ -32,11 +32,12 @@ def delivery(monkeypatch, tmp_path):
     monkeypatch.setattr(
         events, "wait_for_fresh_state", lambda *args, **kwargs: "busy"
     )
-    monkeypatch.setattr(
-        core,
-        "submit_to_interface",
-        lambda *args, **kwargs: timeline.append("submit") or "",
-    )
+    def submit(*args, **kwargs):
+        kwargs["on_submit"]()
+        timeline.append("submit")
+        return ""
+
+    monkeypatch.setattr(core, "submit_to_interface", submit)
     return SimpleNamespace(
         server=window.server,
         target=target_pane,
@@ -86,6 +87,23 @@ def test_fresh_busy_event_marks_the_message_delivered(delivery) -> None:
     assert store.message_by_id(result.message_id)["status"] == "delivered"
 
 
+def test_submission_boundary_is_passed_to_fresh_event_wait(
+    delivery, monkeypatch
+) -> None:
+    seen = []
+
+    def wait(*args, **kwargs):
+        seen.append(kwargs["not_before"])
+        return "busy"
+
+    monkeypatch.setattr(events, "wait_for_fresh_state", wait)
+
+    result = send(delivery)
+
+    row = store.message_by_id(result.message_id)
+    assert seen == [row["submitted_ts"]]
+
+
 def test_no_fresh_busy_event_is_durably_undelivered(
     delivery, monkeypatch
 ) -> None:
@@ -98,6 +116,35 @@ def test_no_fresh_busy_event_is_durably_undelivered(
     assert result.status == "undelivered"
     assert result.reason_code == "busy_timeout"
     assert store.message_by_id(result.message_id)["status"] == "undelivered"
+
+
+def test_result_never_disagrees_with_an_already_expired_durable_row(
+    delivery, monkeypatch
+) -> None:
+    finish = store.finish_message
+
+    def expire_instead(message_id, status, *args, **kwargs):
+        if status == "delivered":
+            finish(
+                message_id,
+                "undelivered",
+                "deadline_expired",
+                "delivery deadline expired before confirmation",
+                kwargs.get("now"),
+                kwargs.get("db_path"),
+            )
+            return False
+        return finish(message_id, status, *args, **kwargs)
+
+    monkeypatch.setattr(store, "finish_message", expire_instead)
+
+    result = send(delivery)
+
+    row = store.message_by_id(result.message_id)
+    assert (result.status, result.reason_code) == (
+        row["status"],
+        row["reason_code"],
+    ) == ("undelivered", "deadline_expired")
 
 
 def test_envelope_is_attributed_and_correlated(delivery) -> None:

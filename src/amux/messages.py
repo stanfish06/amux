@@ -208,8 +208,7 @@ def send(
             "sender and target must share the same workspace and repository",
         )
 
-    started = clock()
-    deadline = started + timeout
+    deadline = clock() + timeout
     created = wall()
     store.expire_messages(created, db_path)
     message_id = store.create_message(
@@ -237,19 +236,42 @@ def send(
     )
     store.set_message_envelope(message_id, envelope, db_path)
 
-    def failed(code: str, reason: str, exit_code: int = 1) -> DeliveryResult:
-        store.finish_message(
-            message_id, "undelivered", code, reason, wall(), db_path
+    def finish(
+        status: store.MessageStatus,
+        code: str = "",
+        reason: str = "",
+        exit_code: int = 1,
+    ) -> DeliveryResult:
+        changed = store.finish_message(
+            message_id,
+            status,
+            reason_code=code,
+            reason=reason,
+            now=wall(),
+            db_path=db_path,
         )
+        if not changed:
+            row = store.message_by_id(message_id, db_path)
+            if row is None or row["status"] == "pending":
+                raise RuntimeError(
+                    f"message #{message_id} did not reach a durable terminal state"
+                )
+            status = row["status"]
+            code = row["reason_code"]
+            reason = row["reason"]
+            exit_code = 0 if status == "delivered" else 1
         return DeliveryResult(
             message_id,
-            "undelivered",
+            status,
             target.pane,
             target.name,
             code,
             reason,
-            exit_code,
+            0 if status == "delivered" else exit_code,
         )
+
+    def failed(code: str, reason: str, exit_code: int = 1) -> DeliveryResult:
+        return finish("undelivered", code, reason, exit_code)
 
     try:
         socket = getattr(server, "socket_name", None) or DEFAULT_SOCKET
@@ -277,23 +299,42 @@ def send(
             _wait_until_idle(target, socket, deadline, clock)
             cursor = events.event_cursor(target.pane, target.created, db_path)
             pane = _pane_by_id(server, target.pane)
-            problem = core.submit_to_interface(
-                pane,
-                envelope,
-                timeout=_remaining(
-                    deadline,
-                    clock,
-                    "submission_timeout",
-                    "delivery deadline expired before submission",
-                ),
-                poll=0.05,
-                pause=0.4,
-                clock=clock,
-                sleep=sleep,
-            )
+            submitted_ts: float | None = None
+
+            def mark_submitted() -> None:
+                nonlocal submitted_ts
+                submitted_ts = wall()
+
+            try:
+                problem = core.submit_to_interface(
+                    pane,
+                    envelope,
+                    timeout=_remaining(
+                        deadline,
+                        clock,
+                        "submission_timeout",
+                        "delivery deadline expired before submission",
+                    ),
+                    poll=0.05,
+                    pause=0.4,
+                    clock=clock,
+                    sleep=sleep,
+                    on_submit=mark_submitted,
+                )
+            finally:
+                if submitted_ts is not None and not store.mark_message_submitted(
+                    message_id, submitted_ts, db_path
+                ):
+                    raise DeliveryFailure(
+                        "persistence_failed",
+                        "message stopped being pending before submission",
+                    )
             if problem:
                 raise DeliveryFailure("submission_failed", problem)
-            store.mark_message_submitted(message_id, wall(), db_path)
+            if submitted_ts is None:
+                raise DeliveryFailure(
+                    "submission_failed", "interface submission boundary was not recorded"
+                )
             state = events.wait_for_fresh_state(
                 target.pane,
                 cursor,
@@ -306,6 +347,7 @@ def send(
                 ),
                 socket=socket,
                 expected_created=target.created,
+                not_before=submitted_ts,
                 db_path=db_path,
                 clock=clock,
             )
@@ -317,10 +359,7 @@ def send(
                 raise DeliveryFailure(
                     "busy_timeout", "no fresh busy event before the delivery deadline"
                 )
-            store.finish_message(message_id, "delivered", now=wall(), db_path=db_path)
-            return DeliveryResult(
-                message_id, "delivered", target.pane, target.name
-            )
+            return finish("delivered", exit_code=0)
     except KeyboardInterrupt:
         return failed(
             "sender_interrupted", "sender interrupted delivery before confirmation", 130

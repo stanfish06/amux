@@ -470,6 +470,7 @@ def wait_for_fresh_state(
     timeout: float = 300.0,
     socket: str | None = None,
     expected_created: float | None = None,
+    not_before: float | None = None,
     db_path=None,
     clock=time.monotonic,
     block=None,
@@ -481,6 +482,9 @@ def wait_for_fresh_state(
     wait_once = block or _wait_for_state_signal
     cursor = after
     while True:
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return None
         facts = pane_facts(pane, socket)
         if facts.alive is not True or (
             expected_created is not None and facts.created != expected_created
@@ -492,6 +496,8 @@ def wait_for_fresh_state(
                 continue
             cursor = row_id
             if expected_created is not None and row["ts"] < expected_created:
+                continue
+            if not_before is not None and row["ts"] <= not_before:
                 continue
             state = STATE_BY_KIND[row["kind"]]
             if state in for_states or state == "dead":

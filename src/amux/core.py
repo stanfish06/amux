@@ -392,7 +392,15 @@ def send_bootstrap(
 
 
 def submit_to_interface(
-    pane: Pane, text: str, *, timeout: float, poll: float, pause: float, clock, sleep
+    pane: Pane,
+    text: str,
+    *,
+    timeout: float,
+    poll: float,
+    pause: float,
+    clock,
+    sleep,
+    on_submit=None,
 ) -> str:
     deadline = clock() + timeout
     while True:
@@ -404,6 +412,8 @@ def submit_to_interface(
             return _not_ready_reason(capture, timeout)
         sleep(min(poll, remaining))
 
+    if on_submit is not None:
+        on_submit()
     pane.send_keys(text, enter=False, suppress_history=False, literal=True)
     sleep(pause)
     pane.enter()

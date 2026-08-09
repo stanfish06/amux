@@ -322,6 +322,24 @@ def test_shared_submission_reports_a_message_left_in_the_composer():
     assert "input line" in problem
 
 
+def test_shared_submission_marks_the_boundary_immediately_before_text() -> None:
+    p = pane(capture("codex_0.146.0_ready"), capture("codex_0.146.0_submitted"))
+    clock = Clock(pane=p)
+
+    core.submit_to_interface(
+        p,
+        STUCK,
+        timeout=1.0,
+        poll=0.1,
+        pause=0.0,
+        clock=clock.time,
+        sleep=clock.sleep,
+        on_submit=lambda: p.log.append(("submitted", p.id)),
+    )
+
+    assert verbs(p)[:3] == ["capture_pane", "submitted", "send_keys"]
+
+
 def test_a_submitted_message_is_not_mistaken_for_a_stuck_one():
     """After submission the text is still on screen -- it moves into the
     transcript ABOVE the composer. Looking for it anywhere in the pane would
@@ -537,4 +555,3 @@ def test_a_keyboard_interrupt_still_reaches_the_operator():
 
     with pytest.raises(KeyboardInterrupt):
         core.send_bootstrap(Interrupted(), MESSAGE)
-
