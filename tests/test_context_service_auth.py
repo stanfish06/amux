@@ -490,16 +490,21 @@ def test_permissions_round_trip_through_the_store(token_probe, spy):
     assert payload["identity"]["permissions"] == [cs.PERM_EVENTS_WRITE]
 
 
-def test_the_agent_permission_set_grants_context_only():
-    """Nothing in the vocabulary can express host control, so no capability can
-    hold it."""
+def test_the_agent_permission_set_grants_bounded_agent_operations_only():
+    """The vocabulary contains no general host-control capability."""
     assert set(cs.AGENT_PERMISSIONS) == {
         cs.PERM_CONTEXT_READ,
         cs.PERM_NOTES_WRITE,
         cs.PERM_EVENTS_WRITE,
+        cs.PERM_MESSAGES_WRITE,
     }
     for permission in cs.AGENT_PERMISSIONS:
-        assert permission.split(":")[0] in {"context", "notes", "events"}
+        assert permission.split(":")[0] in {
+            "context",
+            "notes",
+            "events",
+            "messages",
+        }
 
 
 def test_a_handler_cannot_forget_to_authenticate(token_probe):

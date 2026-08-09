@@ -726,6 +726,8 @@ def test_every_documented_operation_is_routed():
         ("GET", "/v1/context"),
         ("GET", "/v1/notes"),
         ("POST", "/v1/notes"),
+        ("GET", "/v1/messages"),
+        ("POST", "/v1/messages"),
         ("POST", "/v1/events"),
         ("GET", "/v1/events/state"),
         ("GET", "/v1/events/wait"),

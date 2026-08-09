@@ -5,6 +5,7 @@ import errno
 import http.client
 import json
 import logging
+import math
 import os
 import re
 import signal
@@ -14,13 +15,13 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import parse_qs, urlsplit
 
-from amux import core, events, shared, store
+from amux import core, events, messages, shared, store
 from amux.shared import DEFAULT_SOCKET
 
 SERVICE_NAME = "amux-context"
@@ -219,8 +220,14 @@ class ServiceConfig:
 PERM_CONTEXT_READ = "context:read"
 PERM_NOTES_WRITE = "notes:write"
 PERM_EVENTS_WRITE = "events:write"
+PERM_MESSAGES_WRITE = "messages:write"
 
-AGENT_PERMISSIONS = (PERM_CONTEXT_READ, PERM_NOTES_WRITE, PERM_EVENTS_WRITE)
+AGENT_PERMISSIONS = (
+    PERM_CONTEXT_READ,
+    PERM_NOTES_WRITE,
+    PERM_EVENTS_WRITE,
+    PERM_MESSAGES_WRITE,
+)
 
 
 @dataclass(frozen=True)
@@ -633,6 +640,26 @@ def _choice_field(
     return str(value)
 
 
+def _float_field(
+    body: Mapping[str, Any],
+    name: str,
+    default: float,
+    minimum: float,
+    maximum: float,
+) -> float:
+    value = body.get(name, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ServiceError("invalid_request", f"field '{name}' must be a number")
+    value = float(value)
+    if not math.isfinite(value) or not minimum <= value <= maximum:
+        raise ServiceError(
+            "invalid_request",
+            f"field '{name}' must be between {minimum:g} and {maximum:g},"
+            f" got {value:g}",
+        )
+    return value
+
+
 def _cursor(rows: Sequence[Mapping[str, Any]], after: int | None) -> int | None:
     ids = [int(r["id"]) for r in rows]
     if not ids:
@@ -738,6 +765,61 @@ def _note_by_id(
         return rows[0]
     service.log.warning("note %d could not be read back after insert", note_id)
     return None
+
+
+@route("POST", "/v1/messages", requires=PERM_MESSAGES_WRITE)
+def _send_message(
+    service: ContextService, request: Request
+) -> tuple[int, dict[str, Any]]:
+    caller = request.caller
+    target = _text_field(request.body, "target", 32)
+    text = _text_field(request.body, "text", service.config.max_text_chars)
+    timeout = _float_field(
+        request.body,
+        "timeout",
+        messages.DEFAULT_TIMEOUT_S,
+        messages.MIN_TIMEOUT_S,
+        messages.MAX_TIMEOUT_S,
+    )
+    try:
+        result = messages.send(
+            service.tmux_server(caller.socket),
+            caller.pane,
+            target,
+            text,
+            timeout=timeout,
+            db_path=service.db_path,
+            state_dir=service.config.state_home,
+        )
+    except (messages.DeliveryFailure, ValueError) as exc:
+        raise ServiceError("invalid_request", redact(str(exc))) from exc
+    record = store.message_by_id(result.message_id, service.db_path) or asdict(result)
+    return 200, {
+        "message": record,
+        "summary": redact(messages.result_line(result)),
+    }
+
+
+@route("GET", "/v1/messages", requires=PERM_CONTEXT_READ)
+def _messages(service: ContextService, request: Request) -> tuple[int, dict[str, Any]]:
+    caller = request.caller
+    status = _choice(request, "status", store.MESSAGE_STATUSES)
+    limit = _int_param(
+        request,
+        "limit",
+        service.config.default_results,
+        1,
+        service.config.max_results,
+    )
+    rows = store.visible_messages(
+        caller.workspace,
+        caller.repo,
+        caller.pane,
+        status=status,
+        limit=limit,
+        db_path=service.db_path,
+    )
+    return 200, {"messages": rows}
 
 
 EVENT_KINDS: tuple[str, ...] = tuple(events.STATE_BY_KIND)
