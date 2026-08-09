@@ -1,68 +1,4 @@
 #!/usr/bin/env python3
-"""The in-sandbox `amux` shim: context commands over HTTP, nothing else.
-
-This file is copied into a Docker Sandbox as a single executable `amux` and run
-there with the microVM's own interpreter. It therefore imports **only the
-standard library** and nothing from the amux package — there is no amux install,
-no tmux socket, no `context.db`, and no state directory inside a sandbox. It
-lives in `src/amux/` so it is versioned, reviewed, and tested with the host code
-it mirrors, not because a sandbox ever imports it as a module.
-
-Supported commands are the context subset: `ctx`, `notes`, `note`, and
-`event emit|state|wait`. Everything that controls the host — spawning, killing,
-integrating, monitoring, listing the tmux server — fails locally with a boundary
-message; the sandbox is not permitted to reach those, and pretending otherwise
-would be worse than refusing.
-
-Configuration
--------------
-A mode-`0600` JSON file, `$AMUX_CONTEXT_CONFIG` or
-`$XDG_CONFIG_HOME/amux/context.json`:
-
-    {"endpoint": "http://host.docker.internal:8765", "token": "<capability>"}
-
-The token travels only in an `Authorization: Bearer` header — never in a URL,
-argv, or environment variable, so it cannot leak through the process table — and
-is redacted from every diagnostic this client prints.
-
-Wire contract
--------------
-All requests carry `Authorization: Bearer <token>` (except `/healthz`) and
-`Accept: application/json`; bodies are JSON. Every non-2xx response is
-`{"error": {"code": <stable str>, "message": <human str>}}`.
-
-    GET  /healthz
-         -> {"ok": bool, "schema_version": int}
-    GET  /v1/context
-         -> {"self": {...}, "team": [{"task": str, "agents": [...]}],
-             "notes": [note, ...]}
-            `self` adds runtime/runtime_status/sandbox_name/sandbox_id to the
-            fields `core.build_context` already returns.
-    GET  /v1/notes?task=&scope=&kind=&limit=&after=
-         -> {"notes": [note, ...], "cursor": int | null}
-            note = the `notes` row: id, ts, worktree_id, repo, workspace, task,
-            pane, agent, scope, kind, text.
-    POST /v1/notes  {"text": str, "scope": str, "kind": str}
-         -> {"note": {<note>, "name": str}}   ("name" = the agent's stable name)
-            The body carries no identity fields; the service attributes the note
-            from the token.
-    POST /v1/events {"kind": str, "detail": str}
-         -> {"event": {...}, "cursor": int}
-    GET  /v1/events/state
-         -> {"panes": [{pane, kind, workspace, task, agent, name, label, state,
-                        last_event}, ...]}   (as `events.pane_states`)
-    GET  /v1/events/wait?pane=&timeout=&after=&states=
-         -> {"pane": str, "state": str | null, "cursor": int,
-             "events": [...]}
-            Bounded: the service returns `state: null` when its own cap expires.
-            The client re-polls from `cursor` until *its* deadline, so a capped
-            server wait and a resumed client both work without replication.
-
-The human-readable renderers below are ports of `amux.utils.context_to_string`
-and the `cli`/`events` print paths. They are duplicated because the shim cannot
-import them; they must stay in step with those functions, and the tests assert
-the native column shapes so drift fails loudly.
-"""
 
 from __future__ import annotations
 
@@ -80,44 +16,26 @@ from typing import Any
 
 CONFIG_ENV = "AMUX_CONTEXT_CONFIG"
 
-# Mirrors of host constants. Kept literal so the shim stays importless; the
-# host owns the real definitions in store.py / events.py / shared.py.
 ALIAS = {"session": "workspace", "window": "task", "pane": "agent"}
 NOTE_SCOPES = ("agent", "task", "workspace")
 NOTE_KINDS = ("note", "decision", "finding", "blocker")
 EVENT_KINDS = ("busy", "exit", "notify", "spawn", "stop")
 WAIT_STATES = ("idle", "needs-input", "dead")
 
-#: Longest `detail` this client will send. The service caps it too and refuses
-#: anything longer — but `event emit` swallows failures, so an over-long detail
-#: from a hook payload would silently lose the state transition itself. A
-#: truncated detail is worth far more than a dropped event.
 DETAIL_LIMIT = 2000
 
-#: Shortest string redaction will treat as a secret. A real capability is
-#: `secrets.token_urlsafe(32)` — 43 characters — so anything shorter cannot be
-#: one, and substring-replacing it would shred the diagnostic instead of
-#: protecting anything: a token of "t" turns "cannot reach the service" into
-#: "canno*** reach ***he service". A short token is a misconfiguration the
-#: service rejects anyway.
 MIN_REDACTABLE_TOKEN = 16
 
 DEFAULT_TIMEOUT_S = 15.0
-#: Longest single long-poll the client asks for. The service caps its own wait;
-#: whichever cap is shorter just means an extra round trip, never a lost event.
 POLL_WINDOW_S = 25.0
-#: Slack on top of the poll window before the socket itself times out.
 POLL_SLACK_S = 5.0
-#: Floor between stateless polls, so a service that ignores our window cannot
-#: turn `event wait` into a hot loop.
 POLL_FLOOR_S = 0.05
 
 EXIT_OK = 0
 EXIT_FAIL = 1
 EXIT_USAGE = 2
-EXIT_DEAD = 2  # `event wait` on a dead pane, as on the host
+EXIT_DEAD = 2
 
-#: Host-only commands and what they would need. A sandbox has none of it.
 HOST_ONLY = {
     "spw": "spawns a workspace on the host tmux server",
     "spg": "spawns a task grid on the host tmux server",
@@ -128,29 +46,25 @@ HOST_ONLY = {
     "lsw": "lists sessions on the host tmux server",
     "lsg": "lists windows on the host tmux server",
 }
-#: `event` subcommands that are not part of the sandbox context subset.
 HOST_ONLY_EVENT = {"tail": "streams raw host event rows"}
 
 SUPPORTED = "ctx, notes, note, event emit|state|wait"
 
 
 class UsageError(Exception):
-    """Bad input. Exits 2, like argparse."""
+    pass
 
 
 class BoundaryError(UsageError):
-    """The command exists on the host and cannot cross into a sandbox."""
+    pass
 
 
 class ClientError(Exception):
-    """The service could not be reached or did not answer usefully. Exits 1."""
+    pass
 
 
 class ConfigError(ClientError):
-    """No usable capability configuration inside this sandbox."""
-
-
-# --- configuration -----------------------------------------------------------
+    pass
 
 
 @dataclass
@@ -167,8 +81,6 @@ def default_config_path() -> Path:
 
 
 def load_config(path: str | os.PathLike | None = None) -> Config:
-    """Read the capability file, refusing anything a second local user could
-    read: the token is the whole of this client's authority."""
     target = Path(path or os.environ.get(CONFIG_ENV) or default_config_path())
     try:
         mode = target.stat().st_mode
@@ -201,23 +113,12 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
     )
 
 
-# --- transport ---------------------------------------------------------------
-
-
 class ContextClient:
-    """Minimal JSON client for the host context service."""
-
     def __init__(self, config: Config):
         self.config = config
-        # No proxies: the endpoint is the host loopback via host.docker.internal,
-        # and an inherited *_proxy would silently send the token elsewhere.
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def redact(self, text: str) -> str:
-        """Never let the token appear in output, even echoed back at us.
-
-        See `MIN_REDACTABLE_TOKEN` for why a very short token is left alone.
-        """
         token = self.config.token
         if len(token) < MIN_REDACTABLE_TOKEN:
             return text
@@ -282,8 +183,6 @@ class ContextClient:
         return document
 
     def _service_error(self, exc: urllib.error.HTTPError) -> ClientError:
-        """Turn the service's error envelope into one message, or say plainly
-        that it did not send one."""
         try:
             envelope = json.loads(exc.read() or b"{}")
             error = envelope["error"]
@@ -291,9 +190,6 @@ class ContextClient:
         except (json.JSONDecodeError, KeyError, TypeError, OSError, ValueError):
             detail = f"HTTP {exc.code} {exc.reason}"
         return ClientError(f"the amux context service refused the request: {detail}")
-
-
-# --- rendering (ports of the host's human-readable output) -------------------
 
 
 def _age(ts: float) -> str:
@@ -312,13 +208,6 @@ def _addr(agent: dict) -> str:
 
 
 def runtime_to_string(me: dict) -> str:
-    """`runtime: <runtime> <runtime_status> <sandbox_name>`, or "" for a host
-    agent. Empty components drop out with their preceding space.
-
-    Rendered only when the runtime is not `host`, which is what keeps host `ctx`
-    output byte-identical to today. This exact shape is shared with the host
-    renderer (`utils.context_to_string`, task 5.4) so the two cannot drift.
-    """
     runtime = me.get("runtime") or ""
     if not runtime or runtime == "host":
         return ""
@@ -327,20 +216,11 @@ def runtime_to_string(me: dict) -> str:
 
 
 def tuning_to_string(me: dict) -> str:
-    """`model: <m>  effort: <e>`, or "" when the pane was given neither.
-
-    Only the parts amux was actually asked for are rendered — it chose neither
-    value, so it reports neither rather than a guessed default, and a pane with
-    no tuning prints nothing at all. Shape shared with the host renderer
-    (`utils.context_to_string`) so the two cannot drift.
-    """
     parts = [f"{k}: {me.get(k)}" for k in ("model", "effort") if me.get(k)]
     return "  ".join(parts)
 
 
 def context_to_string(ctx: dict) -> list[str]:
-    """Port of `amux.utils.context_to_string`, plus the runtime a sandbox agent
-    needs to know it is in one."""
     me = ctx["self"]
     branch = f"  branch:{me.get('branch')}" if me.get("branch") else ""
     lines = [
@@ -395,14 +275,10 @@ def context_to_string(ctx: dict) -> list[str]:
 
 
 def note_to_string(note: dict) -> str:
-    """Port of the `cli._cmd_notes` column layout."""
     return (
         f"{note['id']:>3}  {note['scope']:<9} {note['kind']:<9} "
         f"{note['agent'] or note['pane']:<12}  {note['text']}"
     )
-
-
-# --- validation --------------------------------------------------------------
 
 
 def _one_of(value: str | None, allowed: tuple[str, ...], flag: str) -> str | None:
@@ -412,9 +288,6 @@ def _one_of(value: str | None, allowed: tuple[str, ...], flag: str) -> str | Non
 
 
 def _refuse_host_flags(args: argparse.Namespace, *flags: str) -> None:
-    """Flags that would name another pane, workspace, or repository. The token
-    fixes this client's identity and scope, so honouring them is impossible and
-    ignoring them would quietly answer a different question."""
     for flag in flags:
         if getattr(args, flag.lstrip("-").replace("-", "_"), None):
             raise BoundaryError(
@@ -422,9 +295,6 @@ def _refuse_host_flags(args: argparse.Namespace, *flags: str) -> None:
                 f"agent identity and scope by its capability token. "
                 f"Run 'amux ... {flag}' on the host to look at another."
             )
-
-
-# --- commands ----------------------------------------------------------------
 
 
 def cmd_ctx(client: ContextClient, args: argparse.Namespace) -> int:
@@ -461,8 +331,6 @@ def cmd_note(client: ContextClient, args: argparse.Namespace) -> int:
     text = " ".join(args.text).strip()
     if not text:
         raise UsageError("note text is empty")
-    # Identity is deliberately absent: the service attributes the note from the
-    # token, and a body field claiming otherwise is rejected there.
     document = client.post("/v1/notes", {"text": text, "scope": scope, "kind": kind})
     note = document.get("note") or {}
     origin = f" [{note['name']}]" if note.get("name") else ""
@@ -474,8 +342,6 @@ def cmd_note(client: ContextClient, args: argparse.Namespace) -> int:
 
 
 def _hook_payload() -> dict:
-    """JSON an agent pipes to hook commands on stdin (empty when run
-    interactively or the payload is malformed). Port of `events._hook_payload`."""
     try:
         if sys.stdin is None or sys.stdin.isatty():
             return {}
@@ -486,20 +352,14 @@ def _hook_payload() -> dict:
 
 
 def cmd_event_emit(client: ContextClient, args: argparse.Namespace) -> int:
-    """A hook must never look like agent failure, so this reports nothing and
-    always succeeds — same contract as `events.cmd_emit` on the host. `--pane`
-    and `--agent` are accepted and ignored: a template hook may still pass them,
-    and the token, not the argument, decides who this is. An unknown kind is the
-    one exception — it is a broken hook, not a failing agent, and stays visible.
-    """
     _one_of(args.kind, EVENT_KINDS, "kind")
     payload = _hook_payload() if args.detail is None else {}
     detail = (
         args.detail
-        or payload.get("message")  # Notification: what the agent is asking
-        or payload.get("tool_name")  # PreToolUse: which tool went busy
-        or payload.get("reason")  # SessionEnd: why it exited
-        or payload.get("last-assistant-message")  # Codex notify: end of turn
+        or payload.get("message")
+        or payload.get("tool_name")
+        or payload.get("reason")
+        or payload.get("last-assistant-message")
         or ""
     )
     try:
@@ -525,9 +385,6 @@ def cmd_event_state(client: ContextClient, args: argparse.Namespace) -> int:
 
 
 def cmd_event_wait(client: ContextClient, args: argparse.Namespace) -> int:
-    """Block until `pane` reaches a terminal-ish state. The service bounds each
-    long poll, so this resumes from the last event cursor until *its* own
-    deadline — a capped server wait is a round trip, not a lost transition."""
     deadline = time.monotonic() + args.timeout
     cursor: Any = None
     while True:
@@ -555,9 +412,6 @@ def cmd_event_wait(client: ContextClient, args: argparse.Namespace) -> int:
         time.sleep(min(POLL_FLOOR_S, max(0.0, deadline - time.monotonic())))
 
 
-# --- argument parsing --------------------------------------------------------
-
-
 def _boundary_message(command: str, reason: str) -> str:
     return (
         f"'{command}' runs only on the amux host: it {reason}, and a sandbox has "
@@ -568,8 +422,6 @@ def _boundary_message(command: str, reason: str) -> str:
 
 
 def _screen_host_only(argv: list[str]) -> str | None:
-    """Refuse host commands from argv directly, before parsing or reading any
-    configuration: the answer does not depend on either."""
     if not argv:
         return None
     command = argv[0]
@@ -631,7 +483,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="free-form note (default: from hook JSON on stdin)",
     )
-    # Accepted for host-hook compatibility, ignored: see cmd_event_emit.
     p_emit.add_argument("--pane", default=None, help=argparse.SUPPRESS)
     p_emit.add_argument("--agent", default="", help=argparse.SUPPRESS)
     p_emit.set_defaults(func=cmd_event_emit)
@@ -649,9 +500,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None, *, config_path: str | None = None) -> int:
-    """`config_path` overrides the env lookup. Nothing in a sandbox passes it;
-    it exists so two simulated clients can run in one process without racing on
-    a shared environment variable."""
     argv = list(sys.argv[1:] if argv is None else argv)
     boundary = _screen_host_only(argv)
     if boundary is not None:
@@ -669,7 +517,7 @@ def main(argv: list[str] | None = None, *, config_path: str | None = None) -> in
         return EXIT_USAGE
     except ClientError as exc:
         if emitting:
-            return EXIT_OK  # a hook must never look like agent failure
+            return EXIT_OK
         message = client.redact(str(exc)) if client else str(exc)
         print(f"amux: {message}", file=sys.stderr)
         return EXIT_FAIL

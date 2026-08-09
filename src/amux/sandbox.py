@@ -1,5 +1,3 @@
-"""Docker Sandbox (`sbx`) adapter."""
-
 from __future__ import annotations
 
 import hashlib
@@ -34,7 +32,7 @@ _VERSION_RE = re.compile(r"v?(\d+)\.(\d+)\.(\d+)")
 
 
 class SandboxError(RuntimeError):
-    """An `sbx` invocation failed, or its output could not be trusted."""
+    pass
 
 
 @dataclass(frozen=True)
@@ -50,7 +48,6 @@ class SbxResult:
 
     @property
     def message(self) -> str:
-        """The most useful line `sbx` produced, for surfacing to a user."""
         text = self.stderr.strip() or self.stdout.strip()
         return text.splitlines()[0].strip() if text else f"sbx exited {self.returncode}"
 
@@ -171,7 +168,6 @@ class Resources:
             )
 
     def create_flags(self) -> tuple[str, ...]:
-        """The `sbx create` flags these caps imply."""
         self.validate()
         flags = ["--cpus", str(self.cpus), "--memory", self.memory]
         if not self.share_skills:
@@ -191,7 +187,6 @@ def sandboxes() -> list[dict[str, Any]]:
 
 
 def find(name: str) -> dict[str, Any] | None:
-    """The recorded entry for one sandbox name, or None when absent."""
     return next((s for s in sandboxes() if s.get("name") == name), None)
 
 
@@ -315,10 +310,6 @@ def create(
     return Sandbox(name=name, id=str(entry.get("id") or ""), entry=entry)
 
 
-# Codex SKIPS an untrusted hook silently — no prompt, no warning — so without
-# this a sandboxed Codex never reports state and reads permanently idle. Safe
-# only because amux authors the sole hooks.json and the VM is the boundary;
-# revisit if user-supplied hooks are ever allowed.
 HOOK_TRUST_FLAG = "--dangerously-bypass-hook-trust"
 
 AGENT_ATTACH_ARGS: dict[str, tuple[str, ...]] = {"codex": (HOOK_TRUST_FLAG,)}
@@ -328,11 +319,6 @@ def attach_argv(
     name: str, agent: str = "", request: AgentRequest | None = None
 ) -> tuple[str, ...]:
     args = ["run", "--name", name]
-    # Composed, not chosen between: the hook-trust flag is the sandbox's own
-    # requirement, tuning is the user's, and the pointer is amux's for both
-    # runtimes. Any one of them alone is enough to need the
-    # `<agent> -- <args>` form, which `claude` reaches without an
-    # AGENT_ATTACH_ARGS entry of its own.
     extra = (
         *AGENT_ATTACH_ARGS.get(agent, ()),
         *render_tuning(request or AgentRequest(agent)),
@@ -346,8 +332,6 @@ def attach_argv(
 def attach_command(
     name: str, agent: str = "", request: AgentRequest | None = None
 ) -> str:
-    # Through `render_command`, because the pointer is one argument containing
-    # spaces: a bare join would hand `sbx` a dozen of them.
     return render_command(SBX, attach_argv(name, agent, request))
 
 

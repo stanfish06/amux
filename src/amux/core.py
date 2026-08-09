@@ -113,7 +113,6 @@ NOUNS = [
 
 
 def random_name(taken: set[str]) -> str:
-    """Pick a memorable adjective-noun tag (e.g. brave-hawk) not in `taken`."""
     combos = [f"{a}-{n}" for a in ADJECTIVES for n in NOUNS]
     available = [c for c in combos if c not in taken]
     if available:
@@ -136,10 +135,6 @@ RAW_COMMAND_HINT = (
 
 
 def _tune(agent: str, head: str, spec: str) -> AgentRequest:
-    """Split `<agent>[@model][/effort]` off an already-countless head.
-
-    Only reached for a known agent, which is what keeps raw commands whole.
-    """
     rest = head[len(agent) :]
     model = effort = ""
     if rest.startswith("@"):
@@ -159,12 +154,6 @@ def _tune(agent: str, head: str, spec: str) -> AgentRequest:
 
 
 def _parse_agent_spec(spec: str) -> tuple[AgentRequest, int | None]:
-    """Parse `AGENT[@MODEL][/EFFORT][:COUNT]`.
-
-    Count comes off first, on the last `:` only when the suffix is all digits;
-    `@` and `/` are split only when the head names an agent amux launches, so
-    raw commands containing either character pass through whole.
-    """
     head, sep, suffix = spec.rpartition(":")
     count = None
     if not sep or not suffix.isdigit():
@@ -188,12 +177,6 @@ def _parse_agent_spec(spec: str) -> tuple[AgentRequest, int | None]:
 def parse_agent_specs(
     specs: list[str], nrows: int | None, ncols: int | None
 ) -> list[AgentRequest]:
-    """Expand `AGENT[@MODEL][/EFFORT][:COUNT]` specs into a per-pane request
-    list, row-major.
-
-    With a known shape (both dims given), a single countless spec absorbs the
-    remainder; with an unknown or partial shape, countless means 1.
-    """
     parsed = [_parse_agent_spec(s) for s in specs or ["claude"]]
     countless = [i for i, (_, count) in enumerate(parsed) if count is None]
     if nrows is not None and ncols is not None:
@@ -210,15 +193,10 @@ def parse_agent_specs(
                     f"{nrows}x{ncols} grid"
                 )
             parsed[i] = (parsed[i][0], remainder)
-    # Any spec still countless here (unknown/partial shape) means 1.
     return [request for request, count in parsed for _ in range(count or 1)]
 
 
 def resolve_grid_shape(n: int, nrows: int | None, ncols: int | None) -> tuple[int, int]:
-    """Fit `n` agents into a grid, deriving whatever `-r`/`-c` left out.
-
-    With neither given, pick the factor pair closest to square, rows <= cols.
-    """
     if nrows is not None and ncols is not None:
         if nrows * ncols != n:
             raise ValueError(f"{n} agents do not fit a {nrows}x{ncols} grid")
@@ -294,7 +272,6 @@ class AgentPane:
 
 
 def _socket_name(obj) -> str:
-    """Socket of the server behind any libtmux object."""
     return getattr(obj.server, "socket_name", None) or DEFAULT_SOCKET
 
 
@@ -329,7 +306,6 @@ def _rollback(runtime: Runtime) -> list[str]:
 
 
 def _discard(what: str, teardown) -> str | None:
-    """Best-effort tmux teardown. Returns a problem description, or None."""
     try:
         teardown()
     except Exception as exc:  # noqa: BLE001
@@ -337,95 +313,17 @@ def _discard(what: str, teardown) -> str | None:
     return None
 
 
-# --- sending a message to an agent that has only just started ----------------
-#
-# Readiness has no signal to subscribe to. A freshly spawned pane is stamped
-# `starting` and settles to `idle` a few seconds later precisely BECAUSE nothing
-# on the agent side announces "my prompt is ready", so `amux event wait` returns
-# before the TUI exists. A bounded `capture-pane` poll is the only honest
-# mechanism available, and it is a heuristic over rendered text: every rule
-# below is pinned to a real capture in `tests/test_pane_readiness_fixtures/`,
-# and every failure is a reported timeout rather than a hang or a lost grid.
-
-#: An input caret at the start of a line. `\s` rather than `[ \t]` on purpose:
-#: `claude`'s composer line is `❯` followed by a NON-BREAKING space (U+00A0),
-#: so an ASCII-only class silently never matches and `claude` times out forever.
 _CARET = re.compile(r"^\s*[>›❯]\s*(?:\S.*)?$")
 
-#: A numbered chooser waiting on a keypress: codex's update prompt, and both
-#: agents' trust-this-directory prompt. These appear BEFORE the composer, own
-#: the keyboard, and render a caret exactly like a composer does. Sending a
-#: message into codex's update modal types it into a menu whose first entry runs
-#: `npm install -g @openai/codex`, so this exclusion is load-bearing, not tidy.
-#:
-#: `[1-9]`, not `[2-9]`, and the first option is the one that matters. In an
-#: 80x8 pane -- an ordinary quarter of a 2x2 grid -- the trust modal's `2. No,
-#: quit` and `Press enter to continue` lines fall BELOW THE VISIBLE AREA, so a
-#: matcher that needs to see a second option sees a lone `> 1. Yes, continue`
-#: and calls the modal a composer. The `Enter` that follows the message would
-#: then land on the highlighted first option, which is amux silently answering a
-#: trust prompt on the user's behalf -- the one thing this change must not do.
-#:
-#: Matching a `1.` in ordinary agent output costs a refusal to send, which is a
-#: reported timeout. That is the safe direction and this errs towards it.
 _CHOOSER = re.compile(r"^\W*[1-9]\.\s+\S", re.MULTILINE)
 
 BOOTSTRAP_READY_TIMEOUT_S = 45.0
 BOOTSTRAP_POLL_S = 0.5
-#: Between the text and its `Enter`. Agent TUIs read a trailing `Enter` in the
-#: same `send-keys` call inconsistently -- it can be absorbed as a literal
-#: newline instead of submitting -- so the two are separate keystrokes.
 BOOTSTRAP_SUBMIT_PAUSE_S = 0.4
-#: How much of the message to look for when checking whether it was submitted,
-#: taken from its END. Both halves of that are measured, not chosen:
-#:
-#: The TAIL, because a composer keeps the cursor on screen and the cursor is
-#: after the last character typed. A 491-character message in an 80x8 pane --
-#: an ordinary quarter of a 2x2 grid -- scrolls its own head out of the
-#: composer, so a head-based probe reports a message that is plainly sitting
-#: there unsubmitted as submitted, at every probe length. The retry `Enter`
-#: then never fires and amux says nothing was wrong.
-#:
-#: SHORT, because the same truncation eventually eats the tail too. Measured
-#: against the real 80x8 capture: 189 characters still matches, 190 does not.
-#: Short has its own floor, and it is lower than it looks -- only a 1-character
-#: probe false-matches the footer of a pane that submitted cleanly; 2 is already
-#: clean. So the safe band is 2..189 and 40 sits well inside it, with about 150
-#: characters of headroom above.
-#:
-#: Both cliffs are pinned by fixtures in `test_pane_readiness_fixtures/`, which
-#: is what to trust: these numbers are a property of one capture at one pane
-#: size, and re-recording that capture moves them. An earlier version of this
-#: comment said 110, carried over from a capture that was later replaced.
 _PROBE_CHARS = 40
 
 
 def interface_ready(capture: str) -> bool:
-    """Does this `capture-pane` show an agent composer waiting for input?
-
-    Two clauses, each measured rather than reasoned:
-
-    - A caret line with something rendered BELOW it. A composer has a status
-      footer under it; a shell prompt is the last thing on the screen. Without
-      this, the common `❯ ` zsh prompt reads as ready and the message is typed
-      into a shell, which then runs it.
-    - No blocking chooser FROM THE LAST CARET DOWN. It renders a caret too, and
-      it is not a composer.
-
-    The chooser scan is bounded rather than whole-pane because a chooser's caret
-    marks its selected option and the rest of the menu is beneath it, while a
-    numbered list in an agent's transcript is always above. Scanning everything
-    makes any pane that has ever printed "1. do this" read as never-ready --
-    free at spawn, where the transcript is empty, and the feature silently not
-    working for the `amux send` this helper is meant to be reused by. Verified
-    verdict-identical to the whole-pane scan across every captured fixture.
-
-    Two known limits, stated because neither is pinned by a test. A chooser
-    whose options are not numbered is invisible to this and to the whole-pane
-    scan alike -- no real capture has one. And every real chooser numbers the
-    caret line itself, so the part of the scan that reaches BELOW the caret is
-    deliberate breadth for a shape nothing has exhibited, not a measured need.
-    """
     lines = capture.splitlines()
     last = max((i for i, line in enumerate(lines) if line.strip()), default=-1)
     carets = [i for i, line in enumerate(lines) if _CARET.match(line)]
@@ -435,15 +333,6 @@ def interface_ready(capture: str) -> bool:
 
 
 def chooser_in_view(capture: str) -> bool:
-    """Is a blocking chooser occupying the bottom of this pane?
-
-    One function because there are two callers -- the readiness decision and the
-    sentence explaining a timeout -- and a bounded scan in one with a whole-pane
-    scan in the other means they can disagree: readiness correctly finding no
-    chooser while the timeout blames a trust prompt that is not there. Wrong
-    explanation rather than wrong action, but the reason to bound the scan at
-    all was that this helper outlives the spawn it was written for.
-    """
     lines = capture.splitlines()
     carets = [i for i, line in enumerate(lines) if _CARET.match(line)]
     if not carets:
@@ -452,14 +341,6 @@ def chooser_in_view(capture: str) -> bool:
 
 
 def _not_ready_reason(capture: str, timeout: float) -> str:
-    """Why the wait ran out, from what the pane was showing when it did.
-
-    Worth the extra sentence because the chooser case is the ORDINARY one, not
-    an edge: every amux agent gets a fresh per-agent worktree, and both agents
-    ask about trusting a directory they have not seen before. Measured on a live
-    spawn -- a bare "not ready" there sends the operator looking for a bug in
-    amux rather than at the prompt sitting in the pane.
-    """
     if chooser_in_view(capture):
         return (
             f"after {timeout:g}s it was still waiting on a prompt of its own, "
@@ -470,17 +351,10 @@ def _not_ready_reason(capture: str, timeout: float) -> str:
 
 
 def _probe(text: str) -> str:
-    """The end of `text`, whitespace-normalized so soft wrapping cannot hide it."""
     return " ".join(text.split())[-_PROBE_CHARS:]
 
 
 def _held_in_the_composer(capture: str, text: str) -> bool:
-    """Is `text` still sitting unsubmitted on the input line?
-
-    Only from the last caret line down. A submitted message is still on screen
-    -- it moves into the transcript ABOVE the composer -- so "the text appears
-    somewhere in the pane" would read every success as a failure.
-    """
     lines = capture.splitlines()
     carets = [i for i, line in enumerate(lines) if _CARET.match(line)]
     if not carets:
@@ -498,22 +372,18 @@ def send_bootstrap(
     clock=time.monotonic,
     sleep=time.sleep,
 ) -> str:
-    """Wait for `pane`'s agent, send `text`, submit it. Returns '' or a reason.
-
-    NEVER RAISES, and that is a hard requirement rather than politeness: this
-    runs inside `_build_grid`, whose callers answer any exception by killing the
-    whole session (`spw`) or the whole task window (`spg`). A capture against a
-    pane that just died must cost that agent its message and nothing else.
-    """
-    # Resolved here rather than as argument defaults, which bind at import: the
-    # constants would then be unpatchable, and the test suite would silently pay
-    # the real pause on every codex pane it builds.
     timeout = BOOTSTRAP_READY_TIMEOUT_S if timeout is None else timeout
     poll = BOOTSTRAP_POLL_S if poll is None else poll
     pause = BOOTSTRAP_SUBMIT_PAUSE_S if pause is None else pause
     try:
         return _send_bootstrap(
-            pane, text, timeout=timeout, poll=poll, pause=pause, clock=clock, sleep=sleep
+            pane,
+            text,
+            timeout=timeout,
+            poll=poll,
+            pause=pause,
+            clock=clock,
+            sleep=sleep,
         )
     except KeyboardInterrupt:
         raise
@@ -534,10 +404,6 @@ def _send_bootstrap(
             return _not_ready_reason(capture, timeout)
         sleep(min(poll, remaining))
 
-    # `suppress_history=False`: libtmux otherwise prefixes a space so the line
-    # is kept out of shell history. There is no shell here -- that space is a
-    # literal first character of the message. `enter=False` for the same reason
-    # the skill gives humans: the submit key goes separately, below.
     pane.send_keys(text, enter=False, suppress_history=False, literal=True)
     sleep(pause)
     pane.enter()
@@ -545,8 +411,6 @@ def _send_bootstrap(
 
     if not _held_in_the_composer(_capture(pane), text):
         return ""
-    # Send `Enter` again, never the text again: the text is demonstrably already
-    # in the composer, so re-sending it would submit the message twice.
     pane.enter()
     sleep(pause)
     if _held_in_the_composer(_capture(pane), text):
@@ -594,13 +458,10 @@ def _build_grid(
         cols = _split_evenly(row_pane, ncols, PaneDirection.Right, cwd)
         for j, pane in enumerate(cols):
             request = agents[i * ncols + j]
-            # The recorded kind stays bare: `claude`, never `claude@opus/high`.
-            # is_agent, the store's agent column and hook bootstrap all read it.
             agent = request.agent
             label = f"r{i}c{j}"
             name = _next_name(agent, resumable, taken)
             taken.add(name)
-            # Keep the name tag stable: block apps/prompts from re-titling the pane.
             pane.cmd("set-option", "-p", "allow-set-title", "off")
             pane.cmd("select-pane", "-T", f"{name}[{agent}]")
             pane.cmd("set-option", "-p", AGENT_OPTION, agent)
@@ -632,8 +493,6 @@ def _build_grid(
             )
         }
     except Exception as exc:
-        # A grid is all-or-nothing: half a grid leaves sandboxes nothing will
-        # ever attach to and rows a later integrate would try to merge.
         raise GridCreationError(exc, _rollback(runtime)) from exc
 
     for pane, request, name in panes_info:
@@ -652,10 +511,6 @@ def _build_grid(
             )
         )
 
-    # After every pane's launch keys have gone out, not inline per pane: a
-    # readiness wait is seconds long, and inline it would delay the NEXT pane's
-    # launch rather than only its own activation. The panes all exist by here,
-    # so the wait costs activation latency and nothing else.
     for pane, _agent, name in panes_info:
         bootstrap = launches[pane.id or ""].bootstrap
         if not bootstrap:
@@ -698,7 +553,6 @@ def spawn_agent_space(
     runtime.preflight(
         agents, workspace=session_name, task=init_task_name, cwd=session_path
     )
-    # Detached sessions get a virtual size; make it big enough to split evenly.
     width = max(200, 80 * init_grid_ncols)
     height = max(50, 24 * init_grid_nrows)
     server.cmd(
@@ -781,7 +635,6 @@ def spawn_agent_grid(
 
 
 def load_agent_pane(pane: Pane, facts: events.PaneFacts | None = None) -> AgentPane:
-    """One tmux query per pane, not one per option; `facts` carries them all."""
     facts = facts or events.pane_facts(pane.id or "", _socket_name(pane))
     state, _ = events.pane_status(pane.id or "", facts=facts)
     return AgentPane(
@@ -834,9 +687,6 @@ def _roster_entry(pane: Pane) -> dict:
             {"kind": last.kind, "ts": last.ts, "detail": last.detail} if last else None
         ),
     }
-    # Pane options, not the worktree row: a host agent in a non-repo directory
-    # has no row at all. Absent stays absent — amux chose neither value, so it
-    # reports neither rather than a guessed default.
     if facts.model:
         entry["model"] = facts.model
     if facts.effort:
@@ -852,7 +702,6 @@ def _roster_entry(pane: Pane) -> dict:
 
 
 def runtime_fields(row) -> dict:
-    """Runtime identity for a roster entry, or {} for a host agent."""
     runtime = (row["runtime"] if "runtime" in row.keys() else "") or HOST
     if runtime == HOST:
         return {}
@@ -862,20 +711,14 @@ def runtime_fields(row) -> dict:
         "runtime_status": row["runtime_status"] or "",
         "sandbox_name": row["sandbox_name"] or "",
         "sandbox_id": row["sandbox_id"] or "",
-        # A degraded agent cannot report every state, so its resolved state is
-        # not authoritative and must never be presented as if it were.
         "state_degraded": bool(missing),
         "missing_kinds": list(missing),
     }
 
 
 def missing_state_kinds(row) -> tuple[str, ...]:
-    """State kinds this execution's agent cannot report."""
     mechanism = (row["hook_mechanism"] if "hook_mechanism" in row.keys() else "") or ""
     if not mechanism:
-        # Nothing recorded: a host row, or an execution from before the
-        # mechanism was tracked. Claiming degradation we have not observed
-        # would be as wrong as hiding it.
         return ()
     return sandbox_hooks.missing_kinds(
         row["agent"], hooks_supported=mechanism == "hooks"
@@ -913,13 +756,10 @@ def build_context(server: Server, pane_id: str) -> dict:
         workspace=self_entry["workspace"],
         task=self_entry["task"],
         pane=pane_id,
-        # This is the path that briefs an agent, so it is the one that most
-        # needs the repo filter: workspace/task are reusable tmux labels.
         repo=self_entry.get("repo"),
     )
     return {"self": self_entry, "team": team, "notes": notes}
 
 
-# future feat, spawn and space where humans work and colab
 def spawn_human_space():
     pass

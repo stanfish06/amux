@@ -26,20 +26,15 @@ def _addr(agent: dict) -> str:
     return f"@{agent['label']} {agent['pane']}" if agent["name"] else agent["pane"]
 
 
-#: Appended to a state that its agent cannot fully report. ASCII, not an emoji:
-#: the monitor lays panels out in fixed columns and an emoji's width is not
-#: reliably one cell, so it misaligns the box borders.
 DEGRADED_MARK = "*"
 
 
 def state_to_string(agent: dict) -> str:
-    """An agent's state, marked when the agent cannot report all of them."""
     state = agent.get("state") or "-"
     return f"{state}{DEGRADED_MARK}" if agent.get("state_degraded") else state
 
 
 def context_to_string(ctx: dict) -> list[str]:
-    """Concise agent-facing view of `core.build_context` output."""
     me = ctx["self"]
     branch = f"  branch:{me.get('branch')}" if me.get("branch") else ""
     lines = [
@@ -47,8 +42,6 @@ def context_to_string(ctx: dict) -> list[str]:
         f"{ALIAS['window']}:{me['task']}  {ALIAS['session']}:{me['workspace']}  "
         f"{state_to_string(me)}{branch}  {me['cwd']}",
     ]
-    # Immediately after the identity line, and only for a non-host runtime, so
-    # host output stays byte-identical. Shape shared with the sandbox client.
     runtime_line = sandbox_client.runtime_to_string(me)
     if runtime_line:
         lines.append(runtime_line)

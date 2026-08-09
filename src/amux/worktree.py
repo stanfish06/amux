@@ -1,15 +1,3 @@
-"""Per-agent git worktrees with a per-task integration branch.
-
-Layout (all outside the user's repo):
-
-    $XDG_STATE_HOME/amux/worktrees/<workspace>/<task>/_integration/   -> amux/<ws>/<task>
-    $XDG_STATE_HOME/amux/worktrees/<workspace>/<task>/<agent-name>/   -> amux/<ws>/<task>/<name>
-
-Branch topology: agents branch off the task integration branch; `integrate`
-merges them back into it. Merging the integration branch into the repo's main
-line is left to the human.
-"""
-
 from __future__ import annotations
 
 import os
@@ -46,7 +34,6 @@ def _git(repo: str, *args: str, check: bool = True) -> subprocess.CompletedProce
 
 
 def repo_root(path: str) -> str | None:
-    """Absolute path of the repo containing `path`, else None."""
     proc = subprocess.run(
         ["git", "-C", path, "rev-parse", "--show-toplevel"],
         capture_output=True,
@@ -70,8 +57,6 @@ def task_branch_namespace(workspace: str, task: str) -> str:
 
 
 def integration_branch(workspace: str, task: str) -> str:
-    # Leaf under the same namespace as agent branches (amux/<ws>/<task>/<name>).
-    # A branch named amux/<ws>/<task> would collide with the refs directory.
     return f"{task_branch_namespace(workspace, task)}/integration"
 
 
@@ -94,8 +79,6 @@ def _branch_exists(repo: str, branch: str) -> bool:
 
 @dataclass(frozen=True)
 class TaskIntegration:
-    """The task's integration worktree, and the base every agent branches off."""
-
     repo: str
     workspace: str
     task: str
@@ -105,7 +88,6 @@ class TaskIntegration:
 
 
 def registered_worktrees(repo: str) -> set[str]:
-    """Paths git currently considers worktrees of `repo`."""
     out = _git(repo, "worktree", "list", "--porcelain", check=False).stdout
     return {
         os.path.realpath(line.split(" ", 1)[1])
@@ -115,7 +97,6 @@ def registered_worktrees(repo: str) -> set[str]:
 
 
 def setup_task_integration(repo: str, workspace: str, task: str) -> TaskIntegration:
-    """Create the task's integration branch and worktree, or adopt the existing one."""
     if not has_commits(repo):
         raise WorktreeError("repo has no commits yet")
     base = head_ref(repo)
@@ -137,7 +118,6 @@ def setup_task_integration(repo: str, workspace: str, task: str) -> TaskIntegrat
 
 
 def remove_task_integration(integration: TaskIntegration) -> None:
-    """Undo `setup_task_integration`."""
     _git(
         integration.repo,
         "worktree",
@@ -152,13 +132,6 @@ def setup_host_agents(
     integration: TaskIntegration,
     panes: list[tuple[str, AgentRequest, str]],
 ) -> dict[str, str]:
-    """One worktree + registry row per host pane, branched off the integration
-    branch.
-
-    `panes` is a list of (pane_id, request, name). Returns {pane_id: path}. Rolls
-    back its own worktrees and rows on failure; the integration worktree belongs
-    to the caller that created it.
-    """
     repo, workspace, task = integration.repo, integration.workspace, integration.task
     root = task_worktree_root(workspace, task)
 
@@ -202,7 +175,6 @@ def setup_task(
     task: str,
     panes: list[tuple[str, AgentRequest, str]],
 ) -> dict[str, str]:
-    """Host-runtime task setup: the integration worktree + one worktree per pane."""
     integration = setup_task_integration(repo, workspace, task)
     try:
         return setup_host_agents(integration, panes)
@@ -212,7 +184,6 @@ def setup_task(
 
 
 def _merge_source(row: dict) -> str:
-    """What `integrate` should merge for one execution row."""
     if row.get("runtime") != "docker-sandbox":
         return row["branch"]
     sandbox_name = row.get("sandbox_name") or ""
@@ -225,8 +196,6 @@ def _merge_source(row: dict) -> str:
 
 
 def _record_failure(workspace: str, task: str, row: dict, text: str) -> None:
-    """Leave a task-scoped blocker so a failed integrate is visible to the team
-    rather than only to whoever happened to run the command."""
     store.add_note(
         workspace=workspace,
         task=task,
@@ -245,11 +214,6 @@ def integrate(
     task: str,
     names: list[str] | None = None,
 ) -> list[MergeResult]:
-    """Merge agent branches into the task integration branch.
-
-    `names` limits the merge to those agent names; None means every active
-    worktree of the task. Conflict aborts the merge and records a blocker note.
-    """
     rows = [
         r
         for r in store.worktrees_for(workspace, task)
@@ -331,7 +295,6 @@ def integrate(
 
 
 def remove_task(workspace: str, task: str) -> list[str]:
-    """Remove all worktrees of a task (branches are kept). Returns removed paths."""
     removed: list[str] = []
     rows = store.worktrees_for(workspace, task)
     if not rows:
@@ -356,19 +319,16 @@ def remove_task(workspace: str, task: str) -> list[str]:
 
 
 def sandbox_remote(sandbox_name: str) -> str:
-    """The host-side remote `sbx create --clone` publishes for a sandbox."""
     return f"sandbox-{sandbox_name}"
 
 
 def sandbox_tracking_ref(sandbox_name: str, branch: str) -> str:
-    """Where a fetched sandbox branch lands on the host."""
     return f"refs/amux/sandboxes/{sandbox_name}/{branch}"
 
 
 def sandbox_branch_tip(
     repo: str, sandbox_name: str, branch: str, *, source: str | None = None
 ) -> str | None:
-    """The commit the sandbox has on `branch`, or None if it has no such branch."""
     proc = _git(
         repo, "ls-remote", source or sandbox_remote(sandbox_name), branch, check=False
     )
@@ -381,7 +341,6 @@ def sandbox_branch_tip(
 def fetch_sandbox_branch(
     repo: str, sandbox_name: str, branch: str, *, source: str | None = None
 ) -> str:
-    """Fetch a sandbox's committed branch to a durable local ref, and return it."""
     ref = sandbox_tracking_ref(sandbox_name, branch)
     proc = _git(
         repo,
@@ -397,12 +356,10 @@ def fetch_sandbox_branch(
 
 
 def remove_sandbox_remote(repo: str, sandbox_name: str) -> None:
-    """Drop a sandbox's host remote if it is still there."""
     _git(repo, "remote", "remove", sandbox_remote(sandbox_name), check=False)
 
 
 def latest_commit_subject(path: str) -> str:
-    """The subject of `path`'s last commit, or "" when there is no path."""
     if not path:
         return ""
     proc = _git(path, "log", "-1", "--format=%s", check=False)

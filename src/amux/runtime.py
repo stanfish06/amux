@@ -25,8 +25,6 @@ AGENT_COMMANDS = {
 
 
 class GridCreationError(RuntimeError):
-    """A grid failed partway through creation and was unwound."""
-
     def __init__(self, cause: BaseException, cleanup_failures: Sequence[str] = ()):
         self.cause = cause
         self.cleanup_failures: list[str] = list(cleanup_failures)
@@ -45,8 +43,6 @@ class GridCreationError(RuntimeError):
 
 @dataclass(frozen=True)
 class PaneSpec:
-    """A pane's identity, fixed by `core` before anything runs in it."""
-
     pane: str
     agent: str
     name: str
@@ -61,33 +57,13 @@ class PaneSpec:
 def install_host_skills(
     panes: Sequence[PaneSpec],
 ) -> dict[str, sandbox_bootstrap.HostSkillInstalled]:
-    """Install amux's own skill into the host skill directory of each agent kind.
-
-    Once per kind, not once per pane: four `claude` agents resolve one
-    destination and write once. Failure is still attributed to every agent that
-    wanted it, since that is what the operator needs to know.
-
-    Never raises. The document informs an agent; the agent still runs without
-    it, so this cannot be allowed to cost anyone their grid.
-    """
     results: dict[str, sandbox_bootstrap.HostSkillInstalled] = {}
     try:
         _install_host_skills(panes, results)
     except Exception as exc:  # noqa: BLE001
-        # The whole body, not just the writes. `install_host_skill` already
-        # returns rather than raises, so what is left here is the reporting and
-        # the loop itself -- and a caller who closed stdout is enough to reach
-        # it. Partial results are kept: an agent whose skill did land should
-        # still get its pointer.
-        #
-        # `report`, NEVER `print`, and this line is the whole broken-pipe
-        # defence -- measured, not assumed. A closed stdout raises inside the
-        # try, and then raises AGAIN out of this handler, from inside the except
-        # block, where nothing catches it. So this guard cannot defend against
-        # the failure it looks like it was written for; it earns its keep
-        # against everything else. Writing `print` here restores the note #108
-        # grid-destruction defect with the guard still visibly in place.
-        report(f"amux: could not install amux's skill ({exc}); agents will run without it")
+        report(
+            f"amux: could not install amux's skill ({exc}); agents will run without it"
+        )
     return results
 
 
@@ -96,8 +72,6 @@ def _install_host_skills(
     results: dict[str, sandbox_bootstrap.HostSkillInstalled],
 ) -> None:
     for spec in panes:
-        # A raw command spec is not an agent amux knows, so it has no skill
-        # directory to install into and no flags amux may speak for.
         if spec.agent not in AGENT_COMMANDS:
             continue
         result = results.get(spec.agent)
@@ -106,10 +80,6 @@ def _install_host_skills(
                 spec.agent
             )
             if result.ok and result.changed:
-                # Named only when it replaced something. This is a directory the
-                # user curates by hand, and a developer whose `make install_skills`
-                # symlink just went away needs to see why their edits to the
-                # checkout copy stopped reaching newly spawned agents.
                 report(f"amux: installed amux's skill at {result.path}")
         if not result.ok:
             report(
@@ -121,7 +91,6 @@ def _install_host_skills(
 def host_skill_path(
     installed: dict[str, sandbox_bootstrap.HostSkillInstalled], agent: str
 ) -> str:
-    """Where `agent`'s document actually landed, or '' if it did not land."""
     result = installed.get(agent)
     return result.path if result is not None and result.ok else ""
 
@@ -131,18 +100,10 @@ class Launch:
     pane: str
     cwd: str = ""
     keys: tuple[str, ...] = ()
-    #: Text to send to the AGENT once its interface is up, as distinct from
-    #: `keys`, which are typed into a SHELL before the agent process exists.
-    #: Two different lifecycles, so they cannot share a field: keys sent late
-    #: would launch nothing, and a message sent early is silently swallowed by
-    #: a TUI that has not finished starting. Empty for every agent that needs
-    #: no message -- `claude` carries its pointer in the system prompt instead.
     bootstrap: str = ""
 
 
 class Runtime(Protocol):
-    """Prepares launches for one grid. One runtime per grid, chosen at spawn."""
-
     kind: str
 
     def preflight(
@@ -168,14 +129,10 @@ class Runtime(Protocol):
         self, *, workspace: str | None, task: str | None, cwd: str | None
     ) -> dict[str, list[str]]: ...
 
-    def rollback(self) -> list[str]:
-        """Unwind everything `prepare` created. Returns cleanup failures."""
-        ...
+    def rollback(self) -> list[str]: ...
 
 
 class HostRuntime:
-    """Agents run as host processes in per-agent git worktrees."""
-
     kind = HOST
 
     def preflight(
@@ -238,7 +195,6 @@ class HostRuntime:
         task: str | None,
         cwd: str | None,
     ) -> dict[str, str]:
-        """Per-agent git worktrees when the target dir is a repo."""
         if workspace and task and not cwd:
             print(
                 "amux: no directory resolved for "
@@ -273,9 +229,6 @@ GONE_RUNTIME_STATUSES = frozenset({"removed", "failed"})
 
 
 def sandbox_rows(workspace: str, task: str) -> list[dict]:
-    # Selects on the RUNTIME axis, never on `status`. `status` answers "was this
-    # work merged"; `runtime_status` answers "does a VM exist". Asking the first
-    # is how an integrated task leaked every sandbox it had.
     return [
         dict(row)
         for row in store.worktrees_for(workspace, task)
@@ -456,8 +409,6 @@ def _dirty_refusal(dirty: list[tuple[str, str]]) -> str:
 
 @dataclass(frozen=True)
 class SandboxConfig:
-    """Everything `--runtime docker-sandbox` needs beyond the grid itself."""
-
     resources: sandbox.Resources = field(default_factory=sandbox.Resources)
     port: int | None = None
 
@@ -467,19 +418,15 @@ class SandboxConfig:
 
     @property
     def policy_target(self) -> str:
-        """What the user must allow: the loopback address the service binds."""
         return f"localhost:{self.resolved_port}"
 
     @property
     def client_endpoint(self) -> str:
-        """What a sandbox dials. Docker routes this name back to the host."""
         return f"http://host.docker.internal:{self.resolved_port}"
 
 
 @dataclass
 class _Acquired:
-    """One sandbox's resources, in the order they were acquired."""
-
     spec: PaneSpec
     sandbox_name: str
     repo: str = ""
@@ -491,8 +438,6 @@ class _Acquired:
 
 
 class SandboxRuntime:
-    """Agents run inside per-agent Docker Sandbox microVMs."""
-
     kind = DOCKER_SANDBOX
 
     def __init__(
@@ -558,10 +503,6 @@ class SandboxRuntime:
 
         self._integration = worktree.setup_task_integration(repo, workspace, task)
 
-        # Once for the grid, not once per sandbox. `--share-skills` backs every
-        # VM's skill directory with the host's one, so there is exactly one
-        # destination per agent kind however many panes want it -- the same rule
-        # the host runtime follows, and the same spec scenario.
         host_installed: dict[str, sandbox_bootstrap.HostSkillInstalled] = (
             install_host_skills(panes) if self.config.resources.share_skills else {}
         )
@@ -647,22 +588,7 @@ class SandboxRuntime:
             handle, endpoint=self.config.client_endpoint, token=plaintext
         )
 
-        # The split, not a refusal. With --share-skills the sandbox's skill
-        # directory IS the host's ~/.claude/skills, so writing from inside the VM
-        # would push a file across the boundary the wrong way -- amux still will
-        # not do that. But the host-side install already writes that same
-        # directory on every spawn, so the document arrives from the host
-        # instead. Skipping used to leave one configuration (a shared-skills
-        # sandbox on a machine that never ran `make install_skills`) with no
-        # document at all; now neither branch does.
-        #
-        # `skill_path` is what LANDED, never what a path resolver can compute.
-        # Resolving it would send a codex agent to spend its whole first turn
-        # reading a document the warning above has just said is missing.
         if self.config.resources.share_skills:
-            # Under --share-skills the HOST write is what decides whether the
-            # in-VM path has anything behind it: the directory is the host's,
-            # and nothing was copied into this VM at all.
             skill_path = (
                 sandbox_bootstrap.sandbox_skill_destination(spec.agent, installed)
                 if host_skill_path(host_installed, spec.agent)
@@ -691,12 +617,8 @@ class SandboxRuntime:
         store.set_worktree_runtime(acquired.worktree_id, runtime_status="running")
         return Launch(
             pane=spec.pane,
-            cwd="",  # the pane's working directory is inside the VM
+            cwd="",
             keys=(sandbox.attach_command(name, spec.agent, spec.request),),
-            # The IN-SANDBOX path, not the host one. Under --share-skills the
-            # bytes come from the host directory, but the agent still reads them
-            # through its own `$HOME`, and a host path means nothing inside a VM.
-            # Empty when the install did not land -- see `skill_path` above.
             bootstrap=skill_bootstrap_message(spec.agent, skill_path),
         )
 

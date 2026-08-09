@@ -1,5 +1,3 @@
-# Host-side context service
-
 from __future__ import annotations
 
 import argparse
@@ -28,7 +26,6 @@ from amux.shared import DEFAULT_SOCKET
 SERVICE_NAME = "amux-context"
 API_VERSION = "v1"
 
-# Not a setting. See the module docstring.
 LOOPBACK = "127.0.0.1"
 
 DEFAULT_PORT = 47317
@@ -39,13 +36,11 @@ ENV_PORT = "AMUX_CONTEXT_PORT"
 ENV_DB = "AMUX_CONTEXT_DB"
 ENV_SOCKET = "AMUX_CONTEXT_SOCKET"
 
-# `secrets.token_urlsafe(32)` is 43 characters; the cap only exists so an
-# unauthenticated caller cannot make us hash arbitrary amounts of input.
 MAX_TOKEN_CHARS = 512
 
 
 class ConfigError(ValueError):
-    """Bad service configuration — actionable, printed, never a traceback."""
+    pass
 
 
 ERROR_STATUS: dict[str, int] = {
@@ -141,10 +136,10 @@ def configure_logging(
 @dataclass(frozen=True)
 class ServiceConfig:
     port: int = DEFAULT_PORT
-    db_path: Path | None = None  # None -> store.DB_PATH
-    socket: str = DEFAULT_SOCKET  # tmux server whose pane options we update
-    state_dir: Path | None = None  # None -> shared.STATE_DIR, resolved late
-    log_path: Path | None = None  # None -> state_home/LOG_NAME
+    db_path: Path | None = None
+    socket: str = DEFAULT_SOCKET
+    state_dir: Path | None = None
+    log_path: Path | None = None
     max_body_bytes: int = 64 * 1024
     max_text_chars: int = 4000
     max_detail_chars: int = 2000
@@ -218,7 +213,6 @@ class ServiceConfig:
 
     @property
     def log_file(self) -> Path:
-        """Redacted service log, under the amux state directory by default."""
         return self.log_path or self.state_home / LOG_NAME
 
 
@@ -231,8 +225,6 @@ AGENT_PERMISSIONS = (PERM_CONTEXT_READ, PERM_NOTES_WRITE, PERM_EVENTS_WRITE)
 
 @dataclass(frozen=True)
 class Identity:
-    """Caller identity"""
-
     worktree_id: int
     token_id: int = 0
     pane: str = ""
@@ -305,7 +297,6 @@ def store_authenticator(service: ContextService, token: str) -> Identity:
 
 
 def reject_all_tokens(service: ContextService, token: str) -> Identity:
-    """An authenticator for a service that should have no callers at all."""
     raise ServiceError("unauthorized", _UNAUTHORIZED)
 
 
@@ -341,7 +332,7 @@ def require_permission(identity: Identity, permission: str) -> None:
 
 @dataclass(frozen=True)
 class SchemaInfo:
-    version: int | None  # None: the store could not be opened
+    version: int | None
     expected: int
 
     @property
@@ -386,7 +377,7 @@ Handler = Callable[["ContextService", Request], "tuple[int, dict[str, Any]]"]
 class Route:
     handler: Handler
     public: bool = False
-    requires: str = ""  # capability this operation needs
+    requires: str = ""
 
 
 _ROUTES: dict[tuple[str, str], Route] = {}
@@ -405,8 +396,6 @@ def route(
 
 
 def _normalize_path(path: str) -> str:
-    """Trailing-slash tolerance, and nothing else. Routing is exact-match, so
-    an encoded or dot-segmented path simply does not resolve."""
     return path.rstrip("/") or "/"
 
 
@@ -425,12 +414,6 @@ def _token_from_authorization(raw: str) -> str:
 
 
 class ContextService:
-    """Policy: authentication, routing, and the store the handlers read.
-
-    Holds no per-request state, so `ThreadingHTTPServer` can call `handle`
-    from several threads at once.
-    """
-
     def __init__(
         self,
         config: ServiceConfig | None = None,
@@ -503,7 +486,6 @@ class ContextService:
             return server
 
     def build_context(self, identity: Identity) -> dict[str, Any]:
-        """`core.build_context` for a sandboxed caller."""
         try:
             context = core.build_context(
                 self.tmux_server(identity.socket), identity.pane
@@ -521,8 +503,6 @@ class ContextService:
             "sandbox_name": identity.sandbox_name,
             "sandbox_id": identity.sandbox_id,
         }
-        # From the worktree row, because a sandboxed agent cannot read tmux
-        # pane options. Same omit-when-absent rule as the host path.
         for key in ("model", "effort"):
             value = getattr(identity, key)
             if value:
@@ -533,10 +513,6 @@ class ContextService:
             context["self"],
             *(a for t in context["team"] for a in t["agents"]),
         ]:
-            # A sandbox row has no host worktree, and `git -C ""` silently runs
-            # wherever the service happens to live — which would report the
-            # host's own checkout as the agent's last commit. Task 5.4 makes
-            # core runtime-aware; this boundary must not pass it on regardless.
             if entry.get("worktree") == "" and entry.get("last_commit"):
                 entry["last_commit"] = ""
         return context
@@ -589,8 +565,6 @@ def _int_param(
 
 
 def _cursor_param(request: Request, name: str) -> int | None:
-    """A cursor, where absent and zero are different things: 0 means "from the
-    beginning of my walk", which is not the same as "just give me a page"."""
     raw = _one(request, name)
     if raw is None or raw == "":
         return None
@@ -673,7 +647,6 @@ def _context(service: ContextService, request: Request) -> tuple[int, dict[str, 
 
 @route("GET", "/v1/notes", requires=PERM_CONTEXT_READ)
 def _notes(service: ContextService, request: Request) -> tuple[int, dict[str, Any]]:
-    """Visible notes"""
     caller = request.caller
     require_scope(
         caller, workspace=_one(request, "workspace"), repo=_one(request, "repo")
@@ -707,8 +680,6 @@ def _notes(service: ContextService, request: Request) -> tuple[int, dict[str, An
             task=task,
             scope=scope,
             kind=kind,
-            # Narrow to this pane, never widen: an agent-scoped query from
-            # anyone else must not return this agent's private notes.
             pane=caller.pane if scope == "agent" else None,
             repo=caller.repo,
             limit=limit,
@@ -720,7 +691,6 @@ def _notes(service: ContextService, request: Request) -> tuple[int, dict[str, An
 
 @route("POST", "/v1/notes", requires=PERM_NOTES_WRITE)
 def _add_note(service: ContextService, request: Request) -> tuple[int, dict[str, Any]]:
-    """Publish a note as the caller."""
     caller = request.caller
     text = _text_field(request.body, "text", service.config.max_text_chars)
     scope = _choice_field(request.body, "scope", store.NOTE_SCOPES, "task")
@@ -773,7 +743,6 @@ def _note_by_id(
 EVENT_KINDS: tuple[str, ...] = tuple(events.STATE_BY_KIND)
 AGENT_STATES: tuple[str, ...] = tuple(dict.fromkeys(events.STATE_BY_KIND.values()))
 
-# What `events.wait` blocks for when a caller names nothing.
 DEFAULT_WAIT_STATES: tuple[str, ...] = ("idle", "needs-input", "dead")
 
 
@@ -821,7 +790,6 @@ def _pane_param(service: ContextService, request: Request) -> str:
 
 @route("POST", "/v1/events", requires=PERM_EVENTS_WRITE)
 def _add_event(service: ContextService, request: Request) -> tuple[int, dict[str, Any]]:
-    """Record a state change for the caller and update its host pane."""
     caller = request.caller
     kind = _choice_field(request.body, "kind", EVENT_KINDS, "")
     detail = _text_field(
@@ -860,8 +828,6 @@ def _add_event(service: ContextService, request: Request) -> tuple[int, dict[str
             "state": state,
         },
         "cursor": event_id,
-        # False when the host pane is gone — a stopped grid with a live
-        # sandbox. The event is still recorded; nothing was signalled.
         "pane_updated": bool(alive),
     }
 
@@ -870,7 +836,6 @@ def _add_event(service: ContextService, request: Request) -> tuple[int, dict[str
 def _event_state(
     service: ContextService, request: Request
 ) -> tuple[int, dict[str, Any]]:
-    """Resolved state for the panes in the caller's workspace."""
     caller = request.caller
     panes = [
         entry
@@ -884,7 +849,6 @@ def _event_state(
 def _event_wait(
     service: ContextService, request: Request
 ) -> tuple[int, dict[str, Any]]:
-    """Block until a pane reaches one of `states`, or until the cap expires."""
     caller = request.caller
     pane = _pane_param(service, request)
     wanted = _states_param(request)
@@ -915,7 +879,6 @@ def _event_wait(
 def _events_after(
     service: ContextService, pane: str, after: int | None
 ) -> list[dict[str, Any]]:
-    """A pane's events past a cursor, oldest first and bounded."""
     rows = store.iter_events(pane=pane, db_path=service.db_path)
     if after is not None:
         rows = [r for r in rows if int(r["id"]) > after]
@@ -1096,7 +1059,7 @@ class _Handler(BaseHTTPRequestHandler):
     do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = _unsupported_method
 
     def log_request(self, *args: Any, **kwargs: Any) -> None:
-        pass  # _serve writes the access line, with a status and a duration.
+        pass
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         self.service.log.debug(redact(format % args))
@@ -1108,7 +1071,7 @@ class _Handler(BaseHTTPRequestHandler):
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
     block_on_close = False
-    allow_reuse_address = True  # TIME_WAIT only; a live listener still collides
+    allow_reuse_address = True
 
     def __init__(
         self, address: tuple[str, int], handler: type[_Handler], service: ContextService
@@ -1126,8 +1089,6 @@ class _Server(ThreadingHTTPServer):
 
 
 def build_server(service: ContextService) -> ThreadingHTTPServer:
-    """Bind the loopback listener. A busy port is a hard failure: there is no
-    second, weaker listener to fall back to."""
     try:
         return _Server(service.config.address, _Handler, service)
     except OSError as exc:
@@ -1142,9 +1103,6 @@ def build_server(service: ContextService) -> ThreadingHTTPServer:
 
 @dataclass
 class ServiceHandle:
-    """A running service. `port` is the bound one, which matters when the
-    configured port was 0."""
-
     service: ContextService
     server: ThreadingHTTPServer
     thread: threading.Thread | None = None
@@ -1171,7 +1129,6 @@ def start_service(
     server_factory: Callable[[str], Any] | None = None,
     log_stream: Any | None = None,
 ) -> ServiceHandle:
-    """Start the service on a background thread and return a handle to it."""
     service = ContextService(
         config, authenticator=authenticator, server_factory=server_factory
     )
@@ -1207,11 +1164,11 @@ ServiceState = Literal["running", "stopped", "stale", "unresponsive"]
 
 
 class ServiceLifecycleError(RuntimeError):
-    """A start, stop, or status operation that could not be completed safely."""
+    pass
 
 
 class ServiceStartupError(ServiceLifecycleError):
-    """The listener could not be opened. Never a reason to open a weaker one."""
+    pass
 
 
 @dataclass(frozen=True)
@@ -1240,11 +1197,6 @@ def runfile_path(config: ServiceConfig) -> Path:
 
 
 def read_runfile(config: ServiceConfig) -> RunFile | None:
-    """The recorded service, or None when there is none to believe.
-
-    A corrupt run file reads as no run file: it is a hint, and the process
-    check behind it is the actual evidence.
-    """
     path = runfile_path(config)
     try:
         return RunFile.from_json(path.read_text())
@@ -1256,7 +1208,6 @@ def read_runfile(config: ServiceConfig) -> RunFile | None:
 
 
 def write_runfile(config: ServiceConfig, run: RunFile) -> Path:
-    """Claim the run file atomically, so a reader never sees half of one."""
     path = runfile_path(config)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{run.pid}.tmp")
@@ -1266,8 +1217,6 @@ def write_runfile(config: ServiceConfig, run: RunFile) -> Path:
 
 
 def remove_runfile(config: ServiceConfig, only_pid: int | None = None) -> None:
-    """Release the run file, optionally only if it is still ours — a service
-    that outlived its own file must not delete its successor's."""
     run = read_runfile(config)
     if run is None or (only_pid is not None and run.pid != only_pid):
         return
@@ -1275,15 +1224,6 @@ def remove_runfile(config: ServiceConfig, only_pid: int | None = None) -> None:
 
 
 def _is_zombie(pid: int) -> bool:
-    """Whether a pid is a process that has exited but not yet been reaped.
-
-    `kill(pid, 0)` cannot tell: the kernel keeps the slot until the parent reads
-    the exit status, and answers as if it were alive until then. We are often
-    not that parent — a service started by an amux process that is still running
-    is *its* child — so ask the process table. Only reached when the pid already
-    looks alive, so the cost is one `ps` on a path that is either rare (status)
-    or already waiting on a process (stop).
-    """
     try:
         out = subprocess.run(
             ["ps", "-o", "state=", "-p", str(pid)],
@@ -1292,44 +1232,28 @@ def _is_zombie(pid: int) -> bool:
             timeout=5,
         )
     except (OSError, subprocess.SubprocessError):
-        return False  # no evidence of death is not evidence of death
+        return False
     return out.stdout.strip().upper().startswith("Z")
 
 
 def _pid_alive(pid: int) -> bool:
-    """Whether a pid is a process that could still be serving."""
     if pid <= 0:
         return False
     try:
         if os.waitpid(pid, os.WNOHANG)[0] == pid:
-            return False  # our own child, and it has exited
+            return False
     except OSError:
-        pass  # not our child, or we have none
+        pass
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True  # someone else's process, but it is there
+        return True
     return not _is_zombie(pid)
 
 
 def probe_health(port: int, timeout: float = 2.0) -> dict[str, Any] | None:
-    """`GET /healthz` against a loopback port, or None if nothing usable answered.
-
-    A degraded service still answers, so the payload — not the status — is what
-    says whether it is usable.
-
-    Every failure is the same answer, deliberately, and the *kind* of failure is
-    never branched on. Two reasons. A blocked host surfaces as a connection
-    reset, not a name-resolution error (note #63: a real balanced-policy denial
-    of `host.docker.internal` reads as "Remote end closed connection without
-    response"), so code that expected a resolution failure would send the user
-    to fix a hostname that is fine. And something non-HTTP listening on the port
-    raises `HTTPException` rather than `OSError` — `BadStatusLine` for a server
-    that answers with anything else — which is a port collision, exactly the
-    case `status` calls unresponsive, and it must not arrive as a traceback.
-    """
     conn = http.client.HTTPConnection(LOOPBACK, port, timeout=timeout)
     try:
         conn.request("GET", "/healthz")
@@ -1360,7 +1284,6 @@ class ServiceStatus:
 
 
 def status(config: ServiceConfig | None = None) -> ServiceStatus:
-    """What the state directory says about the service, checked against reality."""
     config = config or ServiceConfig()
     run = read_runfile(config)
     if run is None:
@@ -1420,10 +1343,10 @@ def launch_argv(config: ServiceConfig) -> list[str]:
 def _default_launcher(config: ServiceConfig) -> subprocess.Popen:
     return subprocess.Popen(
         launch_argv(config),
-        start_new_session=True,  # survives the shell that asked for it
+        start_new_session=True,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,  # the service logs to its own file
+        stderr=subprocess.DEVNULL,
     )
 
 
@@ -1464,7 +1387,6 @@ def stop(
     timeout: float = 10.0,
     force: bool = False,
 ) -> ServiceStatus:
-    """Signal the recorded service and wait for it to go."""
     config = config or ServiceConfig()
     current = status(config)
     if current.state == "stopped":
@@ -1503,7 +1425,6 @@ def serve_foreground(
     stream: Any | None = None,
     ready: Callable[[ServiceHandle], None] | None = None,
 ) -> int:
-    """Run the service in this process until it is signalled."""
     config = config or ServiceConfig()
     log = configure_logging(config, stream=stream or sys.stderr)
     try:
@@ -1535,7 +1456,7 @@ def serve_foreground(
         try:
             signal.signal(signum, shut_down)
         except ValueError:
-            pass  # not the main thread; the caller owns shutdown
+            pass
 
     log.info(
         "%s serving on %s:%d, pid %d, schema %s",
@@ -1562,7 +1483,6 @@ ACTIONS = ("serve", "start", "status", "stop")
 def run_action(
     action: str, config: ServiceConfig, *, force: bool = False
 ) -> tuple[int, str]:
-    """Perform one lifecycle action and return `(exit code, message)`."""
     if action == "serve":
         return serve_foreground(config), ""
     try:

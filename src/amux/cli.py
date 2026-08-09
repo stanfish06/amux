@@ -66,7 +66,6 @@ _SANDBOX_ONLY = ("cpus", "memory", "share_skills", "context_port")
 
 
 def _service_probe(port: int):
-    # `sandbox.preflight` probes whether the context service is usable.
 
     def probe() -> tuple[bool, str]:
         result = context_service.status(context_service.ServiceConfig(port=port))
@@ -81,7 +80,6 @@ def _service_probe(port: int):
 
 
 def _resolve_runtime(args) -> runtime.Runtime | None:
-    # The runtime used by a spawn should use, or None for the default host one.
 
     chosen = getattr(args, "runtime", HOST)
     given = [
@@ -98,7 +96,6 @@ def _resolve_runtime(args) -> runtime.Runtime | None:
         memory=defaults.memory if args.memory is None else args.memory,
         share_skills=bool(args.share_skills),
     )
-    # Before tmux, git, or the database is touched.
     resources.validate()
     config = runtime.SandboxConfig(resources=resources, port=args.context_port)
     return runtime.SandboxRuntime(
@@ -113,7 +110,6 @@ def _resolve_grid(args) -> tuple[int, int, list[AgentRequest]]:
 
 
 def _spec_text(request: AgentRequest) -> str:
-    """The request back in spec form; identical to the agent kind when untuned."""
     model = f"@{request.model}" if request.model else ""
     effort = f"/{request.effort}" if request.effort else ""
     return f"{request.agent}{model}{effort}"
@@ -147,7 +143,6 @@ def _cmd_spw(server, args) -> int:
 
 
 def _workspace_dir(workspace: str) -> str | None:
-    # Where a task runs when `-p` is omitted: the workspace's own repository.
 
     for row in reversed(store.worktrees_for(workspace)):
         if row["repo"]:
@@ -222,13 +217,10 @@ def _cmd_kg(server, args) -> int:
     window = _get_window(session, args.task)
     _check_force(args)
     if args.clean:
-        # Deliberately unguarded: a refusal must propagate past the terminate()
-        # below, because killing the window would leave the surviving sandboxes
-        # with no amux command that can address them.
         runtime.clean_task(args.workspace, args.task, force=args.force)
         worktree.remove_task(args.workspace, args.task)
     else:
-        runtime.stop_task(args.workspace, args.task)  # see `_cmd_kw`
+        runtime.stop_task(args.workspace, args.task)
     core.load_agent_grid(window).terminate()
     print(f"killed {ALIAS['window']} '{args.task}' in '{args.workspace}'")
     return 0
@@ -277,9 +269,6 @@ def _cmd_note(server, args) -> int:
 
 def _cmd_notes(server, args) -> int:
     if args.workspace or args.repo:
-        # agent-scoped notes are private to their pane on every route, not just
-        # the pane one below; without a pane filter here --workspace would hand
-        # out every teammate's private notes.
         pane = None
         if args.scope == "agent":
             pane = args.pane or events.self_pane_id()
@@ -314,7 +303,6 @@ def _cmd_notes(server, args) -> int:
                 task=args.task or task,
                 scope=args.scope,
                 kind=args.kind,
-                # see above: narrow to this pane, never widen.
                 pane=pane if args.scope == "agent" else None,
                 repo=repo,
                 limit=args.n,
@@ -689,8 +677,6 @@ def main(argv: list[str] | None = None) -> int:
         help="agent spec to check, repeatable (default: claude); tuning is "
         "parsed but only the agent kind is checked",
     )
-    # Unlike spw/spg, doctor exists *to* inspect the optional backend, so
-    # checking it is the useful default.
     _add_sandbox_args(p_doctor, runtime_default=DOCKER_SANDBOX)
     p_doctor.set_defaults(func=_cmd_doctor)
 

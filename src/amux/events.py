@@ -75,7 +75,6 @@ def _amux_socket() -> str | None:
 
 
 def _socket_args(socket: str) -> list[str]:
-    """`-S` for a socket path (what $TMUX holds), `-L` for a socket name."""
     return ["-S", socket] if socket.startswith("/") else ["-L", socket]
 
 
@@ -88,9 +87,6 @@ def _tmux(socket: str, *args: str) -> None:
 
 
 def _tmux_out(socket: str, *args: str) -> str | None:
-    """stdout of a tmux query, or None when tmux refused it. Trims newlines
-    only: str.strip() counts \x1f as whitespace and would eat _PANE_FORMAT's
-    trailing delimiters."""
     out = subprocess.run(
         ["tmux", *_socket_args(socket), *args],
         capture_output=True,
@@ -100,7 +96,6 @@ def _tmux_out(socket: str, *args: str) -> str | None:
 
 
 def self_pane_id() -> str | None:
-    """Pane id of the calling process when inside an amux pane, else None."""
     if _amux_socket() is None:
         return None
     return os.environ.get("TMUX_PANE") or None
@@ -111,14 +106,11 @@ def _wait_channel(pane: str) -> str:
 
 
 def publish_state(pane: str, state: AgentState, socket: str) -> None:
-    """Set a pane's state option and wake anything waiting on it."""
     _tmux(socket, "set-option", "-p", "-t", pane, STATE_OPTION, state)
     _tmux(socket, "wait-for", "-S", _wait_channel(pane))
 
 
 def _scope_from_registry(pane: str) -> tuple[str, str]:
-    """Fallback for a pane tmux no longer has: the worktree it fronted.
-    Unbounded on purpose — a gone pane has no session to date rows against."""
     row = store.worktree_for_pane(pane)
     return (row["workspace"], row["task"]) if row else ("", "")
 
@@ -126,8 +118,6 @@ def _scope_from_registry(pane: str) -> tuple[str, str]:
 def resolve_scope(
     pane: str, socket: str | None = None, facts: PaneFacts | None = None
 ) -> tuple[str, str]:
-    """Map a pane to its (workspace, task): live tmux first, then the worktree
-    registry, else ("", ""). `facts` reuses a query the caller already made."""
     facts = facts or pane_facts(pane, socket)
     if facts.alive and facts.workspace:
         return facts.workspace, facts.task
@@ -141,8 +131,6 @@ def emit(
     detail: str = "",
     socket: str | None = None,
 ) -> Event | None:
-    """Record a state change. Hooks let the socket come from $TMUX; `spw`/`spg`
-    run outside tmux and pass the socket they are building on."""
     socket = socket or _amux_socket()
     if socket is None:
         return None
@@ -197,10 +185,6 @@ def tail(
 
 
 def in_incarnation(event: Event | None, boundary: float | None) -> Event | None:
-    """Drop an event a previous holder of this pane id wrote: `%N` restarts at
-    zero with the tmux server, while the store keeps every generation.
-    `boundary` is the pane's session creation time. Sole owner of that rule.
-    """
     if event and boundary is not None and event.ts < boundary:
         return None
     return event
@@ -213,10 +197,6 @@ def resolve_state(
     latest: Event | None = None,
     now: float | None = None,
 ) -> AgentState | None:
-    """The state of one pane. `latest` must already have been through
-    `in_incarnation`. `alive` is tmux's answer: True there, False gone, None
-    could not be asked — only False is evidence of death.
-    """
     if alive is False:
         return "dead"
     state = cast("AgentState | None", option or (latest.state if latest else None))
@@ -230,8 +210,6 @@ def resolve_state(
 
 
 def _as_ts(value: str) -> float | None:
-    """A tmux timestamp, or None if unparseable. Not 0.0, which would read
-    downstream as "no cut-off needed"."""
     try:
         return float(value)
     except ValueError:
@@ -255,9 +233,6 @@ _PANE_FIELDS = (
     "#{@amux_effort}",
     _SENTINEL,
 )
-# Everything tmux can hand back with the delimiter in it, so it all lives
-# behind the same exact-field-count guard in `_parse_pane`. Model and effort
-# are unvalidated pass-through values, which puts them squarely in here.
 _FREE_TEXT = slice(7, 13)
 _DELIM = "\x1f"
 _PANE_FORMAT = _DELIM.join(_PANE_FIELDS)
@@ -265,10 +240,6 @@ _PANE_FORMAT = _DELIM.join(_PANE_FIELDS)
 
 @dataclass
 class PaneFacts:
-    """What tmux knows about one pane, from a single query. `alive` is whether
-    the pane is there, `kind` whether it is one of ours; both carry None for
-    "could not tell", which is not the same as no."""
-
     alive: bool | None
     kind: PaneKind | None = None
     created: float | None = None
@@ -292,17 +263,10 @@ class PaneFacts:
 
     @property
     def boundary(self) -> float | None:
-        """Cut-off for store rows about this pane, or None once it is gone.
-        Pure: `_parse_pane` dates every live row, failing closed to now when
-        tmux cannot date the session."""
         return self.created if self.alive else None
 
 
 def _parse_pane(line: str) -> PaneFacts:
-    """One row of `_PANE_FORMAT`. No pane id means the pane is gone; any other
-    row that will not line up is a parsing problem, and tmux naming the pane is
-    proof it is there, so keep what is trustworthy and claim nothing else.
-    """
     fields = line.split(_DELIM)
     if not fields[0].startswith("%"):
         return PaneFacts(alive=False)
@@ -331,8 +295,6 @@ def _parse_pane(line: str) -> PaneFacts:
 
 
 def pane_facts(pane: str, socket: str | None = None) -> PaneFacts:
-    """tmux exits 0 for a target it cannot resolve and expands the format to
-    nothing, so its own id must come back for the pane to count as there."""
     if not pane:
         return PaneFacts(alive=None)
     socket = socket or _amux_socket()
@@ -354,8 +316,6 @@ def pane_facts(pane: str, socket: str | None = None) -> PaneFacts:
 def pane_status(
     pane: str, socket: str | None = None, facts: PaneFacts | None = None
 ) -> tuple[AgentState | None, Event | None]:
-    """(state, last event of this pane's current incarnation) for one pane.
-    `facts` skips the tmux query for callers that already made it."""
     facts = facts or pane_facts(pane, socket)
     row = store.latest_event(pane)
     latest = in_incarnation(Event.from_row(row) if row else None, facts.boundary)
@@ -371,8 +331,6 @@ def current_state(pane: str, socket: str | None = None) -> AgentState | None:
 
 @dataclass
 class PaneContext:
-    """Where a pane's writes belong: its scope and the worktree it fronts."""
-
     workspace: str
     task: str
     worktree: dict | None
@@ -389,8 +347,6 @@ def pane_context(pane: str, socket: str | None = None) -> PaneContext:
 
 
 def pane_states(socket: str | None = None) -> list[dict]:
-    """Resolved state for every pane on the amux server, in one tmux call and
-    one store query — the monitor's per-refresh view."""
     socket = socket or _amux_socket() or DEFAULT_SOCKET
     listing = _tmux_out(socket, "list-panes", "-a", "-F", _PANE_FORMAT)
     if not listing:
@@ -409,7 +365,7 @@ def pane_states(socket: str | None = None) -> list[dict]:
 
     newest_by_pane: dict[str, Event] = {}
     for row in store.events_for_panes(list(facts_by_pane), since=floor):
-        newest_by_pane[row["pane"]] = Event.from_row(row)  # rows arrive oldest first
+        newest_by_pane[row["pane"]] = Event.from_row(row)
 
     rows = store.worktrees_for_panes(list(facts_by_pane), since=floor)
 
@@ -447,7 +403,6 @@ def pane_states(socket: str | None = None) -> list[dict]:
 
 
 def runtime_identity(row) -> dict:
-    """Runtime fields for a monitor row, or {} for a host agent."""
     if row is None:
         return {}
     from amux import core
@@ -456,7 +411,6 @@ def runtime_identity(row) -> dict:
 
 
 def runtime_aware_state(state: AgentState | None, row) -> AgentState | None:
-    """Fold the execution's runtime lifecycle into its resolved pane state."""
     if row is None or state is None:
         return state
     keys = row.keys() if hasattr(row, "keys") else row
@@ -495,8 +449,6 @@ def wait(
 
 
 def _hook_payload() -> dict:
-    """JSON that Claude Code pipes to hook commands on stdin (empty if run
-    interactively or the payload is malformed)."""
     if sys.stdin.isatty():
         return {}
     try:
@@ -509,15 +461,15 @@ def cmd_emit(server, args) -> int:
     payload = _hook_payload() if args.detail is None else {}
     detail = (
         args.detail
-        or payload.get("message")  # Notification: what the agent is asking
-        or payload.get("tool_name")  # PreToolUse: which tool went busy
-        or payload.get("reason")  # SessionEnd: why it exited
+        or payload.get("message")
+        or payload.get("tool_name")
+        or payload.get("reason")
         or ""
     )
     try:
         emit(args.kind, pane=args.pane, agent=args.agent, detail=detail)
     except Exception:
-        pass  # a hook must never look like an agent failure
+        pass
     return 0
 
 

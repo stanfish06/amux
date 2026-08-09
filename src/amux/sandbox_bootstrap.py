@@ -21,25 +21,19 @@ SKILL_MODE = "644"
 
 
 class BootstrapError(Exception):
-    """A sandbox operation failed, or refused to proceed."""
+    pass
 
 
 class HookMergeErrorFromImage(BootstrapError):
-    """The image shipped agent configuration amux will not silently overwrite."""
+    pass
 
 
 class SandboxOps(Protocol):
-    """The sandbox operations bootstrap needs. `sandbox.py` implements this."""
-
     name: str
 
-    def copy_in(self, source: Path, destination: str) -> None:
-        """Copy a host file to an absolute path inside the sandbox."""
-        ...
+    def copy_in(self, source: Path, destination: str) -> None: ...
 
-    def exec(self, argv: Sequence[str], *, user: str | None = None) -> str:
-        """Run a command inside the sandbox and return its stdout."""
-        ...
+    def exec(self, argv: Sequence[str], *, user: str | None = None) -> str: ...
 
 
 @dataclass(frozen=True)
@@ -62,13 +56,6 @@ class Installed:
 
 @dataclass(frozen=True)
 class SkillInstalled:
-    """Where amux's own skill landed, or why it did not.
-
-    A sandbox without the skill still works — the shim, its capability, and the
-    hooks are what make an agent functional — so `reason` carries the failure
-    instead of an exception, and spawning continues degraded.
-    """
-
     path: str = ""
     reason: str = ""
 
@@ -79,14 +66,6 @@ class SkillInstalled:
 
 @dataclass(frozen=True)
 class HostSkillInstalled:
-    """Where amux's own skill landed on the host, or why it did not.
-
-    Mirrors `SkillInstalled` so `runtime.py` can report a host failure and a
-    sandbox failure in one voice. `changed` is the extra field the host needs:
-    the destination is a directory the user curates by hand, so amux names the
-    path when it actually replaced something and stays quiet otherwise.
-    """
-
     path: str = ""
     reason: str = ""
     changed: bool = False
@@ -98,8 +77,6 @@ class HostSkillInstalled:
 
 @dataclass(frozen=True)
 class HooksInstalled:
-    """The result of wiring one agent's hooks, including what it cannot report."""
-
     agent: str
     settings_path: str
     missing_kinds: tuple[str, ...]
@@ -121,7 +98,6 @@ CLIENT_MODULE = "sandbox_client.py"
 
 
 def client_source() -> Path:
-    """The shim file to copy into a sandbox."""
     from amux import sandbox_client
 
     source = Path(sandbox_client.__file__ or "")
@@ -139,15 +115,6 @@ SKILL_FILE = "SKILL.md"
 
 
 def skill_source() -> Path:
-    """amux's own skill document, to install into a sandbox.
-
-    Unlike the shim, this does not live in the package — `skills/amux/SKILL.md`
-    at the repository root is the single copy the host Makefile links into
-    `~/.claude/skills` and `~/.codex/skills`, and duplicating it under `src/`
-    would let the two drift. So look in both places amux actually runs from:
-    beside the package (where a PyInstaller `--add-data` unpacks it) and at the
-    repository root (a checkout or an editable install).
-    """
     from amux import sandbox_client
 
     package = Path(sandbox_client.__file__ or "").parent
@@ -171,14 +138,6 @@ def install_skill(
     *,
     source: Path | None = None,
 ) -> SkillInstalled:
-    """Install amux's skill into the sandbox's skill directory for `agent`.
-
-    A sandboxed agent cannot read the host's skills — amux creates every sandbox
-    with `--no-share-skills` — yet this document is precisely what tells it which
-    commands cross the host boundary. Without it the agent has to discover the
-    boundary by tripping over it, so amux ships the skill the same way it ships
-    the shim: explicitly, as part of bootstrap.
-    """
     try:
         document = source or skill_source()
         destination = sandbox_skill_destination(agent, installed)
@@ -191,22 +150,11 @@ def install_skill(
 
 
 def sandbox_skill_destination(agent: str, installed: Installed) -> str:
-    """Where `agent` reads amux's skill from inside its sandbox.
-
-    Resolved rather than reported, because under `--share-skills` nothing is
-    written inside the VM at all -- the directory is backed by the host's -- and
-    the agent still has to be told where to look.
-    """
     skills = sandbox_hooks.hooks_for(agent).skills_relpath
     return posixpath.join(installed.home, skills, SKILL_NAME, SKILL_FILE)
 
 
 def host_skill_destination(agent: str, *, home: Path | None = None) -> Path:
-    """Where `agent` reads amux's skill from on the host.
-
-    The same per-agent directory the sandbox install uses, resolved under a
-    host `$HOME` instead of the sandbox's.
-    """
     skills = sandbox_hooks.hooks_for(agent).skills_relpath
     root = Path.home() if home is None else home
     return root / skills / SKILL_NAME / SKILL_FILE
@@ -218,12 +166,6 @@ def install_host_skill(
     home: Path | None = None,
     source: Path | None = None,
 ) -> HostSkillInstalled:
-    """Install amux's skill into the host skill directory `agent` reads.
-
-    A host agent's copy used to come from `make install_skills`, so an amux
-    installed any other way left the agent with no document at all. Spawning
-    writes it instead, unconditionally, which is also what keeps it current.
-    """
     try:
         document = source or skill_source()
         destination = host_skill_destination(agent, home=home)
@@ -234,23 +176,10 @@ def install_host_skill(
         destination.chmod(int(SKILL_MODE, 8))
         return HostSkillInstalled(path=str(destination), changed=changed)
     except Exception as exc:  # noqa: BLE001
-        # Deliberately everything. This runs inside `HostRuntime.prepare`, and
-        # core turns anything escaping prepare into a `GridCreationError` *with
-        # runtime rollback* -- which for a docker-sandbox grid destroys the
-        # microVMs over a markdown file. A named catch list is a bet on knowing
-        # every way `$HOME` can fail: `Path.home()` alone raises `RuntimeError`
-        # where its pwd fallback fails, which the previous list did not cover.
         return HostSkillInstalled(reason=str(exc) or type(exc).__name__)
 
 
 def _clear_host_destination(destination: Path, payload: bytes) -> bool:
-    """Replace a symlinked destination, and say whether the write changes anything.
-
-    `make install_skills` symlinks `~/.claude/skills/amux` into a checkout, so
-    writing through it would edit `skills/amux/SKILL.md` in the developer's own
-    working tree. The link is unlinked and replaced by a real directory instead;
-    the file it pointed at is left exactly as it was.
-    """
     replaced = False
     for path in (destination.parent, destination):
         if path.is_symlink():
@@ -261,8 +190,6 @@ def _clear_host_destination(destination: Path, payload: bytes) -> bool:
     try:
         return destination.read_bytes() != payload
     except OSError:
-        # Absent, unreadable, or not a file: amux cannot show it is a no-op,
-        # and claiming one would hide the overwrite it is about to do.
         return True
 
 
@@ -501,9 +428,5 @@ def _deliver(
     mode: str,
 ) -> None:
     _copy(ops, token, source, destination)
-    # chown MUST precede chmod: sbx cp lands files under the HOST uid, and the
-    # agent cannot chmod what it does not own. Note chmod on an already-correct
-    # mode succeeds anyway — coreutils elides the syscall — so a missing chown
-    # surfaces two steps later at the next file, not here.
     _exec(ops, token, ["chown", who.owner, destination], user="root")
     _exec(ops, token, ["chmod", mode, destination])
