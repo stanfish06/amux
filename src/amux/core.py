@@ -376,7 +376,7 @@ def send_bootstrap(
     poll = BOOTSTRAP_POLL_S if poll is None else poll
     pause = BOOTSTRAP_SUBMIT_PAUSE_S if pause is None else pause
     try:
-        return _send_bootstrap(
+        return submit_to_interface(
             pane,
             text,
             timeout=timeout,
@@ -391,7 +391,7 @@ def send_bootstrap(
         return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
 
 
-def _send_bootstrap(
+def submit_to_interface(
     pane: Pane, text: str, *, timeout: float, poll: float, pause: float, clock, sleep
 ) -> str:
     deadline = clock() + timeout

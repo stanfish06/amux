@@ -304,6 +304,24 @@ def test_text_still_stuck_after_a_second_enter_is_reported():
     assert verbs(p).count("send_keys") == 1
 
 
+def test_shared_submission_reports_a_message_left_in_the_composer():
+    stuck = capture("codex_0.146.0_text_on_the_input_line")
+    p = pane(capture("codex_0.146.0_ready"), stuck)
+    clock = Clock(pane=p)
+
+    problem = core.submit_to_interface(
+        p,
+        STUCK,
+        timeout=1.0,
+        poll=0.1,
+        pause=0.0,
+        clock=clock.time,
+        sleep=clock.sleep,
+    )
+
+    assert "input line" in problem
+
+
 def test_a_submitted_message_is_not_mistaken_for_a_stuck_one():
     """After submission the text is still on screen -- it moves into the
     transcript ABOVE the composer. Looking for it anywhere in the pane would
@@ -519,5 +537,4 @@ def test_a_keyboard_interrupt_still_reaches_the_operator():
 
     with pytest.raises(KeyboardInterrupt):
         core.send_bootstrap(Interrupted(), MESSAGE)
-
 
