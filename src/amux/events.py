@@ -329,6 +329,17 @@ def current_state(pane: str, socket: str | None = None) -> AgentState | None:
     return pane_status(pane, socket)[0]
 
 
+def event_cursor(pane: str, boundary: float, db_path=None) -> int:
+    return max(
+        (
+            int(row["id"])
+            for row in store.iter_events(pane=pane, db_path=db_path)
+            if row["ts"] >= boundary
+        ),
+        default=0,
+    )
+
+
 @dataclass
 class PaneContext:
     workspace: str
@@ -438,14 +449,57 @@ def wait(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return None
-        try:
-            subprocess.run(
-                ["tmux", *_socket_args(socket), "wait-for", _wait_channel(pane)],
-                timeout=remaining,
-                capture_output=True,
-            )
-        except subprocess.TimeoutExpired:
-            pass
+        _wait_for_state_signal(socket, pane, remaining)
+
+
+def _wait_for_state_signal(socket: str, pane: str, timeout: float) -> None:
+    try:
+        subprocess.run(
+            ["tmux", *_socket_args(socket), "wait-for", _wait_channel(pane)],
+            timeout=timeout,
+            capture_output=True,
+        )
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def wait_for_fresh_state(
+    pane: str,
+    after: int,
+    for_states: tuple[AgentState, ...] = ("busy",),
+    timeout: float = 300.0,
+    socket: str | None = None,
+    expected_created: float | None = None,
+    db_path=None,
+    clock=time.monotonic,
+    block=None,
+) -> AgentState | None:
+    socket = socket or _amux_socket()
+    if socket is None:
+        return None
+    deadline = clock() + timeout
+    wait_once = block or _wait_for_state_signal
+    cursor = after
+    while True:
+        facts = pane_facts(pane, socket)
+        if facts.alive is not True or (
+            expected_created is not None and facts.created != expected_created
+        ):
+            return "dead"
+        for row in store.iter_events(pane=pane, db_path=db_path):
+            row_id = int(row["id"])
+            if row_id <= cursor:
+                continue
+            cursor = row_id
+            if expected_created is not None and row["ts"] < expected_created:
+                continue
+            state = STATE_BY_KIND[row["kind"]]
+            if state in for_states or state == "dead":
+                return state
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return None
+        wait_once(socket, pane, remaining)
 
 
 def _hook_payload() -> dict:
