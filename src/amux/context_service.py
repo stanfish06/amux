@@ -890,7 +890,7 @@ def _add_event(service: ContextService, request: Request) -> tuple[int, dict[str
         repo=caller.repo,
         db_path=service.db_path,
     )
-    state = events.STATE_BY_KIND[kind]  # type: ignore[index]
+    state = events.state_for(kind, detail)  # type: ignore[arg-type]
     alive = events.pane_facts(caller.pane, caller.socket).alive
     if alive:
         events.publish_state(caller.pane, state, caller.socket)  # type: ignore[arg-type]

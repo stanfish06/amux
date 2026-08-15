@@ -243,6 +243,13 @@ a tmux `wait-for` channel. Kinds map to states:
 | `notify` | needs-input |
 | `exit` | dead |
 
+One `notify` is classified differently: Claude Code fires its Notification
+hook both for prompts that need a human (permissions, trust dialogs) and for
+its ~60s "waiting for your input" idle reminder. The reminder means the agent
+is parked at an empty prompt, so amux resolves it to `idle`, not
+`needs-input` — otherwise every parked agent would drift out of reach of
+`amux send` a minute after finishing a turn.
+
 `spawn` is amux's own: spawning a grid stamps every new pane with it, so an
 agent has a state from its first moment. The rest come from agent hooks — Claude
 Code's `PreToolUse` → `busy`, `Stop` → `stop`, `Notification` → `notify`,

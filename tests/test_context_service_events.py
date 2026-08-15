@@ -209,6 +209,18 @@ def test_every_event_kind_maps_to_the_native_state(events_probe, crane, kind, st
     assert events.STATE_BY_KIND[kind] == state
 
 
+def test_an_idle_reminder_notification_publishes_idle(events_probe, crane):
+    """Claude Code's ~60s idle reminder arrives as a Notification, but it
+    means the agent is parked at an empty composer, not waiting on a human."""
+    _, payload = events_probe.post(
+        "/v1/events",
+        {"kind": "notify", "detail": "Claude is waiting for your input"},
+        crane,
+    )
+    assert payload["event"]["state"] == "idle"
+    assert events_probe.events_tmux.options()[-1] == ("amux-root", "%1", "idle")
+
+
 def test_a_needs_input_event_resolves_the_pane_to_needs_input(events_probe, crane):
     """The scenario from the spec: a hook posts a notification, and the host
     pane resolves to `needs-input`."""
