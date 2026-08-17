@@ -12,12 +12,10 @@ this adapter only composes commands and cleans up by name.
 
 from __future__ import annotations
 
-import json
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from amux.sandbox import Check, Preflight, Resources, SandboxError, sandbox_name
 from amux.shared import STATE_DIR, AgentRequest, render_command, render_tuning
@@ -131,38 +129,6 @@ def system_running() -> tuple[bool, str]:
 
 
 container_name = sandbox_name
-
-
-def containers() -> list[dict[str, Any]]:
-    result = run("list", "--all", "--format", "json")
-    try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise ContainerError(
-            "could not parse the container list: "
-            f"{result.stdout.strip()[:200]!r}"
-        ) from exc
-    if not isinstance(payload, list):
-        raise ContainerError(
-            "unexpected `container list --format json` shape: expected a "
-            f"list, got {type(payload).__name__}"
-        )
-    return [entry for entry in payload if isinstance(entry, dict)]
-
-
-def _entry_name(entry: dict[str, Any]) -> str:
-    configuration = entry.get("configuration")
-    if isinstance(configuration, dict):
-        return str(configuration.get("id") or "")
-    return ""
-
-
-def find(name: str) -> dict[str, Any] | None:
-    return next((c for c in containers() if _entry_name(c) == name), None)
-
-
-def exists(name: str) -> bool:
-    return find(name) is not None
 
 
 def _missing(result: ContainerResult) -> bool:

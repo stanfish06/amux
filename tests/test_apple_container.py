@@ -144,29 +144,6 @@ def test_launch_command_is_shell_safe(git_repo, git_run):
 # --- CLI surface ---
 
 
-def test_containers_parses_the_list_shape(fake_container):
-    fake_container.respond_json(
-        "list",
-        payload=[
-            {"configuration": {"id": "amux-a"}, "status": "running"},
-            {"configuration": {"id": "amux-b"}, "status": "stopped"},
-        ],
-    )
-    assert [apple_container._entry_name(c) for c in apple_container.containers()] == [
-        "amux-a",
-        "amux-b",
-    ]
-    assert apple_container.exists("amux-a")
-    assert apple_container.find("amux-c") is None
-    assert fake_container.called_with("list", "--all", "--format", "json")
-
-
-def test_containers_rejects_an_unexpected_list_shape(fake_container):
-    fake_container.respond_json("list", payload={"containers": []})
-    with pytest.raises(apple_container.ContainerError, match="expected a list"):
-        apple_container.containers()
-
-
 def test_stop_tolerates_a_missing_container(fake_container):
     fake_container.respond(
         "stop",
