@@ -379,12 +379,16 @@ class Preflight:
     def report(self) -> str:
         return "\n".join(str(check) for check in self.checks)
 
-    def raise_if_failed(self) -> None:
+    def raise_if_failed(
+        self,
+        runtime: str = "docker-sandbox",
+        error: type[RuntimeError] = SandboxError,
+    ) -> None:
         if self.ok:
             return
-        lines = ["docker-sandbox preflight failed:"]
+        lines = [f"{runtime} preflight failed:"]
         lines += [str(check) for check in self.failures]
-        raise SandboxError("\n".join(lines))
+        raise error("\n".join(lines))
 
 
 def is_primary_checkout(repo: str | os.PathLike[str]) -> bool:

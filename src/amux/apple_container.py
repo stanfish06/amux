@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from amux.sandbox import Check, Resources, SandboxError, sandbox_name
+from amux.sandbox import Check, Preflight, Resources, SandboxError, sandbox_name
 from amux.shared import STATE_DIR, AgentRequest, render_command, render_tuning
 
 CONTAINER = "container"
@@ -276,7 +276,7 @@ def preflight(
     repo: str,
     resources: Resources,
     image: str,
-) -> list[Check]:
+) -> Preflight:
     checks: list[Check] = []
 
     unsupported = sorted({a for a in agents if a not in SUPPORTED_AGENTS})
@@ -327,7 +327,7 @@ def preflight(
                 "brew install container",
             )
         )
-        return checks
+        return Preflight(tuple(checks))
     checks.append(Check("container", True, detected))
 
     running, detail = system_running()
@@ -340,4 +340,4 @@ def preflight(
             "`container system kernel set --recommended` if it asks for one)",
         )
     )
-    return checks
+    return Preflight(tuple(checks))

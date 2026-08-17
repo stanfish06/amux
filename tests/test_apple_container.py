@@ -221,8 +221,8 @@ def _preflight(**overrides):
     return apple_container.preflight(**kwargs)
 
 
-def _by_name(checks):
-    return {check.name: check for check in checks}
+def _by_name(report):
+    return {check.name: check for check in report.checks}
 
 
 def test_preflight_passes_on_a_healthy_host(fake_container):

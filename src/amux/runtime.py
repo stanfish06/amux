@@ -253,17 +253,12 @@ class AppleContainerRuntime:
         cwd: str | None,
     ) -> None:
         repo = worktree.repo_root(cwd) if cwd else None
-        checks = apple_container.preflight(
+        apple_container.preflight(
             agents=[r.agent for r in agents],
             repo=repo or "",
             resources=self.config.resources,
             image=self.config.image,
-        )
-        failures = [check for check in checks if not check.ok]
-        if failures:
-            lines = ["apple-container preflight failed:"]
-            lines += [str(check) for check in failures]
-            raise apple_container.ContainerError("\n".join(lines))
+        ).raise_if_failed(APPLE_CONTAINER, apple_container.ContainerError)
 
     def resumable_names(
         self, *, workspace: str | None, task: str | None, cwd: str | None

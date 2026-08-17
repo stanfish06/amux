@@ -426,34 +426,33 @@ def _cmd_doctor(server, args) -> int:
     if args.runtime == HOST:
         print(f"runtime {HOST}: no external prerequisites (tmux and git only)")
         return 0
-    if args.runtime == APPLE_CONTAINER:
-        return _doctor_apple(args)
 
-    defaults = sandbox.Resources()
-    resources = sandbox.Resources(
-        cpus=defaults.cpus if args.cpus is None else args.cpus,
-        memory=defaults.memory if args.memory is None else args.memory,
-        share_skills=bool(args.share_skills),
-    )
-    port = (
-        args.context_port
-        if args.context_port is not None
-        else context_service.DEFAULT_PORT
-    )
-    config = runtime.SandboxConfig(resources=resources, port=port)
     git_failure = ""
     try:
         repo = worktree.repo_root(args.path) or ""
     except OSError as exc:
         repo, git_failure = "", f"cannot run git: {exc.strerror or exc}"
-    report = sandbox.preflight(
-        agents=[r.agent for r in core.parse_agent_specs(args.agent or [], None, None)],
-        repo=repo,
-        resources=resources,
-        endpoint=config.policy_target,
-        service_healthy=_service_probe(config.resolved_port),
-    )
-    print(f"runtime {DOCKER_SANDBOX} (optional backend) for {args.path}:")
+    agents = [r.agent for r in core.parse_agent_specs(args.agent or [], None, None)]
+    resources = _resolve_resources(args)
+
+    if args.runtime == APPLE_CONTAINER:
+        report = apple_container.preflight(
+            agents=agents,
+            repo=repo,
+            resources=resources,
+            image=args.image or apple_container.DEFAULT_IMAGE,
+        )
+    else:
+        config = runtime.SandboxConfig(resources=resources, port=args.context_port)
+        report = sandbox.preflight(
+            agents=agents,
+            repo=repo,
+            resources=resources,
+            endpoint=config.policy_target,
+            service_healthy=_service_probe(config.resolved_port),
+        )
+
+    print(f"runtime {args.runtime} (optional backend) for {args.path}:")
     if git_failure:
         print(f"  [FAIL] git: {git_failure}")
         print("         fix: install git and put it on PATH")
@@ -463,34 +462,6 @@ def _cmd_doctor(server, args) -> int:
         return 0
     print(
         f"\n{len(report.failures) + bool(git_failure)} check(s) failed."
-        f" amux changes nothing on its own: run the fixes above yourself."
-    )
-    return 1
-
-
-def _doctor_apple(args) -> int:
-    git_failure = ""
-    try:
-        repo = worktree.repo_root(args.path) or ""
-    except OSError as exc:
-        repo, git_failure = "", f"cannot run git: {exc.strerror or exc}"
-    checks = apple_container.preflight(
-        agents=[r.agent for r in core.parse_agent_specs(args.agent or [], None, None)],
-        repo=repo,
-        resources=_resolve_resources(args),
-        image=args.image or apple_container.DEFAULT_IMAGE,
-    )
-    print(f"runtime {APPLE_CONTAINER} (optional backend) for {args.path}:")
-    if git_failure:
-        print(f"  [FAIL] git: {git_failure}")
-        print("         fix: install git and put it on PATH")
-    print("\n".join(str(check) for check in checks))
-    failures = [check for check in checks if not check.ok]
-    if not failures and not git_failure:
-        print("\nall checks pass")
-        return 0
-    print(
-        f"\n{len(failures) + bool(git_failure)} check(s) failed."
         f" amux changes nothing on its own: run the fixes above yourself."
     )
     return 1
