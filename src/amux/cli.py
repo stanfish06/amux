@@ -9,6 +9,7 @@ from collections import Counter
 from pathlib import Path
 
 from amux import (
+    apple_container,
     context_service,
     core,
     events,
@@ -62,9 +63,18 @@ def _cmd_lsg(server, args) -> int:
 
 HOST = runtime.HOST
 DOCKER_SANDBOX = runtime.DOCKER_SANDBOX
-RUNTIMES = (HOST, DOCKER_SANDBOX)
+APPLE_CONTAINER = runtime.APPLE_CONTAINER
+RUNTIMES = (HOST, DOCKER_SANDBOX, APPLE_CONTAINER)
 
-_SANDBOX_ONLY = ("cpus", "memory", "share_skills", "context_port")
+# Which non-host runtimes each backend flag applies to; anything else is an
+# error, so a flag never silently does nothing.
+_RUNTIME_FLAGS = {
+    "cpus": (DOCKER_SANDBOX, APPLE_CONTAINER),
+    "memory": (DOCKER_SANDBOX, APPLE_CONTAINER),
+    "share_skills": (DOCKER_SANDBOX,),
+    "context_port": (DOCKER_SANDBOX,),
+    "image": (APPLE_CONTAINER,),
+}
 
 
 def _service_probe(port: int):
@@ -81,24 +91,41 @@ def _service_probe(port: int):
     return probe
 
 
+def _reject_foreign_flags(args, chosen: str) -> None:
+    given = [
+        name
+        for name, runtimes in _RUNTIME_FLAGS.items()
+        if chosen not in runtimes and getattr(args, name, None) not in (None, False)
+    ]
+    if given:
+        flags = ", ".join("--" + name.replace("_", "-") for name in sorted(given))
+        raise ValueError(f"{flags} does not apply to --runtime {chosen}")
+
+
+def _resolve_resources(args) -> sandbox.Resources:
+    defaults = sandbox.Resources()
+    return sandbox.Resources(
+        cpus=defaults.cpus if args.cpus is None else args.cpus,
+        memory=defaults.memory if args.memory is None else args.memory,
+        share_skills=bool(getattr(args, "share_skills", False)),
+    )
+
+
 def _resolve_runtime(args) -> runtime.Runtime | None:
 
     chosen = getattr(args, "runtime", HOST)
-    given = [
-        name for name in _SANDBOX_ONLY if getattr(args, name, None) not in (None, False)
-    ]
+    _reject_foreign_flags(args, chosen)
     if chosen == HOST:
-        if given:
-            flags = ", ".join("--" + name.replace("_", "-") for name in sorted(given))
-            raise ValueError(f"{flags} only applies to --runtime {DOCKER_SANDBOX}")
         return None
-    defaults = sandbox.Resources()
-    resources = sandbox.Resources(
-        cpus=defaults.cpus if args.cpus is None else args.cpus,
-        memory=defaults.memory if args.memory is None else args.memory,
-        share_skills=bool(args.share_skills),
-    )
+    resources = _resolve_resources(args)
     resources.validate()
+    if chosen == APPLE_CONTAINER:
+        return runtime.AppleContainerRuntime(
+            runtime.AppleContainerConfig(
+                image=args.image or apple_container.DEFAULT_IMAGE,
+                resources=resources,
+            )
+        )
     config = runtime.SandboxConfig(resources=resources, port=args.context_port)
     return runtime.SandboxRuntime(
         config, service_healthy=_service_probe(config.resolved_port)
@@ -399,6 +426,8 @@ def _cmd_doctor(server, args) -> int:
     if args.runtime == HOST:
         print(f"runtime {HOST}: no external prerequisites (tmux and git only)")
         return 0
+    if args.runtime == APPLE_CONTAINER:
+        return _doctor_apple(args)
 
     defaults = sandbox.Resources()
     resources = sandbox.Resources(
@@ -439,6 +468,34 @@ def _cmd_doctor(server, args) -> int:
     return 1
 
 
+def _doctor_apple(args) -> int:
+    git_failure = ""
+    try:
+        repo = worktree.repo_root(args.path) or ""
+    except OSError as exc:
+        repo, git_failure = "", f"cannot run git: {exc.strerror or exc}"
+    checks = apple_container.preflight(
+        agents=[r.agent for r in core.parse_agent_specs(args.agent or [], None, None)],
+        repo=repo,
+        resources=_resolve_resources(args),
+        image=args.image or apple_container.DEFAULT_IMAGE,
+    )
+    print(f"runtime {APPLE_CONTAINER} (optional backend) for {args.path}:")
+    if git_failure:
+        print(f"  [FAIL] git: {git_failure}")
+        print("         fix: install git and put it on PATH")
+    print("\n".join(str(check) for check in checks))
+    failures = [check for check in checks if not check.ok]
+    if not failures and not git_failure:
+        print("\nall checks pass")
+        return 0
+    print(
+        f"\n{len(failures) + bool(git_failure)} check(s) failed."
+        f" amux changes nothing on its own: run the fixes above yourself."
+    )
+    return 1
+
+
 def _cmd_context_service(server, args) -> int:
     overrides = {}
     if args.port is not None:
@@ -460,20 +517,29 @@ def _add_sandbox_args(parser: argparse.ArgumentParser, runtime_default: str = HO
         "--runtime",
         default=runtime_default,
         choices=RUNTIMES,
-        help=f"execution backend (default: {runtime_default}; {DOCKER_SANDBOX} is "
-        "optional and needs Docker Sandboxes installed and signed in)",
+        help=f"execution backend (default: {runtime_default}; both container "
+        f"backends are optional: {DOCKER_SANDBOX} needs Docker Sandboxes "
+        f"installed and signed in, {APPLE_CONTAINER} needs Apple's "
+        "`container` CLI)",
     )
     parser.add_argument(
         "--cpus",
         type=int,
         default=None,
-        help=f"CPU cap per sandbox (default: {defaults.cpus}; {DOCKER_SANDBOX} only)",
+        help=f"CPU cap per container (default: {defaults.cpus}; "
+        "container runtimes only)",
     )
     parser.add_argument(
         "--memory",
         default=None,
-        help=f"memory cap per sandbox, e.g. 4g (default: {defaults.memory}; "
-        f"{DOCKER_SANDBOX} only)",
+        help=f"memory cap per container, e.g. 4g (default: {defaults.memory}; "
+        "container runtimes only)",
+    )
+    parser.add_argument(
+        "--image",
+        default=None,
+        help="OCI image the agent runs in (default: "
+        f"{apple_container.DEFAULT_IMAGE}; {APPLE_CONTAINER} only)",
     )
     parser.add_argument(
         "--share-skills",
@@ -790,6 +856,7 @@ def main(argv: list[str] | None = None) -> int:
         messages.DeliveryFailure,
         worktree.WorktreeError,
         sandbox.SandboxError,
+        apple_container.ContainerError,
         context_service.ServiceLifecycleError,
     ) as exc:
         print(f"amux: {exc}", file=sys.stderr)

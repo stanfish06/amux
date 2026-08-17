@@ -19,12 +19,12 @@ SCHEMA_VERSION = 5
 NoteScope = Literal["agent", "task", "workspace"]
 NoteKind = Literal["note", "decision", "finding", "blocker"]
 WorktreeStatus = Literal["active", "merged", "removed"]
-Runtime = Literal["host", "docker-sandbox"]
+Runtime = Literal["host", "docker-sandbox", "apple-container"]
 MessageStatus = Literal["pending", "delivered", "undelivered"]
 
 NOTE_SCOPES = ("agent", "task", "workspace")
 NOTE_KINDS = ("note", "decision", "finding", "blocker")
-RUNTIMES = ("host", "docker-sandbox")
+RUNTIMES = ("host", "docker-sandbox", "apple-container")
 MESSAGE_STATUSES = ("pending", "delivered", "undelivered")
 
 _RUNTIME_COLUMNS = (
@@ -848,9 +848,13 @@ def set_worktree_runtime(
     runtime_status: str | None = None,
     sandbox_name: str | None = None,
     sandbox_id: str | None = None,
+    runtime: Runtime | None = None,
     db_path: Path | None = None,
 ) -> None:
+    if runtime is not None and runtime not in RUNTIMES:
+        raise ValueError(f"runtime must be one of {RUNTIMES}, got '{runtime}'")
     updates = {
+        "runtime": runtime,
         "runtime_status": runtime_status,
         "sandbox_name": sandbox_name,
         "sandbox_id": sandbox_id,

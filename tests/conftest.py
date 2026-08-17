@@ -325,25 +325,61 @@ def no_sbx(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("PATH", str(empty))
 
 
+@pytest.fixture
+def fake_container(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeSbx:
+    """Put a fake Apple `container` first on `PATH`.
+
+    Same contract as `fake_sbx`: recorded argv lists pin the exact command
+    surface of an evolving external CLI without it installed.
+    """
+    bin_dir = tmp_path / "container-bin"
+    bin_dir.mkdir()
+    log = tmp_path / "container-calls.jsonl"
+    script = tmp_path / "container-responses.json"
+    script.write_text("[]")
+
+    exe = bin_dir / "container"
+    exe.write_text(
+        textwrap.dedent(_FAKE_SBX)
+        .replace("/usr/bin/env python3", sys.executable)
+        .replace("FAKE_SBX_LOG", "FAKE_CONTAINER_LOG")
+        .replace("FAKE_SBX_SCRIPT", "FAKE_CONTAINER_SCRIPT")
+    )
+    exe.chmod(exe.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_CONTAINER_LOG", str(log))
+    monkeypatch.setenv("FAKE_CONTAINER_SCRIPT", str(script))
+    monkeypatch.setenv("FAKE_CONTAINER_BIN", str(bin_dir))
+    return FakeSbx(bin_dir=bin_dir, log=log, script=script)
+
+
 # --- guards ---
 
 
 @pytest.fixture(autouse=True)
 def no_real_sbx(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Fail loudly if a test reaches for a real `sbx` or `docker`.
+    """Fail loudly if a test reaches for a real `sbx`, `docker` or `container`.
 
-    Without this, a suite written against the fake would quietly start
-    exercising the developer's actual Docker install once one is present, and
-    the offline guarantee in the spec would erode without anyone noticing.
+    Without this, a suite written against the fakes would quietly start
+    exercising the developer's actual Docker or Apple `container` install once
+    one is present, and the offline guarantee in the spec would erode without
+    anyone noticing.
     """
     real_run = subprocess.run
+
+    fake_bin_vars = {
+        "sbx": "FAKE_SBX_BIN",
+        "docker": "FAKE_SBX_BIN",
+        "container": "FAKE_CONTAINER_BIN",
+    }
 
     def guarded(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
         argv0 = cmd[0] if isinstance(cmd, (list, tuple)) and cmd else cmd
         name = Path(str(argv0)).name
-        if name in {"sbx", "docker"}:
+        if name in fake_bin_vars:
             resolved = shutil.which(str(argv0))
-            fake_bin = os.environ.get("FAKE_SBX_BIN")
+            fake_bin = os.environ.get(fake_bin_vars[name])
             # Nothing on PATH is the one case that certainly is not a real
             # binary, so let it through: `no_sbx` exists precisely to make the
             # code under test meet the FileNotFoundError it would meet on a
@@ -354,7 +390,8 @@ def no_real_sbx(monkeypatch: pytest.MonkeyPatch) -> None:
             )
             if reachable and not is_fake:
                 raise AssertionError(
-                    f"test invoked real {name!r}; use the fake_sbx fixture"
+                    f"test invoked real {name!r}; use the fake_sbx or "
+                    "fake_container fixture"
                 )
         return real_run(cmd, *args, **kwargs)
 

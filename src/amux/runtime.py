@@ -4,7 +4,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from amux import sandbox, sandbox_bootstrap, store, worktree
+from amux import apple_container, sandbox, sandbox_bootstrap, store, worktree
 from amux.shared import (
     DEFAULT_SOCKET,
     AgentRequest,
@@ -17,6 +17,7 @@ from amux.shared import (
 
 HOST = "host"
 DOCKER_SANDBOX = "docker-sandbox"
+APPLE_CONTAINER = "apple-container"
 
 AGENT_COMMANDS = {
     "claude": "claude --dangerously-skip-permissions",
@@ -219,6 +220,113 @@ class HostRuntime:
             return {}
 
 
+@dataclass(frozen=True)
+class AppleContainerConfig:
+    image: str = apple_container.DEFAULT_IMAGE
+    resources: sandbox.Resources = field(default_factory=sandbox.Resources)
+
+
+class AppleContainerRuntime:
+    """Host worktrees, containerized execution.
+
+    Each agent keeps the normal per-agent worktree and branch; only the agent
+    process is moved into an Apple `container` VM, with the repo and the
+    worktree bind-mounted at their host paths. Nothing is acquired at prepare
+    time -- the pane's shell creates the container by running the composed
+    command -- so rollback has nothing to release, and integration and
+    cleanup follow the host paths. The container has no amux client, so like
+    a raw-command agent it emits no state events.
+    """
+
+    kind = APPLE_CONTAINER
+
+    def __init__(self, config: AppleContainerConfig | None = None):
+        self.config = config or AppleContainerConfig()
+
+    def preflight(
+        self,
+        agents: list[AgentRequest],
+        *,
+        workspace: str | None,
+        task: str | None,
+        cwd: str | None,
+    ) -> None:
+        repo = worktree.repo_root(cwd) if cwd else None
+        checks = apple_container.preflight(
+            agents=[r.agent for r in agents],
+            repo=repo or "",
+            resources=self.config.resources,
+            image=self.config.image,
+        )
+        failures = [check for check in checks if not check.ok]
+        if failures:
+            lines = ["apple-container preflight failed:"]
+            lines += [str(check) for check in failures]
+            raise apple_container.ContainerError("\n".join(lines))
+
+    def resumable_names(
+        self, *, workspace: str | None, task: str | None, cwd: str | None
+    ) -> dict[str, list[str]]:
+        return {}
+
+    def rollback(self) -> list[str]:
+        return []
+
+    def prepare(
+        self,
+        panes: list[PaneSpec],
+        *,
+        workspace: str | None,
+        task: str | None,
+        cwd: str | None,
+        socket: str = "",
+    ) -> list[Launch]:
+        if not (workspace and task and cwd):
+            raise apple_container.ContainerError(
+                "the apple-container runtime needs a workspace, task and path"
+            )
+        repo = worktree.repo_root(cwd)
+        if not repo:
+            raise apple_container.ContainerError(f"{cwd} is not a git repository")
+
+        paths = worktree.setup_task(
+            repo,
+            workspace,
+            task,
+            [(spec.pane, spec.request, spec.name) for spec in panes],
+        )
+        rows = store.worktrees_for_panes([spec.pane for spec in panes])
+
+        launches = []
+        for spec in panes:
+            name = apple_container.container_name(workspace, task, spec.name, repo)
+            row = rows.get(spec.pane)
+            if row is not None:
+                store.set_worktree_runtime(
+                    row["id"],
+                    runtime=APPLE_CONTAINER,
+                    runtime_status="running",
+                    sandbox_name=name,
+                )
+            path = paths[spec.pane]
+            command = apple_container.launch_command(
+                name,
+                image=self.config.image,
+                resources=self.config.resources,
+                repo=repo,
+                workdir=path,
+                request=spec.request,
+            )
+            launches.append(
+                Launch(
+                    pane=spec.pane,
+                    cwd=path,
+                    keys=(worktree.shell_cd(path), command),
+                )
+            )
+        return launches
+
+
 def _context_service():
     from amux import context_service
 
@@ -228,26 +336,30 @@ def _context_service():
 GONE_RUNTIME_STATUSES = frozenset({"removed", "failed"})
 
 
-def sandbox_rows(workspace: str, task: str) -> list[dict]:
+def _live_container_rows(kind: str, workspace: str, task: str | None) -> list[dict]:
     return [
         dict(row)
         for row in store.worktrees_for(workspace, task)
-        if row["runtime"] == DOCKER_SANDBOX
+        if row["runtime"] == kind
         and row["sandbox_name"]
         and row["runtime_status"] not in GONE_RUNTIME_STATUSES
     ]
 
 
+def sandbox_rows(workspace: str, task: str) -> list[dict]:
+    return _live_container_rows(DOCKER_SANDBOX, workspace, task)
+
+
+def apple_rows(workspace: str, task: str) -> list[dict]:
+    return _live_container_rows(APPLE_CONTAINER, workspace, task)
+
+
 def sandbox_tasks(workspace: str) -> list[str]:
     seen: list[str] = []
-    for row in store.worktrees_for(workspace):
-        if (
-            row["runtime"] == DOCKER_SANDBOX
-            and row["sandbox_name"]
-            and row["runtime_status"] not in GONE_RUNTIME_STATUSES
-            and row["task"] not in seen
-        ):
-            seen.append(row["task"])
+    for kind in (DOCKER_SANDBOX, APPLE_CONTAINER):
+        for row in _live_container_rows(kind, workspace, None):
+            if row["task"] not in seen:
+                seen.append(row["task"])
     return seen
 
 
@@ -268,15 +380,51 @@ def stop_task(workspace: str, task: str) -> list[str]:
             continue
         store.set_worktree_runtime(row["id"], runtime_status="stopped")
         stopped.append(name)
+    # Apple containers run with --rm, so stopping one removes it (measured on
+    # container 1.2.2); "removed" is the truthful record. The work is safe
+    # either way: it lives in the mounted host worktree, not the container.
+    for row in apple_rows(workspace, task):
+        name = row["sandbox_name"]
+        try:
+            apple_container.stop(name)
+        except apple_container.ContainerError as exc:
+            print(f"amux: could not stop container {name}: {exc}")
+            continue
+        store.set_worktree_runtime(row["id"], runtime_status="removed")
+        stopped.append(name)
     return stopped
 
 
+def clean_apple_task(workspace: str, task: str) -> list[str]:
+    # No preservation pass and no --force distinction: the container mounts
+    # the agent's host worktree, so committed and uncommitted work alike
+    # already live on the host and worktree removal owns their fate.
+    removed: list[str] = []
+    problems: list[str] = []
+    for row in apple_rows(workspace, task):
+        name = row["sandbox_name"]
+        try:
+            apple_container.remove(name)
+        except apple_container.ContainerError as exc:
+            problems.append(f"{name}: {exc}")
+            continue
+        store.set_worktree_runtime(row["id"], runtime_status="removed")
+        removed.append(name)
+    if problems:
+        raise sandbox.SandboxError(
+            "some apple containers could not be removed:\n"
+            + "\n".join(f"  {p}" for p in problems)
+        )
+    return removed
+
+
 def clean_task(workspace: str, task: str, *, force: bool = False) -> list[str]:
+    removed_apple = clean_apple_task(workspace, task)
     by_sandbox: dict[str, list[dict]] = {}
     for row in sandbox_rows(workspace, task):
         by_sandbox.setdefault(row["sandbox_name"], []).append(row)
     if not by_sandbox:
-        return []
+        return removed_apple
 
     gone = {name for name in by_sandbox if not sandbox.exists(name)}
     for name in gone:
@@ -355,7 +503,7 @@ def clean_task(workspace: str, task: str, *, force: bool = False) -> list[str]:
 
     if stranded:
         raise sandbox.SandboxError(_stranded_refusal(stranded, removed))
-    return removed
+    return removed_apple + removed
 
 
 def _retire_all(rows: list[dict]) -> None:

@@ -60,9 +60,15 @@ def test_doctor_defaults_to_the_backend_it_exists_to_check(capsys):
     assert "read-only" in _help(capsys)
 
 
-def test_every_sandbox_flag_says_it_is_sandbox_only(capsys):
-    for flag in ("--cpus", "--memory", "--share-skills", "--context-port"):
-        assert "docker-sandbox only" in _option_help(capsys, "spw", flag)[:220], flag
+def test_every_backend_flag_names_the_runtimes_it_applies_to(capsys):
+    for flag, applies in (
+        ("--cpus", "container runtimes only"),
+        ("--memory", "container runtimes only"),
+        ("--share-skills", "docker-sandbox only"),
+        ("--context-port", "docker-sandbox only"),
+        ("--image", "apple-container only"),
+    ):
+        assert applies in _option_help(capsys, "spw", flag)[:220], flag
 
 
 def test_the_resource_defaults_in_help_are_the_real_ones(capsys):
@@ -95,7 +101,7 @@ def test_shared_skills_is_opt_in_and_explains_why(capsys):
 def test_a_sandbox_flag_under_the_host_runtime_is_refused(capsys, argv):
     assert cli.main(argv) == 1
     error = capsys.readouterr().err
-    assert "only applies to --runtime docker-sandbox" in error
+    assert "does not apply to --runtime host" in error
     assert argv[-2] in error or argv[-1] in error
 
 

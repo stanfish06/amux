@@ -188,7 +188,7 @@ def test_the_guard_blocks_a_real_sbx(monkeypatch: pytest.MonkeyPatch) -> None:
     autouse guard must stop a test reaching it, or the offline guarantee decays
     the moment someone installs Docker Sandboxes."""
     monkeypatch.delenv("FAKE_SBX_LOG", raising=False)
-    with pytest.raises(AssertionError, match="use the fake_sbx fixture"):
+    with pytest.raises(AssertionError, match="use the fake_sbx or"):
         subprocess.run(["sbx", "ls"], capture_output=True)
 
 
@@ -207,7 +207,7 @@ def test_the_guard_blocks_docker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     docker.chmod(docker.stat().st_mode | stat.S_IXUSR)
     monkeypatch.setenv("PATH", f"{stub_bin}{os.pathsep}{os.environ['PATH']}")
 
-    with pytest.raises(AssertionError, match="use the fake_sbx fixture"):
+    with pytest.raises(AssertionError, match="use the fake_sbx or"):
         subprocess.run(["docker", "ps"], capture_output=True)
 
 
@@ -277,5 +277,5 @@ def test_no_sbx_lets_the_caller_meet_a_missing_executable(no_sbx) -> None:
 def test_the_guard_still_blocks_a_real_sbx_alongside_the_fake(fake_sbx) -> None:
     """Relaxing the guard must not let a real binary through by absolute path
     while the fake is installed."""
-    with pytest.raises(AssertionError, match="use the fake_sbx fixture"):
+    with pytest.raises(AssertionError, match="use the fake_sbx or"):
         subprocess.run(["/opt/homebrew/bin/sbx", "ls"], capture_output=True)
