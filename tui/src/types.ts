@@ -1,5 +1,15 @@
 export type EventKind = 'spawn' | 'busy' | 'stop' | 'notify' | 'exit';
-export type AgentState = 'starting' | 'busy' | 'idle' | 'needs-input' | 'dead' | 'unknown';
+// 'stopped' has no event kind: it comes from the execution row when a sandbox
+// has been stopped but not cleaned up. 'unknown' is this side's own fallback and
+// has no Python counterpart.
+export type AgentState =
+    | 'starting'
+    | 'busy'
+    | 'idle'
+    | 'needs-input'
+    | 'stopped'
+    | 'dead'
+    | 'unknown';
 
 export interface AmuxEvent {
     ts: number;
@@ -17,6 +27,11 @@ export interface AgentPaneInfo {
     state: AgentState;
     cwd: string;
     lastEvent?: AmuxEvent;
+    // Present only for a non-host runtime, matching `amux event state --json`,
+    // which omits these keys entirely for host agents.
+    runtime?: string;
+    runtimeStatus?: string;
+    sandboxName?: string;
     taskName: string;
     workspaceName: string;
 }

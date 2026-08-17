@@ -4,13 +4,48 @@ import Spinner from 'ink-spinner';
 import { AgentState, StatusMetrics } from '../types.js';
 import { BORDER_COLOR, STATE_STYLE } from '../theme.js';
 
-const METRICS: Array<{ state: AgentState; label: string; always: boolean }> = [
+// `satisfies` rather than a type annotation: annotating this as
+// Array<{state: AgentState, ...}> widens `state` back to AgentState, which makes
+// any exhaustiveness check derived from it vacuously true. With `as const
+// satisfies`, the shape is still checked but the literal states survive, so the
+// guard below can see which ones are actually listed.
+const METRICS = [
     { state: 'idle', label: 'idle', always: true },
     { state: 'busy', label: 'busy', always: true },
     { state: 'needs-input', label: 'input', always: true },
     { state: 'starting', label: 'start', always: false },
+    // `always: false` matches starting and dead: shown only when non-zero,
+    // which is right for a state most workspaces will not have.
+    { state: 'stopped', label: 'stopped', always: false },
     { state: 'dead', label: 'dead', always: false },
-];
+] as const satisfies ReadonlyArray<{
+    state: AgentState;
+    label: string;
+    always: boolean;
+}>;
+
+// This is an array, so a missing entry is valid TypeScript and simply hides a
+// bucket -- while `metrics.total` still counts that pane. The header would then
+// show a total its own per-state numbers do not sum to: an agent inside the
+// total, in no bucket, invisible. So the omission is made a compile error.
+//
+// The `Exclude<...>` is written out twice on purpose. DO NOT factor it into a
+// type alias to tidy it up: with an alias the error reads "Type true is not
+// assignable to type _Missing", which names nothing. Inline, it reads "...not
+// assignable to type "stopped"" -- the states you forgot, enumerated in the
+// diagnostic. Whoever adds a seventh state months from now will have none of
+// this context, so the error message has to do the teaching.
+//
+// `'unknown'` is excluded inside the expression rather than by a wrapper type,
+// for the same reason: it is this side's fallback for a pane it cannot classify,
+// never reported by Python, and has never had a header bucket.
+const _every: Exclude<
+    AgentState,
+    'unknown' | (typeof METRICS)[number]['state']
+> extends never
+    ? true
+    : Exclude<AgentState, 'unknown' | (typeof METRICS)[number]['state']> = true;
+void _every;
 
 interface HeaderProps {
     socketName: string;

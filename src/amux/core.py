@@ -1,23 +1,30 @@
 from __future__ import annotations
 
 import random
+import re
+import time
 from dataclasses import dataclass
 
 from libtmux import Pane, Server, Session, Window
 from libtmux.constants import PaneDirection
 
-from amux import events, store, worktree
-from amux.shared import ALIAS, DEFAULT_SOCKET
-
-AGENT_COMMANDS = {
-    "claude": "claude --dangerously-skip-permissions",
-    "codex": "codex --dangerously-bypass-approvals-and-sandbox",
-}
+from amux import events, sandbox_hooks, store, worktree
+from amux.runtime import (
+    AGENT_COMMANDS,
+    HOST,
+    GridCreationError,
+    HostRuntime,
+    PaneSpec,
+    Runtime,
+)
+from amux.shared import ALIAS, DEFAULT_SOCKET, AgentRequest, report
 
 AGENT_OPTION = "@amux_agent"
 LABEL_OPTION = "@amux_label"
 NAME_OPTION = "@amux_name"
 MARK_OPTION = "@amux_pane"
+MODEL_OPTION = "@amux_model"
+EFFORT_OPTION = "@amux_effort"
 
 ADJECTIVES = [
     "amber",
@@ -106,7 +113,6 @@ NOUNS = [
 
 
 def random_name(taken: set[str]) -> str:
-    """Pick a memorable adjective-noun tag (e.g. brave-hawk) not in `taken`."""
     combos = [f"{a}-{n}" for a in ADJECTIVES for n in NOUNS]
     available = [c for c in combos if c not in taken]
     if available:
@@ -122,30 +128,55 @@ def get_server(socket_name: str | None = None) -> Server:
     return Server(socket_name=socket_name or DEFAULT_SOCKET)
 
 
-def _parse_agent_spec(spec: str) -> tuple[str, int | None]:
-    """Split `<agent>[:count]` on the last `:` only when the suffix is all
-    digits; raw commands containing colons pass through whole."""
-    agent, sep, suffix = spec.rpartition(":")
+RAW_COMMAND_HINT = (
+    "a model id containing '/' or ending in ':<digits>' must be launched as a "
+    "raw command instead, e.g. -a 'claude --model openai/gpt-5'"
+)
+
+
+def _tune(agent: str, head: str, spec: str) -> AgentRequest:
+    rest = head[len(agent) :]
+    model = effort = ""
+    if rest.startswith("@"):
+        model, slash, tail = rest[1:].partition("/")
+        if not model:
+            raise ValueError(f"empty model in agent spec '{spec}'")
+        if slash:
+            effort = tail
+    elif rest.startswith("/"):
+        effort = rest[1:]
+        slash = "/"
+    else:
+        slash = ""
+    if slash and not effort:
+        raise ValueError(f"empty effort in agent spec '{spec}'")
+    return AgentRequest(agent=agent, model=model, effort=effort)
+
+
+def _parse_agent_spec(spec: str) -> tuple[AgentRequest, int | None]:
+    head, sep, suffix = spec.rpartition(":")
+    count = None
     if not sep or not suffix.isdigit():
-        if not spec:
-            raise ValueError("empty agent spec")
-        return spec, None
-    if not agent:
+        head = spec
+    elif not head:
         raise ValueError(f"malformed agent spec '{spec}'")
-    count = int(suffix)
-    if count < 1:
-        raise ValueError(f"agent count must be >= 1, got '{spec}'")
-    return agent, count
+    else:
+        count = int(suffix)
+        if count < 1:
+            raise ValueError(
+                f"agent count must be >= 1, got '{spec}'; {RAW_COMMAND_HINT}"
+            )
+    if not head:
+        raise ValueError("empty agent spec")
+    agent = head.split("@", 1)[0].split("/", 1)[0]
+    if agent not in AGENT_COMMANDS:
+        return AgentRequest(agent=head), count
+    return _tune(agent, head, spec), count
 
 
 def parse_agent_specs(
     specs: list[str], nrows: int | None, ncols: int | None
-) -> list[str]:
-    """Expand `<agent>[:count]` specs into a per-pane agent list, row-major.
-
-    With a known shape (both dims given), a single countless spec absorbs the
-    remainder; with an unknown or partial shape, countless means 1.
-    """
+) -> list[AgentRequest]:
     parsed = [_parse_agent_spec(s) for s in specs or ["claude"]]
     countless = [i for i, (_, count) in enumerate(parsed) if count is None]
     if nrows is not None and ncols is not None:
@@ -158,18 +189,14 @@ def parse_agent_specs(
             remainder = nrows * ncols - sum(c for _, c in parsed if c is not None)
             if remainder < 1:
                 raise ValueError(
-                    f"no panes left for '{parsed[i][0]}' in a {nrows}x{ncols} grid"
+                    f"no panes left for '{parsed[i][0].agent}' in a "
+                    f"{nrows}x{ncols} grid"
                 )
             parsed[i] = (parsed[i][0], remainder)
-    # Any spec still countless here (unknown/partial shape) means 1.
-    return [agent for agent, count in parsed for _ in range(count or 1)]
+    return [request for request, count in parsed for _ in range(count or 1)]
 
 
 def resolve_grid_shape(n: int, nrows: int | None, ncols: int | None) -> tuple[int, int]:
-    """Fit `n` agents into a grid, deriving whatever `-r`/`-c` left out.
-
-    With neither given, pick the factor pair closest to square, rows <= cols.
-    """
     if nrows is not None and ncols is not None:
         if nrows * ncols != n:
             raise ValueError(f"{n} agents do not fit a {nrows}x{ncols} grid")
@@ -245,7 +272,6 @@ class AgentPane:
 
 
 def _socket_name(obj) -> str:
-    """Socket of the server behind any libtmux object."""
     return getattr(obj.server, "socket_name", None) or DEFAULT_SOCKET
 
 
@@ -262,6 +288,149 @@ def _taken_names(session: Session) -> set[str]:
             if name:
                 names.add(name)
     return names
+
+
+def _next_name(agent: str, resumable: dict[str, list[str]], taken: set[str]) -> str:
+    while resumable.get(agent):
+        candidate = resumable[agent].pop(0)
+        if candidate not in taken:
+            return candidate
+    return random_name(taken)
+
+
+def _rollback(runtime: Runtime) -> list[str]:
+    try:
+        return list(runtime.rollback())
+    except Exception as exc:  # noqa: BLE001
+        return [f"runtime rollback: {exc}"]
+
+
+def _discard(what: str, teardown) -> str | None:
+    try:
+        teardown()
+    except Exception as exc:  # noqa: BLE001
+        return f"{what}: {exc}"
+    return None
+
+
+_CARET = re.compile(r"^\s*[>›❯]\s*(?:\S.*)?$")
+
+_CHOOSER = re.compile(r"^\W*[1-9]\.\s+\S", re.MULTILINE)
+
+BOOTSTRAP_READY_TIMEOUT_S = 45.0
+BOOTSTRAP_POLL_S = 0.5
+BOOTSTRAP_SUBMIT_PAUSE_S = 0.4
+_PROBE_CHARS = 40
+
+
+def interface_ready(capture: str) -> bool:
+    lines = capture.splitlines()
+    last = max((i for i, line in enumerate(lines) if line.strip()), default=-1)
+    carets = [i for i, line in enumerate(lines) if _CARET.match(line)]
+    if not any(i < last for i in carets):
+        return False
+    return not chooser_in_view(capture)
+
+
+def chooser_in_view(capture: str) -> bool:
+    lines = capture.splitlines()
+    carets = [i for i, line in enumerate(lines) if _CARET.match(line)]
+    if not carets:
+        return False
+    return bool(_CHOOSER.search("\n".join(lines[carets[-1] :])))
+
+
+def _not_ready_reason(capture: str, timeout: float) -> str:
+    if chooser_in_view(capture):
+        return (
+            f"after {timeout:g}s it was still waiting on a prompt of its own, "
+            "most likely asking whether to trust this directory -- every agent "
+            "gets a fresh worktree, so answer it and the agent runs normally"
+        )
+    return f"its interface was not ready within {timeout:g}s"
+
+
+def _probe(text: str) -> str:
+    return " ".join(text.split())[-_PROBE_CHARS:]
+
+
+def _held_in_the_composer(capture: str, text: str) -> bool:
+    lines = capture.splitlines()
+    carets = [i for i, line in enumerate(lines) if _CARET.match(line)]
+    if not carets:
+        return False
+    return _probe(text) in " ".join(" ".join(lines[carets[-1] :]).split())
+
+
+def send_bootstrap(
+    pane: Pane,
+    text: str,
+    *,
+    timeout: float | None = None,
+    poll: float | None = None,
+    pause: float | None = None,
+    clock=time.monotonic,
+    sleep=time.sleep,
+) -> str:
+    timeout = BOOTSTRAP_READY_TIMEOUT_S if timeout is None else timeout
+    poll = BOOTSTRAP_POLL_S if poll is None else poll
+    pause = BOOTSTRAP_SUBMIT_PAUSE_S if pause is None else pause
+    try:
+        return submit_to_interface(
+            pane,
+            text,
+            timeout=timeout,
+            poll=poll,
+            pause=pause,
+            clock=clock,
+            sleep=sleep,
+        )
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:  # noqa: BLE001 - see the docstring
+        return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+
+
+def submit_to_interface(
+    pane: Pane,
+    text: str,
+    *,
+    timeout: float,
+    poll: float,
+    pause: float,
+    clock,
+    sleep,
+    on_submit=None,
+) -> str:
+    deadline = clock() + timeout
+    while True:
+        capture = _capture(pane)
+        if interface_ready(capture):
+            break
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return _not_ready_reason(capture, timeout)
+        sleep(min(poll, remaining))
+
+    if on_submit is not None:
+        on_submit()
+    pane.send_keys(text, enter=False, suppress_history=False, literal=True)
+    sleep(pause)
+    pane.enter()
+    sleep(pause)
+
+    if not _held_in_the_composer(_capture(pane), text):
+        return ""
+    pane.enter()
+    sleep(pause)
+    if _held_in_the_composer(_capture(pane), text):
+        return "its interface did not accept the message; it is on the input line"
+    return ""
+
+
+def _capture(pane: Pane) -> str:
+    captured = pane.capture_pane()
+    return captured if isinstance(captured, str) else "\n".join(captured)
 
 
 def _split_evenly(
@@ -281,71 +450,88 @@ def _build_grid(
     window: Window,
     nrows: int,
     ncols: int,
-    agents: list[str],
+    agents: list[AgentRequest],
     cwd: str | None,
     workspace: str | None = None,
     task: str | None = None,
+    runtime: Runtime | None = None,
 ) -> AgentGrid:
     if len(agents) != nrows * ncols:
         raise ValueError(f"{len(agents)} agents do not fit a {nrows}x{ncols} grid")
+    runtime = runtime or HostRuntime()
     taken = _taken_names(window.session)
+    resumable = runtime.resumable_names(workspace=workspace, task=task, cwd=cwd)
     rows = _split_evenly(window.panes[0], nrows, PaneDirection.Below, cwd)
     agent_panes = []
-    panes_info: list[tuple[Pane, str, str]] = []
+    panes_info: list[tuple[Pane, AgentRequest, str]] = []
     for i, row_pane in enumerate(rows):
         cols = _split_evenly(row_pane, ncols, PaneDirection.Right, cwd)
         for j, pane in enumerate(cols):
-            agent = agents[i * ncols + j]
+            request = agents[i * ncols + j]
+            agent = request.agent
             label = f"r{i}c{j}"
-            name = random_name(taken)
+            name = _next_name(agent, resumable, taken)
             taken.add(name)
-            # Keep the name tag stable: block apps/prompts from re-titling the pane.
             pane.cmd("set-option", "-p", "allow-set-title", "off")
             pane.cmd("select-pane", "-T", f"{name}[{agent}]")
             pane.cmd("set-option", "-p", AGENT_OPTION, agent)
             pane.cmd("set-option", "-p", LABEL_OPTION, label)
             pane.cmd("set-option", "-p", NAME_OPTION, name)
             pane.cmd("set-option", "-p", MARK_OPTION, "1")
+            if request.model:
+                pane.cmd("set-option", "-p", MODEL_OPTION, request.model)
+            if request.effort:
+                pane.cmd("set-option", "-p", EFFORT_OPTION, request.effort)
             pane.set_hook(
                 "pane-exited", "run-shell 'amux event emit exit --pane #{hook_pane}'"
             )
-            panes_info.append((pane, agent, name))
-
-    # Per-agent git worktrees when the target dir is a repo. Fail soft: a
-    # non-repo target keeps today's shared-directory behavior.
-    worktree_paths: dict[str, str] = {}
-    if workspace and task and cwd:
-        repo = worktree.repo_root(cwd)
-        if repo:
-            try:
-                worktree_paths = worktree.setup_task(
-                    repo,
-                    workspace,
-                    task,
-                    [(p.id or "", agent, name) for p, agent, name in panes_info],
-                )
-            except worktree.WorktreeError as exc:
-                print(f"amux: worktree isolation unavailable: {exc}")
+            panes_info.append((pane, request, name))
 
     socket = _socket_name(window)
-    for pane, agent, name in panes_info:
-        command = AGENT_COMMANDS.get(agent, agent)
-        wt = worktree_paths.get(pane.id or "")
-        pane_cwd = wt or cwd or pane.pane_current_path or ""
-        if wt:
-            pane.send_keys(worktree.shell_cd(wt))
-        if command:
-            pane.send_keys(command)
-        events.emit("spawn", pane=pane.id, agent=agent, socket=socket)
+    try:
+        launches = {
+            launch.pane: launch
+            for launch in runtime.prepare(
+                [
+                    PaneSpec(p.id or "", r.agent, name, r.model, r.effort)
+                    for p, r, name in panes_info
+                ],
+                workspace=workspace,
+                task=task,
+                cwd=cwd,
+                socket=socket,
+            )
+        }
+    except Exception as exc:
+        raise GridCreationError(exc, _rollback(runtime)) from exc
+
+    for pane, request, name in panes_info:
+        launch = launches[pane.id or ""]
+        pane_cwd = launch.cwd or pane.pane_current_path or ""
+        for keys in launch.keys:
+            pane.send_keys(keys)
+        events.emit("spawn", pane=pane.id, agent=request.agent, socket=socket)
         agent_panes.append(
             AgentPane(
                 pane=pane,
                 cwd=pane_cwd,
-                agent_name=agent,
+                agent_name=request.agent,
                 label=label_for(pane),
                 name=name,
             )
         )
+
+    for pane, _agent, name in panes_info:
+        bootstrap = launches[pane.id or ""].bootstrap
+        if not bootstrap:
+            continue
+        problem = send_bootstrap(pane, bootstrap)
+        if problem:
+            report(
+                f"amux: {name} was not given amux's skill pointer "
+                f"({problem}); it is running and will need telling by hand"
+            )
+
     return AgentGrid(
         window=window,
         agent_panes=agent_panes,
@@ -364,12 +550,19 @@ def spawn_agent_space(
     session_name: str,
     init_grid_nrows: int = 1,
     init_grid_ncols: int = 1,
-    init_grid_agents: list[str] | None = None,
+    init_grid_agents: list[AgentRequest] | None = None,
     init_task_name: str = "task0",
+    runtime: Runtime | None = None,
 ) -> AgentSpace:
     if server.has_session(session_name):
         raise ValueError(f"{ALIAS['session']} '{session_name}' already exists")
-    # Detached sessions get a virtual size; make it big enough to split evenly.
+    agents = init_grid_agents or [AgentRequest("claude")] * (
+        init_grid_nrows * init_grid_ncols
+    )
+    runtime = runtime or HostRuntime()
+    runtime.preflight(
+        agents, workspace=session_name, task=init_task_name, cwd=session_path
+    )
     width = max(200, 80 * init_grid_ncols)
     height = max(50, 24 * init_grid_nrows)
     server.cmd(
@@ -388,16 +581,25 @@ def spawn_agent_space(
     assert session is not None
     window = session.windows[0]
     window.rename_window(init_task_name)
-    agents = init_grid_agents or ["claude"] * (init_grid_nrows * init_grid_ncols)
-    grid = _build_grid(
-        window,
-        init_grid_nrows,
-        init_grid_ncols,
-        agents,
-        session_path,
-        workspace=session_name,
-        task=init_task_name,
-    )
+    try:
+        grid = _build_grid(
+            window,
+            init_grid_nrows,
+            init_grid_ncols,
+            agents,
+            session_path,
+            workspace=session_name,
+            task=init_task_name,
+            runtime=runtime,
+        )
+    except BaseException as exc:
+        problem = _discard("kill session", lambda: session.cmd("kill-session"))
+        if problem:
+            if isinstance(exc, GridCreationError):
+                exc.add_cleanup_failure(problem)
+            else:
+                print(f"amux: {problem}")
+        raise
     return AgentSpace(
         session=session,
         agent_grids=[grid],
@@ -411,25 +613,38 @@ def spawn_agent_grid(
     window_name: str,
     nrows: int,
     ncols: int,
-    agents: list[str] | None = None,
+    agents: list[AgentRequest] | None = None,
     cwd: str | None = None,
+    runtime: Runtime | None = None,
 ) -> AgentGrid:
+    agents = agents or [AgentRequest("claude")] * (nrows * ncols)
+    runtime = runtime or HostRuntime()
+    runtime.preflight(agents, workspace=session.name or "", task=window_name, cwd=cwd)
     window = session.new_window(
         window_name=window_name, start_directory=cwd, attach=False
     )
-    return _build_grid(
-        window,
-        nrows,
-        ncols,
-        agents or ["claude"] * (nrows * ncols),
-        cwd,
-        workspace=session.name or "",
-        task=window_name,
-    )
+    try:
+        return _build_grid(
+            window,
+            nrows,
+            ncols,
+            agents,
+            cwd,
+            workspace=session.name or "",
+            task=window_name,
+            runtime=runtime,
+        )
+    except BaseException as exc:
+        problem = _discard("kill task window", lambda: window.cmd("kill-window"))
+        if problem:
+            if isinstance(exc, GridCreationError):
+                exc.add_cleanup_failure(problem)
+            else:
+                print(f"amux: {problem}")
+        raise
 
 
 def load_agent_pane(pane: Pane, facts: events.PaneFacts | None = None) -> AgentPane:
-    """One tmux query per pane, not one per option; `facts` carries them all."""
     facts = facts or events.pane_facts(pane.id or "", _socket_name(pane))
     state, _ = events.pane_status(pane.id or "", facts=facts)
     return AgentPane(
@@ -482,12 +697,42 @@ def _roster_entry(pane: Pane) -> dict:
             {"kind": last.kind, "ts": last.ts, "detail": last.detail} if last else None
         ),
     }
+    if facts.model:
+        entry["model"] = facts.model
+    if facts.effort:
+        entry["effort"] = facts.effort
     if wt:
         entry["branch"] = wt["branch"]
         entry["worktree"] = wt["path"]
         entry["repo"] = wt["repo"]
-        entry["last_commit"] = worktree.latest_commit_subject(wt["path"])
+        if wt["path"]:
+            entry["last_commit"] = worktree.latest_commit_subject(wt["path"])
+        entry.update(runtime_fields(wt))
     return entry
+
+
+def runtime_fields(row) -> dict:
+    runtime = (row["runtime"] if "runtime" in row.keys() else "") or HOST
+    if runtime == HOST:
+        return {}
+    missing = missing_state_kinds(row)
+    return {
+        "runtime": runtime,
+        "runtime_status": row["runtime_status"] or "",
+        "sandbox_name": row["sandbox_name"] or "",
+        "sandbox_id": row["sandbox_id"] or "",
+        "state_degraded": bool(missing),
+        "missing_kinds": list(missing),
+    }
+
+
+def missing_state_kinds(row) -> tuple[str, ...]:
+    mechanism = (row["hook_mechanism"] if "hook_mechanism" in row.keys() else "") or ""
+    if not mechanism:
+        return ()
+    return sandbox_hooks.missing_kinds(
+        row["agent"], hooks_supported=mechanism == "hooks"
+    )
 
 
 def build_context(server: Server, pane_id: str) -> dict:
@@ -521,13 +766,10 @@ def build_context(server: Server, pane_id: str) -> dict:
         workspace=self_entry["workspace"],
         task=self_entry["task"],
         pane=pane_id,
-        # This is the path that briefs an agent, so it is the one that most
-        # needs the repo filter: workspace/task are reusable tmux labels.
         repo=self_entry.get("repo"),
     )
     return {"self": self_entry, "team": team, "notes": notes}
 
 
-# future feat, spawn and space where humans work and colab
 def spawn_human_space():
     pass

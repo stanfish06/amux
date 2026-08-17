@@ -38,6 +38,10 @@ interface PaneStatus {
   kind: 'amux' | 'other' | null;
   state: AgentState | null;
   last_event: { ts: number; kind: EventKind; detail?: string } | null;
+  // Absent for host agents, by design on the Python side.
+  runtime?: string;
+  runtime_status?: string;
+  sandbox_name?: string;
 }
 
 export class TmuxService {
@@ -107,6 +111,9 @@ export class TmuxService {
           : (stateOpt as AgentState) || 'unknown',
         cwd: paneCwd || '',
         lastEvent,
+        runtime: status?.runtime,
+        runtimeStatus: status?.runtime_status,
+        sandboxName: status?.sandbox_name,
         taskName: task.name,
         workspaceName: sessionName,
       });

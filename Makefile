@@ -12,12 +12,35 @@ PYINSTALLER_MODE := --onedir
 AMUX_BIN := $(CURDIR)/dist/amux/amux
 endif
 
-dev:
-	pipenv run pip install -e ".[dev]"
+VENV := $(CURDIR)/.venv
 
+dev:
+	uv sync --extra dev
+
+# The sandbox shim must ship as DATA, not just as a compiled module. PyInstaller
+# puts amux's modules in the archive inside the executable and no .py on disk, but
+# `docker-sandbox` spawning copies sandbox_client.py into the microVM as a file --
+# so without this a packaged amux dies at shim installation on every sandbox spawn.
+# Affects --onefile and --onedir alike, so both get it from PYINSTALLER_MODE.
+#
+# Two things this line cannot get wrong quietly:
+#   $(CURDIR) is required. --add-data resolves a relative source against
+#   --specpath, which is `build` below, so the relative form fails the build with
+#   "Unable to find build/src/amux/sandbox_client.py".
+#   The `:amux` destination must stay. It is what makes the unpacked file land
+#   exactly where sandbox_client.__file__ points; changing it re-breaks shim
+#   installation with no build error at all.
+#
+# skills/amux/SKILL.md ships for the same reason and with the same two hazards:
+# bootstrap copies it into every sandbox as a file, and a packaged amux has no
+# repository root to find it in. It must land beside the package as
+# skills/amux/SKILL.md, which is the first place `sandbox_bootstrap.skill_source`
+# looks; the second is the repo root, which only exists in a checkout.
 build: dev
-	pipenv run env -u PYTHONPATH pyinstaller $(PYINSTALLER_MODE) --name amux \
+	env -u PYTHONPATH $(VENV)/bin/pyinstaller $(PYINSTALLER_MODE) --name amux \
 		--paths src \
+		--add-data $(CURDIR)/src/amux/sandbox_client.py:amux \
+		--add-data $(CURDIR)/skills/amux/SKILL.md:amux/skills/amux \
 		--specpath build --workpath build --distpath dist \
 		-y src/amux/cli.py
 
@@ -26,21 +49,34 @@ install: build install_skills
 	ln -sfn $(AMUX_BIN) $(BIN_DIR)/amux
 	@echo "linked $(BIN_DIR)/amux -> $(AMUX_BIN)"
 
-# -n so an existing symlink is replaced, not followed into as a directory
+# This link is TRANSIENT. Spawning any grid installs amux's own skill as a real
+# file at the same path, so the next `amux spw` or `amux spg` replaces the link
+# with a frozen copy and edits to this checkout stop reaching newly spawned
+# agents. Re-run this target to restore the live link; that is the whole
+# recovery, and it is only true because of the `rm -rf` below.
+#
+# The rm is load-bearing, not tidiness. `ln -sfn` replaces a symlink to a
+# directory, but it does NOTHING when the destination IS a real directory -- and
+# after the first spawn, that is what the destination always is. It would link
+# into it instead, creating a nested `$$dir/$$skill/$$skill`, exit 0, and report
+# success while every agent kept reading the frozen copy.
 install_skills:
 	@for dir in $(SKILL_DIRS); do \
 		mkdir -p $$dir; \
 		for skill in $(SKILLS); do \
+			rm -rf $$dir/$$skill; \
 			ln -sfn $(CURDIR)/skills/$$skill $$dir/$$skill; \
 			echo "linked $$dir/$$skill -> $(CURDIR)/skills/$$skill"; \
 		done; \
 	done
 
+# -r for the same reason: after a spawn the destination is a real directory, and
+# `rm -f` on a directory removes nothing while the loop still says "removed".
 uninstall:
 	rm -f $(BIN_DIR)/amux
 	@for dir in $(SKILL_DIRS); do \
 		for skill in $(SKILLS); do \
-			rm -f $$dir/$$skill; \
+			rm -rf $$dir/$$skill; \
 			echo "removed $$dir/$$skill"; \
 		done; \
 	done

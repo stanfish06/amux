@@ -2,6 +2,7 @@ import time
 
 from libtmux import Pane, Session, Window
 
+from amux import sandbox_client
 from amux.core import load_agent_pane
 from amux.shared import ALIAS
 
@@ -25,28 +26,46 @@ def _addr(agent: dict) -> str:
     return f"@{agent['label']} {agent['pane']}" if agent["name"] else agent["pane"]
 
 
+DEGRADED_MARK = "*"
+
+
+def state_to_string(agent: dict) -> str:
+    state = agent.get("state") or "-"
+    return f"{state}{DEGRADED_MARK}" if agent.get("state_degraded") else state
+
+
 def context_to_string(ctx: dict) -> list[str]:
-    """Concise agent-facing view of `core.build_context` output."""
     me = ctx["self"]
     branch = f"  branch:{me.get('branch')}" if me.get("branch") else ""
     lines = [
         f"you: {me['name']}  {me['agent']} @{me['label']} {me['pane']}  "
         f"{ALIAS['window']}:{me['task']}  {ALIAS['session']}:{me['workspace']}  "
-        f"{me['state']}{branch}  {me['cwd']}",
-        f"team @ {me['workspace']}",
+        f"{state_to_string(me)}{branch}  {me['cwd']}",
     ]
+    runtime_line = sandbox_client.runtime_to_string(me)
+    if runtime_line:
+        lines.append(runtime_line)
+    tuning_line = sandbox_client.tuning_to_string(me)
+    if tuning_line:
+        lines.append(tuning_line)
+    if me.get("state_degraded"):
+        lines.append(
+            f"  note: {DEGRADED_MARK} marks a state this agent cannot fully "
+            f"report (no {', '.join(me['missing_kinds'])})"
+        )
+    lines.append(f"team @ {me['workspace']}")
     rows = [a for group in ctx["team"] for a in group["agents"]]
     wn = max(len(a["name"] or "-") for a in rows)
     wa = max(len(a["agent"]) for a in rows)
     wd = max(len(_addr(a)) for a in rows)
-    ws = max(len(a["state"]) for a in rows)
+    ws = max(len(state_to_string(a)) for a in rows)
     for i, group in enumerate(ctx["team"]):
         own = f" (your {ALIAS['window']})" if i == 0 else ""
         lines.append(f"  {group['task']}{own}")
         for a in group["agents"]:
             row = (
                 f"    {(a['name'] or '-'):<{wn}}  {a['agent']:<{wa}}  "
-                f"{_addr(a):<{wd}}  {a['state']:<{ws}}"
+                f"{_addr(a):<{wd}}  {state_to_string(a):<{ws}}"
             )
             if a["pane"] == me["pane"]:
                 row += " (you)"
@@ -55,11 +74,11 @@ def context_to_string(ctx: dict) -> list[str]:
                 if last:
                     row += f"  {_age(last['ts'])}"
                     if last["detail"]:
-                        row += f"  \"{last['detail']}\""
+                        row += f'  "{last["detail"]}"'
                 if a.get("branch"):
                     row += f"  {a['branch']}"
                 if a.get("last_commit"):
-                    row += f"  \"{a['last_commit']}\""
+                    row += f'  "{a["last_commit"]}"'
                 if a["cwd"] and a["cwd"] != me["cwd"]:
                     row += f"  {a['cwd']}"
             lines.append(row.rstrip())

@@ -22,7 +22,17 @@ function agentMatches(agent: AgentPaneInfo, query: string): boolean {
 }
 
 function emptyStateCounts(): Record<AgentState, number> {
-    return { starting: 0, busy: 0, idle: 0, 'needs-input': 0, dead: 0, unknown: 0 };
+    // Every AgentState needs a key: Header indexes STATE_STYLE by state with no
+    // fallback, so a state missing here is a crash rather than a blank.
+    return {
+        starting: 0,
+        busy: 0,
+        idle: 0,
+        'needs-input': 0,
+        stopped: 0,
+        dead: 0,
+        unknown: 0,
+    };
 }
 
 export function useAmuxState(tmuxService: TmuxService, pollIntervalMs: number = 1500) {

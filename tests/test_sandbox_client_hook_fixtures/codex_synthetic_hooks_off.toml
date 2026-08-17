@@ -1,0 +1,9 @@
+model = "gpt-5.6"
+approval_policy = "never"
+
+[features]
+hooks = false
+js_repl = false
+
+[projects."/work/repo"]
+trust_level = "trusted"

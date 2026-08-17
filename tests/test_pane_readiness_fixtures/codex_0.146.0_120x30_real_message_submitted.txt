@@ -1,0 +1,29 @@
+│ model:       gpt-5.6-sol high   /model to change        │
+│ directory:   /private/tmp/claude-501/…/scratchpad/work4 │
+│ permissions: YOLO mode                                  │
+╰─────────────────────────────────────────────────────────╯
+
+  Tip: New Use /fast to enable our fastest inference with increased plan usage.
+
+
+› [amux] You are running inside an amux pane. amux is agent orchestration on top of tmux, and its own skill -- named
+  `amux`, invocable by that name -- is the authoritative vocabulary for this pane: coordination, spawning work,
+  messaging teammates, per-agent worktrees, and agent state. Read it before you do any of those, rather than guessing
+  at commands that do not exist. amux has installed it for you at /home/agent/.codex/skills/amux/SKILL.md; read it now,
+  before you answer anything else.
+
+
+⚠ Exceeded skills context budget of 2%. All skill descriptions were removed and 1047 additional skills were not included
+  in the model-visible skills list.
+
+• UserPromptSubmit hook (completed)
+  hook context: [skill-first reminder] Before substantive work (coding, debugging, code/PR
+    review, docs, repo maintenance, data analysis, scientific workflows, browser
+    … +6 lines (ctrl + t to view transcript)
+
+• Working (1s • esc to interrupt)
+
+
+› Implement {feature}
+
+  gpt-5.6-sol high · /private/tmp/claude-501/-Users-stan--local-state-amux-worktrees-amux-skill-inject-shiny-hawk/4b54b…

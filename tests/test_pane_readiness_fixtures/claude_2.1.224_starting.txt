@@ -1,0 +1,29 @@
+claude --dangerously-skip-permissions
+▲ ‹stan› 4b54b47e-7574-477e-bf12-ebee22ee7780/scratchpad/work3 [  (us-east-2)]
+ ⟫ claude --dangerously-skip-permissions
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

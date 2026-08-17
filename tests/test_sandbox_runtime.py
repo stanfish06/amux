@@ -1,0 +1,666 @@
+"""The Docker Sandbox runtime: creation, identity, and attachment.
+
+The spec's headline scenario is a mixed Claude/Codex grid producing one capped,
+no-shared-skills sandbox per pane, each with its own branch, capability and
+registry row. That is asserted end to end here against the fake `sbx`, plus the
+properties that make the boundary real: no host worktree, no state directory or
+tmux socket handed to a sandbox, and no secret in an `sbx` argument.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from amux import (
+    context_service,
+    runtime,
+    sandbox,
+    sandbox_bootstrap,
+    store,
+    worktree,
+)
+from amux.shared import AgentRequest
+
+VERSION_LINE = "sbx version: v0.37.1 2d4f32448c7a94d7fa525517dfca21aa36599829\n"
+
+
+@pytest.fixture
+def minted(monkeypatch):
+    """Capture every capability the runtime mints, plaintext included."""
+    records: list[dict] = []
+    real = store.mint_context_token
+
+    def spy(worktree_id, permissions=(), **kwargs):
+        plaintext, token_id = real(worktree_id, permissions=permissions, **kwargs)
+        records.append(
+            {
+                "worktree_id": worktree_id,
+                "permissions": tuple(permissions),
+                "plaintext": plaintext,
+                "token_id": token_id,
+            }
+        )
+        return plaintext, token_id
+
+    monkeypatch.setattr(store, "mint_context_token", spy)
+    return records
+
+
+def make_runtime(*, resources: sandbox.Resources | None = None, **kwargs):
+    return runtime.SandboxRuntime(
+        runtime.SandboxConfig(
+            resources=resources or sandbox.Resources(cpus=2, memory="4g"), port=47317
+        ),
+        service_healthy=lambda: (True, "ok"),
+        **kwargs,
+    )
+
+
+def specs(*panes):
+    return [runtime.PaneSpec(p, a, n) for p, a, n in panes]
+
+
+def respond_ls(fake_sbx, names):
+    fake_sbx.respond_json(
+        "ls",
+        "--json",
+        payload={
+            "sandboxes": [
+                {"name": n, "id": f"sbx_{i}"} for i, n in enumerate(names, start=1)
+            ]
+        },
+    )
+
+
+HOME = "/home/agent"
+# The exact identity probe bootstrap makes: $HOME, user and group in one round
+# trip. Reproduced rather than approximated so a change to it fails loudly here
+# instead of silently feeding shell output to a JSON parser.
+IDENTITY_PROBE = (
+    "sh",
+    "-lc",
+    'printf "%s\\n%s\\n%s" "$HOME" "$(id -un)" "$(id -gn)"',
+)
+IDENTITY = f"{HOME}\nagent\nagent"
+
+
+def ready(fake_sbx, names, *, codex_version=None):
+    """Script a fake `sbx` for a successful creation of `names`.
+
+    Bootstrap asks the VM real questions -- $HOME, the agent's version, whatever
+    hook document the image ships -- so the fake has to answer them distinctly
+    rather than returning one string for every `exec`. Registered
+    most-specific-first, since the fake matches on argv prefix and first match
+    wins.
+    """
+    fake_sbx.respond("version", stdout=VERSION_LINE)
+    fake_sbx.respond_json("diagnose", "-o", "json", payload={"checks": []})
+    fake_sbx.respond("policy", "check", "network", stdout="allowed\n")
+    fake_sbx.respond("create")
+    fake_sbx.respond("cp")
+    for name in names:
+        fake_sbx.respond("exec", name, *IDENTITY_PROBE, stdout=IDENTITY)
+        if codex_version is not None:
+            fake_sbx.respond(
+                "exec",
+                name,
+                "sh",
+                "-lc",
+                "codex --version 2>/dev/null",
+                stdout=codex_version + "\n",
+            )
+    # Everything else: succeed silently. An image that ships no hook document is
+    # the expected case, so an empty `cat` must not look like a failure.
+    fake_sbx.respond("exec", stdout="")
+    fake_sbx.respond("rm")
+    respond_ls(fake_sbx, names)
+
+
+def names_for(repo, *agent_names):
+    return [sandbox.sandbox_name("ws", "t0", n, str(repo)) for n in agent_names]
+
+
+# --- the headline scenario ---
+
+
+def test_mixed_grid_creates_one_capped_sandbox_per_pane(git_repo, fake_sbx):
+    names = names_for(git_repo, "alpha", "beta")
+    ready(fake_sbx, names)
+    rt = make_runtime()
+
+    launches = rt.prepare(
+        specs(("%1", "claude", "alpha"), ("%2", "codex", "beta")),
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
+    )
+
+    creates = [c for c in fake_sbx.calls if c[0] == "create"]
+    assert len(creates) == 2
+    for call, agent, name in zip(creates, ("claude", "codex"), names, strict=True):
+        assert call == [
+            "create",
+            "--clone",
+            "--name",
+            name,
+            "--cpus",
+            "2",
+            "--memory",
+            "4g",
+            "--no-share-skills",
+            agent,
+            str(git_repo),
+        ]
+    # Each pane attaches to its own sandbox rather than creating a new one.
+    # Codex additionally needs its per-invocation hook-trust flag, without
+    # which it silently runs none of the hooks amux just installed.
+    assert [l.keys[0] for l in launches] == [
+        sandbox.attach_command(names[0], "claude"),
+        sandbox.attach_command(names[1], "codex"),
+    ]
+    assert sandbox.HOOK_TRUST_FLAG in launches[1].keys[0]
+    assert sandbox.HOOK_TRUST_FLAG not in launches[0].keys[0]
+
+
+def test_each_agent_gets_its_own_branch_off_the_task_base(git_repo, fake_sbx):
+    names = names_for(git_repo, "alpha", "beta")
+    ready(fake_sbx, names)
+    make_runtime().prepare(
+        specs(("%1", "claude", "alpha"), ("%2", "codex", "beta")),
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
+    )
+    checkouts = [
+        c
+        for c in fake_sbx.calls
+        if c[:2] == ["exec", names[0]] or c[:2] == ["exec", names[1]]
+    ]
+    branches = [c[-1] for c in checkouts if "checkout" in c]
+    assert branches == ["amux/ws/t0/alpha", "amux/ws/t0/beta"]
+
+
+def test_registry_rows_record_sandbox_identity(git_repo, fake_sbx):
+    names = names_for(git_repo, "alpha", "beta")
+    ready(fake_sbx, names)
+    make_runtime().prepare(
+        specs(("%1", "claude", "alpha"), ("%2", "codex", "beta")),
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
+    )
+    rows = {r["name"]: r for r in store.worktrees_for("ws", "t0")}
+    assert set(rows) == {"alpha", "beta"}
+    for name, row in rows.items():
+        assert row["runtime"] == "docker-sandbox"
+        assert row["runtime_status"] == "running"
+        assert row["sandbox_name"] == sandbox.sandbox_name(
+            "ws", "t0", name, str(git_repo)
+        )
+        assert row["sandbox_id"].startswith("sbx_")
+        assert row["branch"] == f"amux/ws/t0/{name}"
+        assert row["status"] == "active"
+        # A sandbox has no host worktree; nothing may treat this as a directory.
+        assert row["path"] == ""
+        # Explicit, because "" now means a pre-schema-3 row.
+        assert row["socket_name"] == "amux-root"
+
+
+def test_registry_rows_record_the_requested_model_and_effort(git_repo, fake_sbx):
+    """The sandbox row is the *only* source a sandboxed `ctx` has.
+
+    A sandboxed agent cannot read tmux pane options, so if `_launch` stops
+    writing these two the agent silently reports no model and no effort for
+    ever -- and that is indistinguishable from an untuned pane, which the spec
+    deliberately makes silent. Nothing else in the suite reads them back from
+    the code that writes them.
+    """
+    names = names_for(git_repo, "alpha", "beta")
+    ready(fake_sbx, names)
+    make_runtime().prepare(
+        [
+            runtime.PaneSpec("%1", "claude", "alpha", "opus", "high"),
+            runtime.PaneSpec("%2", "codex", "beta"),
+        ],
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
+    )
+    rows = {r["name"]: r for r in store.worktrees_for("ws", "t0")}
+    assert (rows["alpha"]["model"], rows["alpha"]["effort"]) == ("opus", "high")
+    # Empty, not a default amux invented for a pane that asked for nothing.
+    assert (rows["beta"]["model"], rows["beta"]["effort"]) == ("", "")
+
+
+def test_no_host_worktree_is_created_for_a_sandbox_agent(git_repo, fake_sbx):
+    names = names_for(git_repo, "alpha")
+    ready(fake_sbx, names)
+    make_runtime().prepare(
+        specs(("%1", "claude", "alpha")),
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
+    )
+    root = Path(worktree.task_worktree_root("ws", "t0"))
+    # The shared integration worktree exists; the agent's own does not.
+    assert (root / worktree.INTEGRATION_DIR).is_dir()
+    assert not (root / "alpha").exists()
+
+
+def test_the_integration_worktree_is_shared_with_the_host_runtime(git_repo, fake_sbx):
+    """Sandbox branches merge back into the same line host agents use."""
+    names = names_for(git_repo, "alpha")
+    ready(fake_sbx, names)
+    make_runtime().prepare(
+        specs(("%1", "claude", "alpha")),
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
+    )
+    (row,) = store.worktrees_for("ws", "t0")
+    assert row["base_ref"]
+    assert worktree.integration_branch("ws", "t0") == "amux/ws/t0/integration"
+
+
+# --- capability delivery ---
+
+
+def test_each_agent_gets_its_own_capability(git_repo, fake_sbx, minted):
+    names = names_for(git_repo, "alpha", "beta")
+    ready(fake_sbx, names)
+    make_runtime().prepare(
+        specs(("%1", "claude", "alpha"), ("%2", "codex", "beta")),
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
+    )
+    rows = {r["name"]: r["id"] for r in store.worktrees_for("ws", "t0")}
+    assert len(minted) == 2
+    # Distinct secrets, each bound to a different execution row.
+    assert len({m["plaintext"] for m in minted}) == 2
+    assert {m["worktree_id"] for m in minted} == set(rows.values())
+
+
+def test_permissions_come_from_the_shared_constant(git_repo, fake_sbx, minted):
+    """A hand-rolled list would drift from what the routes require and surface
+    as a 403 that reads like an auth bug, so use the service's own vocabulary."""
+    names = names_for(git_repo, "alpha")
+    ready(fake_sbx, names)
+    make_runtime().prepare(
+        specs(("%1", "claude", "alpha")),
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
+    )
+    assert minted[0]["permissions"] == tuple(context_service.AGENT_PERMISSIONS)
+
+
+def test_the_token_never_appears_in_an_sbx_argument(git_repo, fake_sbx, minted):
+    """argv is visible to every process on the host, so the secret must travel
+    as a file. Only hashes reach SQLite, so the plaintext is captured at the
+    mint call to make this assertable at all."""
+    names = names_for(git_repo, "alpha")
+    ready(fake_sbx, names)
+    make_runtime().prepare(
+        specs(("%1", "claude", "alpha")),
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
+    )
+    flat = " ".join(" ".join(call) for call in fake_sbx.calls)
+    assert minted
+    for record in minted:
+        assert record["plaintext"] not in flat
+
+
+def test_the_sandbox_endpoint_targets_the_host_not_loopback(git_repo, fake_sbx):
+    config = runtime.SandboxConfig(port=47317)
+    # A sandbox cannot reach the host's 127.0.0.1; Docker routes this name.
+    assert config.client_endpoint == "http://host.docker.internal:47317"
+    # Policy, however, is written about the loopback address the service binds.
+    assert config.policy_target == "localhost:47317"
+
+
+def test_no_state_directory_or_tmux_socket_is_handed_to_a_sandbox(
+    git_repo, fake_sbx, isolate_state
+):
+    names = names_for(git_repo, "alpha")
+    ready(fake_sbx, names)
+    make_runtime().prepare(
+        specs(("%1", "claude", "alpha")),
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
+    )
+    flat = " ".join(" ".join(call) for call in fake_sbx.calls)
+
+    # The database never crosses the boundary in any form.
+    assert "context.db" not in flat
+
+    # A host path may legitimately appear as the *source* of `sbx cp` -- that is
+    # how the capability is delivered. What must never happen is the state
+    # directory becoming reachable *inside* the VM, so check the destinations.
+    destinations = [
+        call[2].split(":", 1)[1] for call in fake_sbx.calls if call[0] == "cp"
+    ]
+    assert destinations  # the shim and its config really were delivered
+    for destination in destinations:
+        assert str(isolate_state) not in destination
+        assert "/worktrees/" not in destination
+
+    # `sbx create` mounts only the repository; no extra workspace is passed.
+    (create,) = [call for call in fake_sbx.calls if call[0] == "create"]
+    assert create[-1] == str(git_repo)
+    assert str(isolate_state) not in " ".join(create)
+
+    # The tmux socket stays on the host: the sandbox coordinates over HTTP.
+    assert not any("amux-root" in arg for call in fake_sbx.calls for arg in call)
+
+
+# --- preflight placement ---
+
+
+def test_preflight_refuses_a_secondary_worktree_before_creating_anything(
+    git_repo, git_run, tmp_path, fake_sbx
+):
+    ready(fake_sbx, [])
+    linked = tmp_path / "linked"
+    git_run(git_repo, "worktree", "add", "-q", str(linked), "-b", "side")
+
+    with pytest.raises(sandbox.SandboxError, match="preflight failed"):
+        make_runtime().preflight(
+            [AgentRequest("claude")], workspace="ws", task="t0", cwd=str(linked)
+        )
+    assert not fake_sbx.called_with("create")
+
+
+def test_preflight_refuses_an_unsupported_agent(git_repo, fake_sbx):
+    ready(fake_sbx, [])
+    with pytest.raises(sandbox.SandboxError, match="preflight failed"):
+        make_runtime().preflight(
+            [AgentRequest("claude"), AgentRequest("gemini")],
+            workspace="ws",
+            task="t0",
+            cwd=str(git_repo),
+        )
+    assert not fake_sbx.called_with("create")
+
+
+def test_prepare_refuses_a_non_repository(tmp_path, fake_sbx):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    with pytest.raises(sandbox.SandboxError, match="not a git repository"):
+        make_runtime().prepare(
+            specs(("%1", "claude", "alpha")),
+            workspace="ws",
+            task="t0",
+            cwd=str(plain),
+            socket="amux-root",
+        )
+
+
+def test_prepare_requires_a_scope(git_repo, fake_sbx):
+    with pytest.raises(sandbox.SandboxError, match="workspace, task and path"):
+        make_runtime().prepare(
+            specs(("%1", "claude", "alpha")),
+            workspace=None,
+            task=None,
+            cwd=str(git_repo),
+            socket="amux-root",
+        )
+
+
+# --- attachment ---
+
+
+def test_attachment_reattaches_rather_than_relaunching(git_repo, fake_sbx):
+    names = names_for(git_repo, "alpha")
+    ready(fake_sbx, names)
+    (launch,) = make_runtime().prepare(
+        specs(("%1", "claude", "alpha")),
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
+    )
+    # `sbx run --name` resumes the agent already inside; the agent is named
+    # only to carry arguments after `--`, never to create a second VM.
+    assert launch.keys[0].startswith(f"sbx run --name {names[0]}")
+    assert "create" not in launch.keys[0]
+    # The pane's directory lives in the VM, so the host contributes none.
+    assert launch.cwd == ""
+
+
+# --- both halves of bootstrap ---
+
+
+def test_both_bootstrap_halves_run(git_repo, fake_sbx):
+    """The shim and the capability alone give an agent a working `amux` that
+    never reports anything, because state events come from its own hooks. A
+    sandbox missing them reads permanently idle, and no offline test can catch
+    that from behaviour -- hooks only fire inside a live VM -- so the wiring
+    itself is what gets asserted."""
+    names = names_for(git_repo, "alpha")
+    ready(fake_sbx, names)
+    rt = make_runtime()
+    rt.prepare(
+        specs(("%1", "claude", "alpha")),
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
+    )
+
+    # The client half: the shim and its config were delivered.
+    delivered = [c[2].split(":", 1)[1] for c in fake_sbx.calls if c[0] == "cp"]
+    assert "/usr/local/bin/amux" in delivered
+    assert any(d.endswith("/context.json") for d in delivered)
+
+    # The hooks half: the agent's own hook document was written. Asserted by the
+    # specific file, not by "some exec happened" -- a trivial probe satisfies
+    # that while the real install does nothing.
+    hooks = rt.hooks["%1"]
+    assert hooks.settings_path.endswith(".claude/settings.json")
+    assert any(hooks.settings_path in " ".join(c) for c in fake_sbx.calls)
+    assert hooks.mechanism == "hooks"
+    # True now that the hook locations have been checked against the real
+    # images. This asserted False while they were only assumed -- the flag
+    # exists so amux never claims a verification nobody performed, so it is
+    # worth failing when its meaning changes rather than accepting either value.
+    assert hooks.location_verified is True
+
+
+def test_a_sandboxed_agent_gets_the_amux_skill(git_repo, fake_sbx):
+    """The third thing bootstrap installs. A sandbox is created with
+    `--no-share-skills`, so this document -- which is what tells an agent which
+    commands cross the host boundary -- reaches it only if amux delivers it."""
+    ready(fake_sbx, names_for(git_repo, "alpha"))
+    rt = make_runtime()
+    rt.prepare(
+        specs(("%1", "claude", "alpha")),
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
+    )
+
+    delivered = [c[2].split(":", 1)[1] for c in fake_sbx.calls if c[0] == "cp"]
+    assert any(d.endswith("/.claude/skills/amux/SKILL.md") for d in delivered)
+
+
+def test_shared_skills_leaves_the_hosts_skill_directory_alone(git_repo, fake_sbx):
+    """With --share-skills the in-VM skill directory is backed by the host's own,
+    where `make install_skills` keeps a symlink into this repository. Writing
+    there FROM INSIDE THE VM would push a file across the boundary in the
+    direction amux forbids, so nothing is copied in."""
+    ready(fake_sbx, names_for(git_repo, "alpha"))
+    rt = make_runtime(
+        resources=sandbox.Resources(cpus=2, memory="4g", share_skills=True)
+    )
+    rt.prepare(
+        specs(("%1", "claude", "alpha")),
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
+    )
+
+    delivered = [c[2].split(":", 1)[1] for c in fake_sbx.calls if c[0] == "cp"]
+    assert not any("skills" in d for d in delivered)
+    # The shim still goes in: sharing skills says nothing about the context client.
+    assert "/usr/local/bin/amux" in delivered
+
+
+def test_shared_skills_is_covered_by_the_host_side_install_instead(
+    git_repo, fake_sbx, isolate_home
+):
+    """The skip is now half a split, not a refusal.
+
+    Skipping the in-VM write used to be the whole story, which left exactly one
+    configuration -- a shared-skills sandbox on a machine that never ran
+    `make install_skills` -- with no document anywhere. amux writes the host
+    directory on every spawn now, so that is where this agent's copy comes from.
+    """
+    ready(fake_sbx, names_for(git_repo, "alpha"))
+    rt = make_runtime(
+        resources=sandbox.Resources(cpus=2, memory="4g", share_skills=True)
+    )
+    assert not (isolate_home / ".claude").exists()
+
+    rt.prepare(
+        specs(("%1", "claude", "alpha")),
+        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+    )
+
+    installed = isolate_home / ".claude" / "skills" / "amux" / "SKILL.md"
+    assert installed.read_bytes() == sandbox_bootstrap.skill_source().read_bytes()
+
+
+def test_without_shared_skills_the_host_directory_is_not_touched(
+    git_repo, fake_sbx, isolate_home
+):
+    """The other half. A sandbox that is NOT sharing the host's skills has no
+    business writing into the user's own `~/.claude/skills` -- its copy went in
+    through `sbx cp`, which the test above this one pins."""
+    ready(fake_sbx, names_for(git_repo, "alpha"))
+    make_runtime().prepare(
+        specs(("%1", "claude", "alpha")),
+        workspace="ws", task="t0", cwd=str(git_repo), socket="amux-root",
+    )
+
+    assert not (isolate_home / ".claude").exists()
+
+
+def test_hook_installation_records_what_the_agent_cannot_report(git_repo, fake_sbx):
+    """An old Codex has only the single `notify` slot. That is detected in the
+    image, and the resulting gap is recorded rather than swallowed."""
+    names = names_for(git_repo, "alpha")
+    ready(fake_sbx, names, codex_version="codex-cli 0.5.0")
+    rt = make_runtime()
+    rt.prepare(
+        specs(("%1", "codex", "alpha")),
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
+    )
+    hooks = rt.hooks["%1"]
+    # The version was read from the image, not assumed...
+    assert hooks.agent_version == "codex-cli 0.5.0"
+    # ...and 0.5.0 predates the full hook surface, so it falls back.
+    assert hooks.mechanism == "notify"
+    assert hooks.degraded and hooks.missing_kinds
+
+
+def test_a_current_codex_image_is_not_degraded(git_repo, fake_sbx):
+    """The fallback must be chosen by detection, not applied to every Codex."""
+    names = names_for(git_repo, "alpha")
+    ready(fake_sbx, names, codex_version="codex-cli 0.146.0")
+    rt = make_runtime()
+    rt.prepare(
+        specs(("%1", "codex", "alpha")),
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
+    )
+    hooks = rt.hooks["%1"]
+    assert hooks.agent_version == "codex-cli 0.146.0"
+    assert hooks.mechanism == "hooks"
+    assert not hooks.degraded
+    assert hooks.settings_path.endswith(".codex/hooks.json")
+
+
+def test_a_sandbox_without_the_skill_is_announced_not_swallowed(
+    git_repo, fake_sbx, capsys, monkeypatch
+):
+    """A build that cannot ship the skill still spawns a working grid, so nothing
+    fails — which is exactly why it has to say so. Otherwise every agent quietly
+    loses the one document describing the boundary it must not cross."""
+    ready(fake_sbx, names_for(git_repo, "alpha"))
+    monkeypatch.setattr(
+        runtime.sandbox_bootstrap,
+        "install_skill",
+        lambda *a, **k: runtime.sandbox_bootstrap.SkillInstalled(
+            reason="amux's own skill is missing: looked for SKILL.md at ..."
+        ),
+    )
+    rt = make_runtime()
+    rt.prepare(
+        specs(("%1", "claude", "alpha")),
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
+    )
+
+    out = capsys.readouterr().out
+    assert "alpha" in out and "no amux skill" in out
+    assert "boundary" in out
+
+
+def test_a_degraded_agent_is_announced_not_swallowed(
+    git_repo, fake_sbx, capsys, monkeypatch
+):
+    names = names_for(git_repo, "alpha")
+    ready(fake_sbx, names)
+
+    real = runtime.sandbox_bootstrap.install_hooks
+    degraded = runtime.sandbox_bootstrap.HooksInstalled(
+        agent="codex",
+        settings_path="/home/agent/.codex/config.toml",
+        missing_kinds=("busy", "notify"),
+        location_verified=True,
+        agent_version="codex-cli 0.5.0",
+        mechanism="notify",
+    )
+    monkeypatch.setattr(
+        runtime.sandbox_bootstrap, "install_hooks", lambda *a, **k: degraded
+    )
+    assert real is not runtime.sandbox_bootstrap.install_hooks
+
+    rt = make_runtime()
+    rt.prepare(
+        specs(("%1", "codex", "alpha")),
+        workspace="ws",
+        task="t0",
+        cwd=str(git_repo),
+        socket="amux-root",
+    )
+    out = capsys.readouterr().out
+    assert "cannot report" in out
+    assert "busy" in out and "notify" in out
+    assert "codex-cli 0.5.0" in out
+    assert rt.hooks["%1"].degraded

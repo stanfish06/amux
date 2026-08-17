@@ -1,20 +1,12 @@
-"""Scoped context store: events, notes, and the worktree registry.
-
-One SQLite file at $XDG_STATE_HOME/amux/context.db. WAL + busy_timeout so
-concurrent agents can read/write without tripping over each other.
-
-Identity: a worktree owns a surrogate `id` that nothing recycles, and notes and
-events carry that id plus the `repo` they belong to. Pane ids are *not* stable —
-tmux keeps its `%N` counter in the server process, so a restarted amux-root
-hands `%67` back out to an unrelated agent. Anything keyed on a pane alone
-silently merges two different worktrees' history.
-"""
-
 from __future__ import annotations
 
+import hashlib
+import secrets
 import sqlite3
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from hmac import compare_digest
 from pathlib import Path
 from typing import Any, Literal
 
@@ -22,14 +14,31 @@ from amux.shared import STATE_DIR
 
 DB_PATH = STATE_DIR / "context.db"
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 5
 
 NoteScope = Literal["agent", "task", "workspace"]
 NoteKind = Literal["note", "decision", "finding", "blocker"]
 WorktreeStatus = Literal["active", "merged", "removed"]
+Runtime = Literal["host", "docker-sandbox", "apple-container"]
+MessageStatus = Literal["pending", "delivered", "undelivered"]
 
 NOTE_SCOPES = ("agent", "task", "workspace")
 NOTE_KINDS = ("note", "decision", "finding", "blocker")
+RUNTIMES = ("host", "docker-sandbox", "apple-container")
+MESSAGE_STATUSES = ("pending", "delivered", "undelivered")
+
+_RUNTIME_COLUMNS = (
+    ("runtime", "TEXT NOT NULL DEFAULT 'host'"),
+    ("runtime_status", "TEXT NOT NULL DEFAULT ''"),
+    ("sandbox_name", "TEXT NOT NULL DEFAULT ''"),
+    ("sandbox_id", "TEXT NOT NULL DEFAULT ''"),
+    ("socket_name", "TEXT NOT NULL DEFAULT ''"),
+)
+
+_TUNING_COLUMNS = (
+    ("model", "TEXT NOT NULL DEFAULT ''"),
+    ("effort", "TEXT NOT NULL DEFAULT ''"),
+)
 
 _WORKTREES_DDL = """
 CREATE TABLE IF NOT EXISTS {table} (
@@ -44,7 +53,14 @@ CREATE TABLE IF NOT EXISTS {table} (
   base_ref TEXT NOT NULL DEFAULT '',
   repo TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'active',
-  created_ts REAL NOT NULL
+  created_ts REAL NOT NULL,
+  runtime TEXT NOT NULL DEFAULT 'host',
+  runtime_status TEXT NOT NULL DEFAULT '',
+  sandbox_name TEXT NOT NULL DEFAULT '',
+  sandbox_id TEXT NOT NULL DEFAULT '',
+  socket_name TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  effort TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -88,6 +104,51 @@ CREATE TABLE IF NOT EXISTS notes (
 CREATE INDEX IF NOT EXISTS idx_notes_scope ON notes(workspace, task, scope, ts);
 CREATE INDEX IF NOT EXISTS idx_notes_worktree ON notes(worktree_id, ts);
 CREATE INDEX IF NOT EXISTS idx_notes_repo ON notes(repo, ts);
+
+CREATE TABLE IF NOT EXISTS context_tokens (
+  id INTEGER PRIMARY KEY,
+  worktree_id INTEGER NOT NULL REFERENCES worktrees(id),
+  token_hash TEXT NOT NULL UNIQUE,
+  permissions TEXT NOT NULL DEFAULT '',
+  created_ts REAL NOT NULL,
+  expires_ts REAL,
+  revoked_ts REAL
+);
+CREATE INDEX IF NOT EXISTS idx_tokens_hash ON context_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_tokens_worktree ON context_tokens(worktree_id);
+
+CREATE TABLE IF NOT EXISTS messages (
+  id INTEGER PRIMARY KEY,
+  created_ts REAL NOT NULL,
+  updated_ts REAL NOT NULL,
+  deadline_ts REAL NOT NULL,
+  submitted_ts REAL,
+  delivered_ts REAL,
+  sender_worktree_id INTEGER REFERENCES worktrees(id),
+  target_worktree_id INTEGER REFERENCES worktrees(id),
+  repo TEXT NOT NULL DEFAULT '',
+  workspace TEXT NOT NULL,
+  sender_task TEXT NOT NULL,
+  sender_pane TEXT NOT NULL,
+  sender_agent TEXT NOT NULL DEFAULT '',
+  sender_name TEXT NOT NULL DEFAULT '',
+  target_task TEXT NOT NULL,
+  target_pane TEXT NOT NULL,
+  target_agent TEXT NOT NULL DEFAULT '',
+  target_name TEXT NOT NULL DEFAULT '',
+  target_created_ts REAL NOT NULL,
+  body TEXT NOT NULL,
+  envelope TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  reason_code TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_messages_sender
+  ON messages(workspace, repo, sender_pane, id);
+CREATE INDEX IF NOT EXISTS idx_messages_target
+  ON messages(workspace, repo, target_pane, id);
+CREATE INDEX IF NOT EXISTS idx_messages_status
+  ON messages(status, deadline_ts, id);
 """
 )
 
@@ -101,8 +162,6 @@ _PANE_WORKTREE_SQL = (
 def _pane_worktree(
     conn: sqlite3.Connection, pane: str, cols: str, since: float | None
 ) -> sqlite3.Row | None:
-    """The worktree row a pane fronts. `since` drops rows registered before the
-    pane existed, which a recycled `%N` would otherwise inherit."""
     sql = _PANE_WORKTREE_SQL.format(
         cols=cols, since="" if since is None else " AND created_ts >= ?"
     )
@@ -111,8 +170,6 @@ def _pane_worktree(
 
 
 def _apply_schema(conn: sqlite3.Connection) -> None:
-    """Run _SCHEMA statement by statement. Not executescript(): that commits any
-    pending transaction first, which would break _migrate's atomicity."""
     for statement in _SCHEMA.split(";"):
         if statement.strip():
             conn.execute(statement)
@@ -128,13 +185,10 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> list[str]:
-    """Column names in declared order — order matters when copying a table."""
     return [r["name"] for r in conn.execute(f"PRAGMA table_info({table})")]
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Bring an existing db up to SCHEMA_VERSION. Runs with foreign keys off and
-    inside one transaction, so a crash mid-migration leaves the old db intact."""
     if conn.execute("PRAGMA user_version").fetchone()[0] >= SCHEMA_VERSION:
         return
     conn.execute("BEGIN IMMEDIATE")
@@ -174,6 +228,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 "  WHERE worktree_id IS NULL"
             )
 
+        if _table_exists(conn, "worktrees"):
+            existing = _columns(conn, "worktrees")
+            for column, decl in (*_RUNTIME_COLUMNS, *_TUNING_COLUMNS):
+                if column not in existing:
+                    conn.execute(f"ALTER TABLE worktrees ADD COLUMN {column} {decl}")
+
         _apply_schema(conn)
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.execute("COMMIT")
@@ -194,6 +254,15 @@ def _connect(db_path: Path | None = None) -> sqlite3.Connection:
     return conn
 
 
+@contextmanager
+def _session(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
+    conn = _connect(db_path)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
 def _rows(
     conn: sqlite3.Connection, sql: str, params: tuple = ()
 ) -> list[dict[str, Any]]:
@@ -207,16 +276,15 @@ def _attribution(
     repo: str | None,
     since: float | None = None,
 ) -> tuple[int | None, str]:
-    """(worktree_id, repo) to store on a note or event. Callers holding the
-    worktree row pass both; hook callers pass neither and get whatever worktree
-    the pane fronts now, bounded by `since`."""
     if worktree_id is None and repo is None:
         row = _pane_worktree(conn, pane, "id, repo", since)
         return (row["id"], row["repo"]) if row else (None, "")
     return worktree_id, repo or ""
 
 
-# --- events ---
+def schema_version(db_path: Path | None = None) -> int:
+    with _session(db_path) as conn:
+        return int(conn.execute("PRAGMA user_version").fetchone()[0])
 
 
 def add_event(
@@ -232,9 +300,7 @@ def add_event(
     worktree_since: float | None = None,
     db_path: Path | None = None,
 ) -> int:
-    """Record a state change. `worktree_id`/`repo` default to whatever worktree
-    the pane fronts now, bounded by `worktree_since`."""
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         worktree_id, repo = _attribution(conn, pane, worktree_id, repo, worktree_since)
         cur = conn.execute(
             "INSERT INTO events"
@@ -273,14 +339,12 @@ def iter_events(
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
     sql += " ORDER BY ts, id"
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         return _rows(conn, sql, params)
 
 
 def latest_event(pane: str, db_path: Path | None = None) -> dict[str, Any] | None:
-    """The pane's newest event, whichever incarnation wrote it. Callers bound it
-    with `events.in_incarnation`."""
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         rows = _rows(
             conn,
             "SELECT * FROM events WHERE pane = ? ORDER BY ts DESC, id DESC LIMIT 1",
@@ -292,7 +356,6 @@ def latest_event(pane: str, db_path: Path | None = None) -> dict[str, Any] | Non
 def events_for_panes(
     panes: Sequence[str], since: float | None = None, db_path: Path | None = None
 ) -> list[dict[str, Any]]:
-    """Events for several panes in one query, oldest first."""
     if not panes:
         return []
     sql = f"SELECT * FROM events WHERE pane IN ({', '.join('?' * len(panes))})"
@@ -300,11 +363,18 @@ def events_for_panes(
     if since is not None:
         sql += " AND ts >= ?"
         params += (since,)
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         return _rows(conn, sql + " ORDER BY ts, id", params)
 
 
-# --- notes ---
+def _page(sql: str, params: tuple, after: int | None, limit: int) -> tuple[str, tuple]:
+    if after is not None:
+        joiner = "AND" if " WHERE " in sql else "WHERE"
+        return (
+            f"{sql} {joiner} id > ? ORDER BY id ASC LIMIT ?",
+            (*params, after, limit),
+        )
+    return f"{sql} ORDER BY ts DESC, id DESC LIMIT ?", (*params, limit)
 
 
 def add_note(
@@ -320,16 +390,9 @@ def add_note(
     ts: float | None = None,
     db_path: Path | None = None,
 ) -> int:
-    """Publish a note. `worktree_id`/`repo` default to whatever worktree the pane
-    fronts right now; pass them explicitly when the caller already resolved the
-    row (an empty `repo` is how a caller says "there is none")."""
-    if scope not in NOTE_SCOPES:
-        raise ValueError(f"scope must be one of {NOTE_SCOPES}, got '{scope}'")
-    if kind not in NOTE_KINDS:
-        raise ValueError(f"kind must be one of {NOTE_KINDS}, got '{kind}'")
     if not text.strip():
         raise ValueError("note text is empty")
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         worktree_id, repo = _attribution(conn, pane, worktree_id, repo)
         cur = conn.execute(
             "INSERT INTO notes"
@@ -358,9 +421,9 @@ def visible_notes(
     limit: int = 10,
     kind: str | None = None,
     repo: str | None = None,
+    after: int | None = None,
     db_path: Path | None = None,
 ) -> list[dict[str, Any]]:
-    """Notes an agent may see: workspace notes, its task's notes, its own."""
     sql = (
         "SELECT * FROM notes WHERE workspace = ? AND ("
         "  scope = 'workspace'"
@@ -375,9 +438,8 @@ def visible_notes(
     if repo:
         sql += " AND (repo = ? OR repo = '')"
         params += (repo,)
-    sql += " ORDER BY ts DESC, id DESC LIMIT ?"
-    params += (limit,)
-    with _connect(db_path) as conn:
+    sql, params = _page(sql, params, after, limit)
+    with _session(db_path) as conn:
         return _rows(conn, sql, params)
 
 
@@ -390,6 +452,7 @@ def query_notes(
     worktree_id: int | None = None,
     repo: str | None = None,
     limit: int = 20,
+    after: int | None = None,
     db_path: Path | None = None,
 ) -> list[dict[str, Any]]:
     sql, params = "SELECT * FROM notes", ()
@@ -413,15 +476,159 @@ def query_notes(
         clauses.append("worktree_id = ?")
         params += (worktree_id,)
     if repo:
-        # Same rule as visible_notes, so a pane sees the same note set whether
-        # or not --scope routed it here.
         clauses.append("(repo = ? OR repo = '')")
         params += (repo,)
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
-    sql += " ORDER BY ts DESC, id DESC LIMIT ?"
+    sql, params = _page(sql, params, after, limit)
+    with _session(db_path) as conn:
+        return _rows(conn, sql, params)
+
+
+def create_message(
+    *,
+    created_ts: float,
+    deadline_ts: float,
+    sender_worktree_id: int | None,
+    target_worktree_id: int | None,
+    repo: str,
+    workspace: str,
+    sender_task: str,
+    sender_pane: str,
+    sender_agent: str,
+    sender_name: str,
+    target_task: str,
+    target_pane: str,
+    target_agent: str,
+    target_name: str,
+    target_created_ts: float,
+    body: str,
+    db_path: Path | None = None,
+) -> int:
+    with _session(db_path) as conn:
+        cur = conn.execute(
+            "INSERT INTO messages"
+            " (created_ts, updated_ts, deadline_ts, sender_worktree_id,"
+            "  target_worktree_id, repo, workspace, sender_task, sender_pane,"
+            "  sender_agent, sender_name, target_task, target_pane, target_agent,"
+            "  target_name, target_created_ts, body)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                created_ts,
+                created_ts,
+                deadline_ts,
+                sender_worktree_id,
+                target_worktree_id,
+                repo,
+                workspace,
+                sender_task,
+                sender_pane,
+                sender_agent,
+                sender_name,
+                target_task,
+                target_pane,
+                target_agent,
+                target_name,
+                target_created_ts,
+                body,
+            ),
+        )
+        return cur.lastrowid or 0
+
+
+def set_message_envelope(
+    message_id: int, envelope: str, db_path: Path | None = None
+) -> bool:
+    with _session(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE messages SET envelope = ?"
+            " WHERE id = ? AND status = 'pending'",
+            (envelope, message_id),
+        )
+        return cur.rowcount == 1
+
+
+def mark_message_submitted(
+    message_id: int, submitted_ts: float, db_path: Path | None = None
+) -> bool:
+    with _session(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE messages SET submitted_ts = ?, updated_ts = ?"
+            " WHERE id = ? AND status = 'pending'",
+            (submitted_ts, submitted_ts, message_id),
+        )
+        return cur.rowcount == 1
+
+
+def finish_message(
+    message_id: int,
+    status: MessageStatus,
+    reason_code: str = "",
+    reason: str = "",
+    now: float | None = None,
+    db_path: Path | None = None,
+) -> bool:
+    if status not in ("delivered", "undelivered"):
+        raise ValueError("message can finish only as delivered or undelivered")
+    now = time.time() if now is None else now
+    delivered_ts = now if status == "delivered" else None
+    with _session(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE messages SET status = ?, reason_code = ?, reason = ?,"
+            " updated_ts = ?, delivered_ts = ?"
+            " WHERE id = ? AND status = 'pending'",
+            (status, reason_code, reason, now, delivered_ts, message_id),
+        )
+        return cur.rowcount == 1
+
+
+def expire_messages(now: float | None = None, db_path: Path | None = None) -> int:
+    now = time.time() if now is None else now
+    with _session(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE messages SET status = 'undelivered',"
+            " reason_code = 'deadline_expired',"
+            " reason = 'delivery deadline expired before confirmation',"
+            " updated_ts = ?"
+            " WHERE status = 'pending' AND deadline_ts <= ?",
+            (now, now),
+        )
+        return cur.rowcount
+
+
+def message_by_id(
+    message_id: int, db_path: Path | None = None
+) -> dict[str, Any] | None:
+    with _session(db_path) as conn:
+        rows = _rows(conn, "SELECT * FROM messages WHERE id = ?", (message_id,))
+    return rows[0] if rows else None
+
+
+def visible_messages(
+    workspace: str,
+    repo: str,
+    pane: str,
+    status: MessageStatus | None = None,
+    limit: int = 20,
+    now: float | None = None,
+    db_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    if status is not None and status not in MESSAGE_STATUSES:
+        raise ValueError(f"status must be one of {MESSAGE_STATUSES}, got '{status}'")
+    if limit < 1:
+        raise ValueError("limit must be positive")
+    expire_messages(now, db_path)
+    sql = (
+        "SELECT * FROM messages WHERE workspace = ? AND repo = ?"
+        " AND (sender_pane = ? OR target_pane = ?)"
+    )
+    params: tuple = (workspace, repo, pane, pane)
+    if status is not None:
+        sql += " AND status = ?"
+        params += (status,)
+    sql += " ORDER BY id DESC LIMIT ?"
     params += (limit,)
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         return _rows(conn, sql, params)
 
 
@@ -436,17 +643,24 @@ def register_worktree(
     base_ref: str = "",
     repo: str = "",
     created_ts: float | None = None,
+    runtime: Runtime = "host",
+    runtime_status: str = "",
+    sandbox_name: str = "",
+    sandbox_id: str = "",
+    socket_name: str = "",
+    model: str = "",
+    effort: str = "",
     db_path: Path | None = None,
 ) -> int:
-    """Append a worktree and return its id. Append-only on purpose: the old
-    INSERT OR REPLACE keyed on pane erased the previous worktree, and every note
-    and event that pointed at it, whenever tmux reissued the pane id."""
-    with _connect(db_path) as conn:
+    if runtime not in RUNTIMES:
+        raise ValueError(f"runtime must be one of {RUNTIMES}, got '{runtime}'")
+    with _session(db_path) as conn:
         cur = conn.execute(
             "INSERT INTO worktrees"
             " (pane, workspace, task, agent, name, path, branch, base_ref, repo,"
-            "  status, created_ts)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
+            "  status, created_ts, runtime, runtime_status, sandbox_name,"
+            "  sandbox_id, socket_name, model, effort)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 pane,
                 workspace,
@@ -458,6 +672,13 @@ def register_worktree(
                 base_ref,
                 repo,
                 created_ts or time.time(),
+                runtime,
+                runtime_status,
+                sandbox_name,
+                sandbox_id,
+                socket_name,
+                model,
+                effort,
             ),
         )
         return cur.lastrowid or 0
@@ -466,18 +687,31 @@ def register_worktree(
 def worktree_for_pane(
     pane: str, since: float | None = None, db_path: Path | None = None
 ) -> dict[str, Any] | None:
-    """The worktree a pane currently fronts. A pane id can head several rows once
-    tmux recycles it, so active wins, then most recently created; `since` rules
-    out rows the pane never owned."""
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         row = _pane_worktree(conn, pane, "*", since)
     return dict(row) if row else None
+
+
+def worktrees_for_panes(
+    panes: Sequence[str], since: float | None = None, db_path: Path | None = None
+) -> dict[str, dict[str, Any]]:
+    if not panes:
+        return {}
+    placeholders = ", ".join("?" * len(panes))
+    sql = f"SELECT * FROM worktrees WHERE pane IN ({placeholders})"
+    params: tuple = tuple(panes)
+    if since is not None:
+        sql += " AND created_ts >= ?"
+        params += (since,)
+    sql += " ORDER BY (status = 'active') ASC, created_ts ASC, id ASC"
+    with _session(db_path) as conn:
+        return {row["pane"]: row for row in _rows(conn, sql, params)}
 
 
 def worktree_by_id(
     worktree_id: int, db_path: Path | None = None
 ) -> dict[str, Any] | None:
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         rows = _rows(conn, "SELECT * FROM worktrees WHERE id = ?", (worktree_id,))
     return rows[0] if rows else None
 
@@ -497,14 +731,140 @@ def worktrees_for(
         sql += " AND repo = ?"
         params += (repo,)
     sql += " ORDER BY created_ts"
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         return _rows(conn, sql, params)
 
 
 def set_worktree_status(
     worktree_id: int, status: WorktreeStatus, db_path: Path | None = None
 ) -> None:
-    with _connect(db_path) as conn:
+    with _session(db_path) as conn:
         conn.execute(
             "UPDATE worktrees SET status = ? WHERE id = ?", (status, worktree_id)
+        )
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def mint_context_token(
+    worktree_id: int,
+    permissions: Sequence[str] = (),
+    ttl: float | None = None,
+    now: float | None = None,
+    db_path: Path | None = None,
+) -> tuple[str, int]:
+    for permission in permissions:
+        if not permission.strip() or "," in permission:
+            raise ValueError(
+                f"permission must be non-empty and comma-free, got '{permission}'"
+            )
+    now = time.time() if now is None else now
+    token = secrets.token_urlsafe(32)
+    with _session(db_path) as conn:
+        if (
+            conn.execute(
+                "SELECT 1 FROM worktrees WHERE id = ?", (worktree_id,)
+            ).fetchone()
+            is None
+        ):
+            raise ValueError(f"no worktree with id {worktree_id}")
+        cur = conn.execute(
+            "INSERT INTO context_tokens"
+            " (worktree_id, token_hash, permissions, created_ts, expires_ts)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (
+                worktree_id,
+                _hash_token(token),
+                ",".join(permissions),
+                now,
+                None if ttl is None else now + ttl,
+            ),
+        )
+        return token, cur.lastrowid or 0
+
+
+def context_token_record(
+    token: str, now: float | None = None, db_path: Path | None = None
+) -> dict[str, Any] | None:
+    if not token:
+        return None
+    now = time.time() if now is None else now
+    digest = _hash_token(token)
+    with _session(db_path) as conn:
+        rows = _rows(
+            conn,
+            "SELECT t.id, t.worktree_id, t.token_hash, t.permissions,"
+            "       t.created_ts, t.expires_ts, t.revoked_ts,"
+            "       w.pane, w.workspace, w.task, w.agent, w.name, w.path,"
+            "       w.branch, w.base_ref, w.repo, w.status, w.created_ts AS"
+            "       worktree_created_ts, w.runtime, w.runtime_status,"
+            "       w.sandbox_name, w.sandbox_id, w.socket_name,"
+            "       w.model, w.effort"
+            " FROM context_tokens t JOIN worktrees w ON w.id = t.worktree_id"
+            " WHERE t.token_hash = ?",
+            (digest,),
+        )
+    if not rows:
+        return None
+    record = rows[0]
+    if not compare_digest(record["token_hash"], digest):
+        return None
+    if record["revoked_ts"] is not None:
+        return None
+    if record["expires_ts"] is not None and now >= record["expires_ts"]:
+        return None
+    record["permissions"] = tuple(p for p in record["permissions"].split(",") if p)
+    del record["token_hash"]
+    return record
+
+
+def revoke_context_token(
+    token_id: int, now: float | None = None, db_path: Path | None = None
+) -> None:
+    with _session(db_path) as conn:
+        conn.execute(
+            "UPDATE context_tokens SET revoked_ts = ?"
+            " WHERE id = ? AND revoked_ts IS NULL",
+            (time.time() if now is None else now, token_id),
+        )
+
+
+def revoke_context_tokens_for_worktree(
+    worktree_id: int, now: float | None = None, db_path: Path | None = None
+) -> int:
+    with _session(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE context_tokens SET revoked_ts = ?"
+            " WHERE worktree_id = ? AND revoked_ts IS NULL",
+            (time.time() if now is None else now, worktree_id),
+        )
+        return cur.rowcount
+
+
+def set_worktree_runtime(
+    worktree_id: int,
+    runtime_status: str | None = None,
+    sandbox_name: str | None = None,
+    sandbox_id: str | None = None,
+    runtime: Runtime | None = None,
+    db_path: Path | None = None,
+) -> None:
+    if runtime is not None and runtime not in RUNTIMES:
+        raise ValueError(f"runtime must be one of {RUNTIMES}, got '{runtime}'")
+    updates = {
+        "runtime": runtime,
+        "runtime_status": runtime_status,
+        "sandbox_name": sandbox_name,
+        "sandbox_id": sandbox_id,
+    }
+    given = {k: v for k, v in updates.items() if v is not None}
+    if not given:
+        return
+    assignments = ", ".join(f"{k} = ?" for k in given)
+    with _session(db_path) as conn:
+        conn.execute(
+            f"UPDATE worktrees SET {assignments} WHERE id = ?",
+            (*given.values(), worktree_id),
         )

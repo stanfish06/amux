@@ -1,12 +1,19 @@
 ---
 name: amux
-description: Use when orchestrating AI agents in tmux with the amux CLI — spawning or killing agent grids (`amux spw`/`spg`/`kw`/`kg`), listing them (`lsw`/`lsg`), mixed claude+codex grids, the `amux-root` tmux socket, agent state events (`amux event emit`/`state`/`tail`/`wait`), per-agent git worktrees and task integration branches (`amux integrate`), scoped context notes (`amux note`/`notes`), sending messages from one agent pane to another, when an agent needs to discover which workspace, task, and pane it is running in (`amux ctx`), or when an agent needs to start work elsewhere — a task whose context no longer fits the current window, or a change that belongs to another repo.
+description: Use when orchestrating AI agents in tmux with the amux CLI — spawning or killing agent grids (`amux spw`/`spg`/`kw`/`kg`), listing them (`lsw`/`lsg`), mixed claude+codex grids, the `amux-root` tmux socket, agent state events (`amux event emit`/`state`/`tail`/`wait`), per-agent git worktrees and task integration branches (`amux integrate`), scoped context notes (`amux note`/`notes`), sending messages from one agent pane to another, when an agent needs to discover which workspace, task, and pane it is running in (`amux ctx`), when an agent needs to start work elsewhere — a task whose context no longer fits the current window, or a change that belongs to another repo — or when an agent runs inside a Docker Sandbox microVM (`--runtime docker-sandbox`, `sbx`) and needs to know which commands cross the host boundary, why a context command fails, or how its committed branch reaches the host.
 ---
 
 # amux
 
 Agent orchestration on top of tmux. One dedicated tmux server (socket `amux-root`)
 holds every agent, so amux never touches your interactive tmux sessions.
+
+**amux installed this document when it spawned your pane**, and it is the
+authoritative vocabulary for that pane — coordination, spawning work, messaging
+teammates, per-agent worktrees, agent state, and, if you are in one, the sandbox
+boundary. It is rewritten on every spawn, so it describes the amux you are
+actually running rather than whatever was in your skill directory beforehand.
+Where it disagrees with your recollection of these commands, it is right.
 
 ## Vocabulary
 
@@ -31,6 +38,8 @@ commands use the left.
 | `amux kg <ws> <task> [--clean]` | kill one task (--clean also removes its worktrees) |
 | `amux kw <ws> [--clean]` | kill a whole workspace |
 | `amux ctx [--json] [--pane ID]` | this agent's identity + workspace team roster + visible notes |
+| `amux send <pane> <text...> [--timeout S]` | wait for idle, send an attributed message, and confirm a fresh busy event |
+| `amux messages [-n N] [--status STATUS] [--json]` | list durable messages sent or received by this agent |
 | `amux note <text> [--scope agent\|task\|workspace] [--kind note\|decision\|finding\|blocker]` | publish a scoped context note |
 | `amux notes [--workspace WS] [--task T] [--scope S] [--kind K] [-n N] [--json]` | list scoped notes |
 | `amux integrate <ws> <task> [--agent NAME...] [--all]` | merge agent worktree branches into the task integration branch |
@@ -42,17 +51,90 @@ commands use the left.
 `-p` defaults to `$PWD` for `spw`, to the workspace dir for `spg`. `-t` defaults
 to `task0`. Global `-L/--socket-name` must come **before** the subcommand.
 
+Every command above runs on the host. Inside a Docker Sandbox agent only `ctx`,
+`send`, `messages`, `notes`, `note` and `event emit|state|wait` are available —
+the rest refuse locally. See *Sandboxed agents* for why, and for
+`--runtime docker-sandbox`.
+
 ## Agent specs and grid shape
 
-`-a AGENT[:COUNT]` is repeatable and fills panes row-major. `AGENT` is `claude`,
-`codex`, or any raw shell command. Default is one `claude`.
+`-a AGENT[@MODEL][/EFFORT][:COUNT]` is repeatable and fills panes row-major.
+`AGENT` is `claude`, `codex`, or any raw shell command. Every other part is
+optional. Default is one `claude`.
 
 ```sh
 amux spw myproj -p ~/Git/myproj -r 2 -c 2   # 2x2, all claude
 amux spg myproj review -a codex:2           # 1x2, both codex
 amux spg myproj fix -a claude:3 -a codex    # 2x2, 3 claude + 1 codex
 amux spg myproj shell -a bash               # raw command instead of an agent
+amux spg myproj plan -a claude@opus/high -a codex@gpt-5.6-sol/xhigh   # per-spec model + effort
 ```
+
+## Model and reasoning effort
+
+Each spec carries its own model and effort, so one grid can mix a cheap
+reviewer with an expensive implementer. Both work identically under the host
+and `docker-sandbox` runtimes, and `amux ctx` reports what your own pane was
+launched with, so you can check rather than guess.
+
+They become each CLI's own flags — `claude --model X --effort Y`, `codex -m X
+-c model_reasoning_effort=Y` — appended to the command amux already runs.
+
+**amux does not check the values.** A model or effort level released after this
+amux was built works immediately, and amux never refuses one it has not heard
+of. The cost is that **a typo is not caught by anything, and it fails quietly
+rather than loudly** — do not expect a dead pane to tell you. Measured live
+against `claude` 2.1.224 and `codex-cli` 0.146.0:
+
+- `claude --effort hgih` prints `Warning: Unknown --effort value 'hgih' —
+  ignoring it and using the default effort`, then runs normally on its default.
+- `codex -c model_reasoning_effort=hgih` accepts the string silently and
+  displays it as if it were real.
+- A bad *model* on either agent starts normally and fails at the first API call.
+
+So the pane comes up alive, and it is running on a configuration that is not the
+one you asked for. **`amux ctx` will not save you here**: it reports what the
+pane was *launched* with, and cannot know what the agent did with that. After a
+typo the two disagree.
+
+**Be careful which banner you trust — the two agents differ.** claude's startup
+box reports the *effective* value: launch it with `--effort hgih` and the box
+reads `with high effort`, the default it actually fell back to, so it is a real
+confirmation. Codex's `model:` row is a bare **echo of what you passed** —
+`codex -m totally-bogus-model-zzz` prints that nonexistent model verbatim and
+runs until the first API call fails. So for codex the row confirms only that
+your flag arrived, never that the model exists or was accepted. To know a codex
+model is real, send it a prompt and see whether the request succeeds; nothing
+before that first call can tell you. That last part is measured, not assumed: a
+bogus-model pane left idle shows nothing in its whole scrollback, and codex's
+`⚠ Model metadata for ... not found` warning does not appear at startup — it
+arrives with the first request, alongside the `400 ... model is not supported`
+that is the actual answer. **An untroubled-looking fresh codex pane is not
+evidence of anything.**
+
+What amux does reject is a malformed *shape* — `claude@`, `claude/`, and
+`claude@opus/` are errors, and nothing is created.
+
+**Escape hatch.** `@`, `/` and `:` are the delimiters, so a model id containing
+`/` (`openai/gpt-5`) or ending in `:<digits>` (a Bedrock-style `…-v1:0`) cannot
+go in a spec — it parses as an effort level or an invalid count. Launch it as a
+raw command instead:
+
+```sh
+amux spg myproj fix -a 'claude --model openai/gpt-5 --dangerously-skip-permissions'
+```
+
+You are trading the grammar for the flag. A raw spec carries no `@MODEL` or
+`/EFFORT` of its own, so it must spell out every flag itself — including the
+ones amux normally adds, which is why the example above repeats
+`--dangerously-skip-permissions`. It also cannot run under `docker-sandbox` at
+all, and `ctx` and `monitor` print the whole command string in the agent column
+instead of `claude` or `codex`. Prefer the spec grammar when your model id fits
+it.
+
+What a raw-command pane does **not** lose is its work. It still gets its own
+worktree and branch like everyone else, and `amux integrate` merges its branch
+normally — so commit and integrate exactly as you otherwise would.
 
 Shape resolution, given `n` total agents:
 
@@ -112,7 +194,20 @@ amux spw thatlib -p ~/Git/thatlib -a claude
 Then hand off deliberately. The new agents start cold and share no context with
 you — they cannot see your notes, since notes are scoped per workspace. Send the
 first one a message with your identity and the task (see *Messaging teammates*),
-or they will sit idle waiting for a prompt.
+or it will never learn what you spawned it for.
+
+One thing does reach a new agent without you: amux installs this skill and points
+the agent at it. A `codex` agent is pointed by a **bootstrap message typed into
+its pane**, so it wakes on its own and spends its first turn reading this
+document — it is not idle, and it is not waiting for you. A `claude` agent gets
+the same pointer in its system prompt and costs no turn. Either way the pointer
+says nothing about *your* task; that part is still yours to send.
+
+The exception, and it is common rather than rare: both agents ask whether to
+trust a directory they have not seen before, and every agent gets a fresh
+worktree. An agent sitting on that prompt never reaches its input box, so amux
+waits, gives up, and prints that it could not point that agent at the skill. If
+you spawned it, answer the prompt in its pane — then say what the task is.
 
 Reach for `spg` (a task in your workspace) before `spw` (a whole new workspace).
 Same repo means same workspace; only a different repo justifies `spw`.
@@ -148,6 +243,13 @@ a tmux `wait-for` channel. Kinds map to states:
 | `notify` | needs-input |
 | `exit` | dead |
 
+One `notify` is classified differently: Claude Code fires its Notification
+hook both for prompts that need a human (permissions, trust dialogs) and for
+its ~60s "waiting for your input" idle reminder. The reminder means the agent
+is parked at an empty prompt, so amux resolves it to `idle`, not
+`needs-input` — otherwise every parked agent would drift out of reach of
+`amux send` a minute after finishing a turn.
+
 `spawn` is amux's own: spawning a grid stamps every new pane with it, so an
 agent has a state from its first moment. The rest come from agent hooks — Claude
 Code's `PreToolUse` → `busy`, `Stop` → `stop`, `Notification` → `notify`,
@@ -157,7 +259,10 @@ errors so a hook never looks like agent failure.
 
 An agent that has come up but has never been prompted reads `idle`, not
 `starting`: nothing on the agent side announces "my prompt is ready", so
-`starting` settles to `idle` a few seconds after spawn.
+`starting` settles to `idle` a few seconds after spawn. A freshly spawned `codex`
+may then go `busy` on its own, with nobody having prompted it — that is amux's
+bootstrap message being read, so "busy right after spawn" no longer implies a
+human sent something.
 
 `amux event state` reads the other way — the resolved state of every pane, which
 is what `monitor` and `lsw` render:
@@ -215,6 +320,170 @@ note ("merged brave-hawk — 3 commit(s), +120/−40"), and marks your worktree
 `merged`. A conflict aborts the merge and records a `blocker` note instead.
 Merging the integration branch back to the repo's main line is a human act.
 
+## Sandboxed agents (the `docker-sandbox` runtime)
+
+Agents normally run on the host. A grid may instead be spawned with
+`--runtime docker-sandbox`, which puts each agent inside its own Docker
+Sandboxes microVM. amux keeps every coordination concern on the host — workspace,
+task, roster, notes, events, integration — and the agent gets a boundary it
+cannot reach across.
+
+This is an opt-in backend. `docs/sandbox-smoke-test.md` is the procedure that
+verifies it on a real host.
+
+### Am I in a sandbox?
+
+Check, don't assume — it changes what you can run and how you share work:
+
+```sh
+amux ctx
+# you: brave-hawk  claude @r0c1 %7  task:fix  workspace:myproj  busy  ...
+# runtime: docker-sandbox running amux-myproj-fix-brave-hawk-ab12cd
+```
+
+A `runtime:` line appears immediately after your identity line **only** when you
+are not on the host. Host agents never see it, so its absence means host. In
+`--json`, `self` carries `runtime`, `runtime_status`, `sandbox_name` and
+`sandbox_id`.
+
+### What works, and what refuses
+
+Inside a sandbox, `amux` is a small standalone client that talks to a host
+service over HTTP. It supports exactly this messaging and context subset:
+
+| Works in a sandbox | Refuses locally |
+|---|---|
+| `ctx`, `send`, `messages`, `notes`, `note` | `spw`, `spg`, `kg`, `kw` |
+| `event emit`, `event state`, `event wait` | `integrate`, `monitor`, `lsw`, `lsg`, `event tail` |
+
+A refusal is immediate, exits 2, and names the command — it is not a transient
+error to retry, and there is no flag that unlocks it. **Host control is not
+expressible in the sandbox's capability vocabulary at all**, so nothing you can
+do from inside escalates into it. If you need one of those, say so in a note or
+message a host agent; do not try to work around it.
+
+Two flags are also refused, because your identity is fixed by your credential
+rather than by an argument: `--pane` (on `ctx`, `notes`, `note`) and
+`--workspace` / `--repo` (on `notes`). You can still *wait on* a teammate —
+`amux event wait %9` is fine for a pane in your own workspace and task.
+
+### Sharing work: commit, or it does not exist
+
+You are on a private clone, not a shared worktree. Docker mounts the repository
+read-only and gives you your own copy, which is why ordinary git works and why
+nothing you do can touch the human's checkout. It also means:
+
+- **Uncommitted work is invisible to everyone.** `amux integrate` fetches your
+  *committed* branch through a host-side `sandbox-<name>` git remote and never
+  imports a dirty working tree. An uncommitted change is not "not yet reviewed",
+  it is not there.
+- **A teammate's files are not at your paths.** They are in a different VM. Read
+  their work by integrating, or ask them to commit and say so in a note.
+- **Cleanup refuses to remove a dirty sandbox** without an explicit force flag,
+  and preserves your committed branch tip first (pending). That protects you, but
+  only for work you committed.
+
+So commit early and often, and leave a note when a branch is ready:
+
+```sh
+git add -A && git commit -m "auth: retry on 429"
+amux note "auth retry ready on my branch, 3 commits" --kind finding
+```
+
+### The trust model, as it actually is
+
+Worth understanding, because the honest version is narrower than it sounds.
+
+Your credential is a high-entropy capability token delivered to your VM in a
+mode-`0600` file. The host stores only its SHA-256 hash, compares in constant
+time, binds it to exactly one execution record, and revokes it when your sandbox
+is removed. The host derives your workspace, task, repository, pane, agent and
+name from that record — identity fields in a request body are rejected, not
+trusted, so you cannot post as a teammate even by accident.
+
+The vocabulary has four permissions: `context:read`, `notes:write`,
+`events:write`, `messages:write`. **Every agent token is currently minted with
+all four, so this is not least privilege today** and should not be described as
+if it were. Two things about it are true and load-bearing:
+
+- **Host control is inexpressible.** Spawning, killing, integrating, cleaning and
+  monitoring have no permission that could grant them, so no token — leaked,
+  stolen, or misused — can be escalated into them.
+- **The per-route `requires=` field is the seam** that makes narrowing possible
+  later without touching handlers.
+
+The service binds to `127.0.0.1` only, with no configurable bind address, and
+every request is size-, count- and time-bounded.
+
+### The context database never leaves the host
+
+amux does not mount, copy, or synchronise `context.db`, its WAL/shm files, the
+amux state directory, or the tmux socket into a sandbox — not read-only, not
+ever. The HTTP service is the only context path.
+
+This is why a service outage is a hard failure. If `amux ctx` reports that it
+cannot reach the context service, that is the designed behaviour: there is no
+fallback to a mounted database, a local shadow copy, or an unauthenticated
+write, and you should not build one. Wait, retry, or report it.
+
+### Troubleshooting from inside a sandbox
+
+| Symptom | Cause and fix |
+|---|---|
+| `cannot reach the amux context service at ...` | The host service is down or network policy blocks it. Not yours to fix — report it. Nothing you write is being recorded meanwhile. |
+| `the amux context service refused the request: unauthorized: ...` | Your token expired or your sandbox was removed. Report it; do not look for another credential. |
+| `... forbidden: pane %99 is not in myproj/fix` | You named a pane outside your own workspace and task. Get pane ids from `amux ctx` or `amux event state`. |
+| `'integrate' runs only on the amux host` | Working as intended. Ask a host agent, or leave a note. |
+| `--pane is host-only` | Your identity is your token. Drop the flag. |
+| `no sandbox context configuration at ...` | Bootstrap did not finish. This is a host-side failure; report it rather than writing the file yourself. |
+| Teammate stuck at `idle` while clearly working | Their agent's hooks may not be reporting. For Codex specifically this is a known open question (hook trust); treat their state as unreliable rather than concluding they are done. |
+
+### For the human on the host
+
+```sh
+amux doctor --runtime docker-sandbox -p ~/Git/myproj   # read-only preflight  (pending)
+sbx ls --json                                          # the VMs themselves
+sbx policy init balanced                               # one-time, host-wide
+sbx policy allow network localhost:47317               # only if preflight says so
+```
+
+`sbx` is optional and external: amux detects it, reports its version, and never
+installs it, signs you in, or widens Docker policy for you. Resource caps default
+to 2 CPUs and 4 GiB per agent because `sbx`'s own defaults are not caps —
+`--cpus 0` means every host CPU.
+
+## Containerized agents (the `apple-container` runtime)
+
+A third backend, macOS-only: `--runtime apple-container` runs each agent inside
+an Apple `container` Linux VM (github.com/apple/container). The shape is *host
+worktrees, containerized execution* — the agent keeps its normal per-agent
+worktree and branch, bind-mounted into the VM at its host path, so commits made
+inside land directly on the host branch and `amux integrate`, `kg` and
+`kg --clean` behave exactly as they do for host agents. There is no private
+clone, no context service, and no preserve-tips pass: the container holds
+nothing that is not already on the host.
+
+You will only ever read this section as a host agent. The containerized agent
+has no amux client, no skill pointer and no tmux — so it emits **no state
+events** (it reads `idle` while working, exactly like a raw-command agent),
+`amux send` to its pane will report `undelivered` even when the text reached
+it, and it cannot write notes. Coordinate with it through git: its commits are
+on its branch the moment they happen.
+
+```sh
+amux doctor --runtime apple-container -p ~/Git/myproj   # read-only preflight
+amux spg myproj heavy -a claude:2 --runtime apple-container
+amux spg myproj heavy2 --runtime apple-container --image my/prebaked:latest
+```
+
+Supported agents are `claude` and `codex`; the default image is
+`docker.io/library/node:22` and the agent CLI arrives via `npx` at launch, so
+the first spawn pulls the image and package — a prebaked `--image` skips that.
+Credentials are inherited from the pane's environment when set
+(`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`), never
+embedded in the command. `--cpus` and `--memory` cap each VM as they do for
+`docker-sandbox`; `--share-skills` and `--context-port` do not apply.
+
 ## Context notes
 
 Share status without pinging a teammate. Notes live in a per-scope store and
@@ -237,8 +506,8 @@ Scopes, least-to-most visible: `agent` (only you) → `task` (your task window)
 
 Both reach your teammates, but they cost the receiver very differently. A note
 is *pull*: it lands in the store and a teammate reads it when they next run
-`amux ctx`. A `send-keys` message is *push*: it types into a running agent's
-prompt and interrupts whatever it was doing.
+`amux ctx`. `amux send` is *push*: it waits for an idle receiver, types into its
+prompt, and wakes it immediately.
 
 **Prefer `amux note`** — the default — when you are recording rather than
 asking:
@@ -259,63 +528,40 @@ is a note. "Please review `%67`'s branch and reply" is a message. Status pushed
 into a pane interrupts an agent mid-task to tell it something it never asked
 for; the same text as a note costs nothing until it is wanted.
 
-Notes also outlive the pane. A message exists only in that agent's scrollback,
-so it is gone when the pane dies; a note keeps its worktree, repo, scope, and
-kind, and is still queryable afterwards with `amux notes`.
+Both are durable. `amux messages` retains the sender, receiver, body, deadline,
+and delivery result; `amux notes` additionally retains an explicit scope and
+kind for knowledge meant to be pulled later.
 
 ## Messaging teammates
 
-There is no `amux send`/`read` yet — it's a project goal. Today you push text
-into a teammate's pane with raw tmux:
+Address the receiver by the `%N` pane id shown by `amux ctx`:
 
 ```sh
-tmux -L amux-root send-keys -t %9 'your message' Enter
+amux send %9 "auth tests pass; please review src/auth and reply to %7"
 ```
 
-**Always lead with your own identity.** `send-keys` types raw keystrokes into
-the target agent's prompt — there is no envelope, no sender field, nothing that
-distinguishes your message from the receiver's own human operator or from a
-third teammate. An unattributed message leaves the receiver unable to reply or
-to weigh who is asking. Take your name, label, and pane id from `amux ctx` and
-prefix every message:
+Do not build an envelope yourself. Amux resolves your live identity and types:
+
+```text
+[amux brave-hawk @r0c1 %7 message #42] auth tests pass; please review src/auth and reply to %7
+```
+
+The command waits behind any other sender, waits until the target is exactly
+`idle`, revalidates the pane, and submits once. It reports `delivered` only when
+that same pane emits a fresh `busy` event after submission. The default 300
+second timeout covers the whole transaction; use `--timeout S` to change it.
+
+Failures print `undelivered` to stderr, exit nonzero, and remain queryable:
 
 ```sh
-# from brave-hawk (@r0c1 %7) asking golden-owl (%9) for a review
-tmux -L amux-root send-keys -t %9 \
-  '[amux brave-hawk @r0c1 %7] auth tests pass; please review src/auth and reply to %7' Enter
+amux messages --status undelivered
+amux messages --json -n 20
 ```
 
-Include the pane id, not just the name — it's what the other agent needs to
-address you back. When you expect a reply, say so explicitly and name your pane;
-the receiver has no return channel otherwise.
-
-### Send the text, then Enter separately
-
-A message with no submit key just sits in the receiver's input box. Nothing
-errors, the sender sees success, and the other agent never wakes up. Agent TUIs
-also read a trailing `Enter` in the *same* `send-keys` call inconsistently — it
-can be absorbed into the input as a literal newline instead of submitting. Send
-the text, pause, then send `Enter` on its own:
-
-```sh
-tmux -L amux-root send-keys -t %9 '[amux brave-hawk @r0c1 %7] please review src/auth and reply to %7'
-sleep 0.3
-tmux -L amux-root send-keys -t %9 Enter
-```
-
-Then confirm it actually went through — the receiver's state should leave `idle`
-(`amux ctx`), or look at the pane and check the box is empty:
-
-```sh
-tmux -L amux-root capture-pane -p -t %9 | tail -5
-```
-
-If your text is still visible on the input line, it was never submitted; send
-`Enter` again rather than re-sending the message (that would duplicate it).
-
-Before sending, check the target's state in `amux ctx` (or block on
-`amux event wait %9`) — keystrokes sent to a `busy` agent land mid-run and may
-be swallowed by whatever prompt is active.
+This evidence is intentionally conservative. If the receiver processed the
+prompt but its hooks emitted no `busy` event, amux still records `undelivered`.
+Do not bypass that result with raw `tmux send-keys`; report it and inspect
+`amux messages` so the sender remains aware that processing was not confirmed.
 
 ## Attaching
 
@@ -328,14 +574,13 @@ tmux -L amux-root ls                    # raw view of the amux server
 
 - **`amux -L foo spw` vs `amux spw -L foo`** — the socket flag is global and
   must precede the subcommand.
-- **Inventing a messaging command.** There is no `amux send`/`read` yet — see
-  *Messaging teammates* for the `send-keys` workaround.
-- **Sending an unsigned message.** A bare `send-keys` payload arrives with no
-  sender. Prefix `[amux <name> @<label> <pane>]` so the receiver knows who wrote
-  it and where to reply.
-- **Forgetting to submit.** Text sent without a separate `Enter` sits in the
-  receiver's input box forever and silently succeeds from your side. Send the
-  text, pause, send `Enter`, then verify the input line is clear.
+- **Using a name or label as a message target.** `amux send` takes the explicit
+  `%N` pane id from `amux ctx`, avoiding name and grid-label collisions.
+- **Treating tmux keystroke acceptance as delivery.** Use `amux send`, not raw
+  `send-keys`; only a fresh target `busy` event records `delivered`.
+- **Ignoring an undelivered result.** It is durable and intentionally
+  conservative. Inspect `amux messages --status undelivered`; do not silently
+  resend through tmux.
 - **Expecting events outside amux.** `emit` and `wait` are no-ops unless `$TMUX`
   points at the `amux-root` socket. `ctx` without `--pane` needs `$TMUX_PANE`;
   from outside, pass `--pane %7` explicitly.
@@ -359,6 +604,20 @@ tmux -L amux-root ls                    # raw view of the amux server
 - **Cramming unrelated work into your current task.** You may spawn. A new unit
   of work that would only be diluted by your history wants `spg`; a change in
   another repo wants `spw` — see *Spawning work yourself*.
+- **Assuming you are on the host.** Check `amux ctx` for a `runtime:` line. In a
+  sandbox, half the commands refuse, your teammates' files are in other VMs, and
+  uncommitted work is invisible to everyone.
+- **Trying to route around a sandbox boundary refusal.** It is not a transient
+  error and no flag unlocks it — host control has no permission that could grant
+  it. Leave a note or message a host agent instead.
+- **Leaving work uncommitted in a sandbox.** `integrate` fetches committed
+  branches only, and cleanup can discard the VM. Uncommitted is not "in review",
+  it is gone.
+- **Treating a context-service outage as something to work around.** There is no
+  fallback path by design — no mounted database, no local copy, no unauthenticated
+  write. Report it; do not invent one.
 - **Spawning and walking away.** New agents start cold, and notes do not cross
   workspaces. Say why in a note before you spawn, then message the new agent its
-  task, or it will sit idle.
+  task, or it will never learn what you spawned it for. (A `codex` agent does
+  wake by itself to read amux's skill — that is amux's bootstrap message, not
+  your task reaching it.)

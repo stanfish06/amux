@@ -1,0 +1,8 @@
+# SYNTHETIC, not recorded. The real image config has no tables at all, so it
+# cannot exercise the hazard this exists for: a bare top-level key appended to
+# the end of a file lands inside whichever table is last.
+model = "gpt-5.6"
+approval_policy = "never"
+
+[projects."/work/repo"]
+trust_level = "trusted"

@@ -1,0 +1,405 @@
+"""Installing the shim and its capability into a sandbox (`sandbox_bootstrap`).
+
+The bootstrap never shells out to `sbx` itself — it drives an injected
+`SandboxOps`, which `sandbox.py` implements over `sbx cp` / `sbx exec`. These
+tests use a recording double, so they assert the two properties that matter and
+cannot be checked at the `sbx` layer: the plaintext token exists on the host for
+the shortest possible time at mode 0600, and it never appears in an argument,
+a destination path, or a diagnostic.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shlex
+import stat
+from pathlib import Path
+
+import pytest
+
+from amux import sandbox_bootstrap as sb
+from amux import sandbox_client as sc
+from amux import shared
+
+ENDPOINT = "http://host.docker.internal:8765"
+TOKEN = "zzz-capability-secret-zzz"
+
+
+class FakeOps:
+    """Records what the bootstrap asked the sandbox to do."""
+
+    def __init__(
+        self,
+        name: str = "amux-myproj-fix-brave-hawk-ab12cd",
+        home: str = "/root",
+        whoami: str = "agent:agent",
+    ):
+        self.name = name
+        self.home = home
+        #: The user `exec` runs as, as `id -un`:`id -gn` reports it.
+        self.whoami = whoami
+        #: What the image already ships, keyed by absolute in-VM path.
+        self.files: dict[str, str] = {}
+        #: What `<binary> --version` reports inside the image.
+        self.versions: dict[str, str] = {}
+        #: Owner of each in-VM path, as `user:group`.
+        self.owners: dict[str, str] = {}
+        self.copies: list[tuple[Path, str]] = []
+        self.execs: list[list[str]] = []
+        #: The `user=` each exec ran as, parallel to `execs`.
+        self.users: list[str | None] = []
+        self.copied: dict[str, bytes] = {}
+        self.fail_on: str | None = None
+        self.fail_copy: str | None = None
+
+    def copy_in(self, source: Path, destination: str) -> None:
+        if self.fail_copy and self.fail_copy in destination:
+            raise sb.BootstrapError(
+                f"sbx cp {source} {self.name}:{destination} failed: disk full"
+            )
+        self.copies.append((Path(source), destination))
+        self.copied[destination] = Path(source).read_bytes()
+        # `sbx cp` preserves the source mode but sets the owner to the HOST uid,
+        # which does not exist in the container. Modelled, because it is the whole
+        # reason the chown exists.
+        self.owners[destination] = "501:root"
+
+    def exec(self, argv, *, user: str | None = None):
+        argv = list(argv)
+        self.execs.append(argv)
+        self.users.append(user)
+        if argv[:1] == ["chown"] and user == "root":
+            self.owners[argv[-1]] = argv[1]
+        if argv[:1] == ["chmod"] and self.owners.get(argv[-1]) not in (None, self.whoami):
+            raise sb.BootstrapError(
+                f"chmod: Operation not permitted (os error 1)"
+            )  # as the real agent user gets on a 501-owned file
+        if self.fail_on and self.fail_on in " ".join(argv):
+            raise sb.BootstrapError(f"sbx exec {self.name} {' '.join(argv)} failed: rc 1")
+        if argv[:2] == ["sh", "-lc"]:
+            script = argv[2]
+            if script.startswith("cat "):
+                # what `_read_optional` runs; "" is a file the image lacks
+                path = shlex.split(script)[1]
+                return self.files.get(path, "")
+            if "--version" in script:
+                return self.versions.get(shlex.split(script)[0], "")
+            if "id -un" in script:  # the identity probe: HOME, user, group
+                user, group = self.whoami.split(":")
+                return f"{self.home}\n{user}\n{group}"
+            return self.home
+        return ""
+
+    # -- what the sandbox ended up with ------------------------------------
+
+    def user_for(self, *prefix: str) -> str | None:
+        """The `user=` the first exec matching `prefix` ran as."""
+        for argv, user in zip(self.execs, self.users):
+            if argv[: len(prefix)] == list(prefix):
+                return user
+        raise AssertionError(f"no exec starting {prefix}")
+
+    def index_of(self, *prefix: str) -> int:
+        for i, argv in enumerate(self.execs):
+            if argv[: len(prefix)] == list(prefix):
+                return i
+        raise AssertionError(f"no exec starting {prefix}")
+
+    # -- assertions helpers ------------------------------------------------
+
+    @property
+    def argv_text(self) -> str:
+        return " ".join(" ".join(a) for a in self.execs)
+
+    def mode_set_for(self, path: str) -> str | None:
+        for argv in self.execs:
+            if argv[:1] == ["chmod"] and argv[-1] == path:
+                return argv[1]
+        return None
+
+
+@pytest.fixture
+def staging(tmp_path):
+    return tmp_path / "staging"
+
+
+# --- staging the capability file ---------------------------------------------
+
+
+def test_the_staged_config_is_created_readable_only_by_its_owner(staging):
+    path = sb.stage_config_file(ENDPOINT, TOKEN, directory=staging)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert json.loads(path.read_text()) == {"endpoint": ENDPOINT, "token": TOKEN}
+
+
+def test_the_staged_config_is_never_briefly_world_readable(staging, monkeypatch):
+    """Written through O_CREAT|O_EXCL with the mode up front, not chmod-ed after:
+    a chmod leaves a window in which another local user can read the token."""
+    modes: list[int] = []
+    real_open = os.open
+
+    def spy(path, flags, mode=0o777, **kwargs):
+        if str(path).endswith("context.json"):
+            modes.append(mode)
+            assert flags & os.O_EXCL, "must refuse to reuse an existing staging file"
+        return real_open(path, flags, mode, **kwargs)
+
+    monkeypatch.setattr(os, "open", spy)
+    sb.stage_config_file(ENDPOINT, TOKEN, directory=staging)
+    assert modes == [0o600]
+
+
+def test_staging_refuses_to_overwrite_an_existing_file(staging):
+    sb.stage_config_file(ENDPOINT, TOKEN, directory=staging)
+    with pytest.raises(sb.BootstrapError):
+        sb.stage_config_file(ENDPOINT, TOKEN, directory=staging)
+
+
+def test_the_staged_config_is_what_the_client_then_loads(staging, monkeypatch):
+    """The two halves of the contract are one file format, not two."""
+    path = sb.stage_config_file(ENDPOINT, TOKEN, directory=staging)
+    monkeypatch.setenv(sc.CONFIG_ENV, str(path))
+    config = sc.load_config()
+    assert (config.endpoint, config.token) == (ENDPOINT, TOKEN)
+
+
+# --- installing into the sandbox ---------------------------------------------
+
+
+def test_install_copies_the_shim_and_the_capability_and_locks_both_down(staging):
+    ops = FakeOps()
+    result = sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+
+    assert result.shim_path == sb.SHIM_PATH
+    assert result.config_path == "/root/.config/amux/context.json"
+    destinations = [dest for _, dest in ops.copies]
+    assert sb.SHIM_PATH in destinations
+    assert result.config_path in destinations
+    assert ops.mode_set_for(result.config_path) == "600"
+    assert ops.mode_set_for(sb.SHIM_PATH) == "755"
+
+
+def test_install_delivers_the_client_source_verbatim(staging):
+    ops = FakeOps()
+    sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    assert ops.copied[sb.SHIM_PATH] == Path(sc.__file__ or "").read_bytes()
+
+
+def test_install_delivers_a_config_the_shim_can_read(staging):
+    ops = FakeOps()
+    result = sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    assert json.loads(ops.copied[result.config_path]) == {
+        "endpoint": ENDPOINT,
+        "token": TOKEN,
+    }
+
+
+def test_install_resolves_the_agents_own_home_rather_than_assuming_root(staging):
+    ops = FakeOps(home="/home/agent")
+    result = sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    assert result.config_path == "/home/agent/.config/amux/context.json"
+    assert ["mkdir", "-p", "/home/agent/.config/amux"] in ops.execs
+
+
+def test_install_creates_the_config_directory_before_copying_into_it(staging):
+    ops = FakeOps()
+    sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    mkdir_index = ops.execs.index(["mkdir", "-p", "/root/.config/amux"])
+    chmod_index = next(
+        i for i, a in enumerate(ops.execs) if a[:1] == ["chmod"] and a[-1].endswith("context.json")
+    )
+    assert mkdir_index < chmod_index
+
+
+# --- the shim must exist in a PACKAGED build too ------------------------------
+#
+# A PyInstaller build ships no .py on disk, so `sandbox_client.__file__` named a
+# path that did not exist and every sandbox spawn from a packaged amux died at
+# shim installation. The fix is packaging-only: once the file ships as data at
+# destination `amux`, `__file__` resolves and the resolver needs no frozen branch.
+# No test can run against a frozen bundle — but one CAN assert the build ships the
+# file, and that is the assertion that would have caught this.
+
+
+def test_an_unfrozen_build_still_resolves_from_the_source_tree():
+    assert sb.client_source() == Path(sc.__file__ or "")
+
+
+def test_the_build_ships_the_shim_as_data():
+    """The half a frozen-bundle test cannot reach. This is the assertion that
+    would have caught the original bug: the Makefile simply did not ship it.
+
+    It insists on the *absolute* form. `--add-data` resolves a relative source
+    against `--specpath`, which the build sets to `build/`, so the relative
+    spelling does not merely fail at run time — it fails the build with
+    "Unable to find build/src/amux/sandbox_client.py". An earlier version of this
+    test asserted the relative string and would have pinned that breakage in
+    place.
+    """
+    makefile = Path(__file__).resolve().parents[1] / "Makefile"
+    build = makefile.read_text()
+    assert f"--add-data $(CURDIR)/src/amux/{sb.CLIENT_MODULE}:amux" in build
+    assert f"--add-data src/amux/{sb.CLIENT_MODULE}" not in build
+    # one invocation serves both --onefile and --onedir via PYINSTALLER_MODE,
+    # so a single occurrence covers every packaged build
+    assert build.count("pyinstaller") == 1
+    assert "--specpath build" in build  # the reason $(CURDIR) is load-bearing
+
+
+# --- ownership: sbx cp lands files as the HOST uid ---------------------------
+#
+# Verified against a live image: `sbx cp` preserves the source mode but sets the
+# owner to the host uid (501), which does not exist in the container. So a 0600
+# capability is unreadable by the agent that needs it, and the agent cannot chmod
+# anything it did not create. Every copy must be chowned to the exec user.
+
+
+def test_every_copied_file_is_chowned_to_the_agent(staging, installed=None):
+    ops = FakeOps()
+    result = sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    for _, destination in ops.copies:
+        assert ops.owners[destination] == "agent:agent", f"{destination} not chowned"
+    assert result.config_path in ops.owners
+
+
+def test_the_chown_runs_as_root_because_the_agent_cannot_do_it(staging):
+    ops = FakeOps()
+    sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    assert ops.user_for("chown") == "root"
+
+
+def test_nothing_but_the_chown_needs_root(staging):
+    """Least privilege on the exec side: only the ownership fix is escalated."""
+    ops = FakeOps()
+    sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    for argv, user in zip(ops.execs, ops.users):
+        assert (user == "root") == (argv[:1] == ["chown"]), argv
+
+
+def test_the_chown_precedes_the_chmod_or_the_chmod_cannot_succeed(staging):
+    ops = FakeOps()
+    result = sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    assert ops.index_of("chown") < ops.index_of("chmod", "600", result.config_path)
+
+
+def test_the_owner_is_discovered_from_the_image_not_hardcoded(staging):
+    """The Claude and Codex images need not run as the same user."""
+    ops = FakeOps(home="/home/dev", whoami="dev:staff")
+    result = sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    assert result.config_path == "/home/dev/.config/amux/context.json"
+    assert ops.owners[result.config_path] == "dev:staff"
+
+
+def test_the_capability_ends_up_readable_only_by_the_agent(staging):
+    """The whole point: agent-owned AND still 0600. Either alone is a failure —
+    501-owned 0600 is unreadable, agent-owned 0644 leaks the token."""
+    ops = FakeOps()
+    result = sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    assert ops.owners[result.config_path] == "agent:agent"
+    assert ops.mode_set_for(result.config_path) == "600"
+
+
+# --- the token must not leak --------------------------------------------------
+
+
+def test_the_token_never_appears_in_an_argument_or_a_destination_path(staging):
+    ops = FakeOps()
+    sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    # An install that did nothing would satisfy every `not in` below, so prove
+    # the work happened AND that the token really did travel — as file contents.
+    assert len(ops.copies) == 2 and ops.execs
+    assert TOKEN in ops.copied[f"{ops.home}/.config/amux/context.json"].decode()
+
+    assert TOKEN not in ops.argv_text
+    assert not any(TOKEN in dest for _, dest in ops.copies)
+    assert not any(TOKEN in str(src) for src, _ in ops.copies)
+
+
+def test_the_host_staging_file_is_gone_once_the_sandbox_has_it(staging):
+    ops = FakeOps()
+    sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    assert list(staging.rglob("*.json")) == []
+
+
+@pytest.mark.parametrize(
+    "failure", ["mkdir", "chmod 600", "amux --help"], ids=["mkdir", "chmod", "verify"]
+)
+def test_a_failed_exec_still_removes_the_plaintext_from_the_host(staging, failure):
+    ops = FakeOps()
+    ops.fail_on = failure
+    with pytest.raises(sb.BootstrapError):
+        sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    assert list(staging.rglob("*.json")) == []
+
+
+def test_a_failed_copy_still_removes_the_plaintext_from_the_host(staging):
+    ops = FakeOps()
+    ops.fail_copy = "context.json"
+    with pytest.raises(sb.BootstrapError):
+        sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    assert list(staging.rglob("*.json")) == []
+
+
+def test_a_failure_diagnostic_names_the_command_but_redacts_the_capability(staging):
+    ops = FakeOps()
+    ops.fail_on = "mkdir"
+    with pytest.raises(sb.BootstrapError) as failure:
+        sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    message = str(failure.value)
+    assert "mkdir" in message  # the operator still learns what broke
+    assert TOKEN not in message
+    assert ENDPOINT in message or ops.name in message
+
+
+def test_a_diagnostic_that_would_have_echoed_the_token_is_redacted(staging):
+    """Whatever the transport puts in an error, this layer knows the secret and
+    is the last place able to scrub it."""
+    ops = FakeOps()
+
+    def leaky(argv):
+        raise sb.BootstrapError(f"boom: wrote {TOKEN} to disk")
+
+    ops.exec = leaky  # type: ignore[method-assign]
+    with pytest.raises(sb.BootstrapError) as failure:
+        sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    assert TOKEN not in str(failure.value)
+    assert "***" in str(failure.value)
+
+
+def test_the_staging_directory_defaults_under_the_amux_state_directory(tmp_path, monkeypatch):
+    """Patched via `shared`, which is also the proof that conftest's
+    `isolate_state` reaches this module: binding STATE_DIR at import would put
+    real capability files in the live state directory during tests."""
+    monkeypatch.setattr(shared, "STATE_DIR", tmp_path / "amux")
+    assert sb.default_staging_dir() == tmp_path / "amux" / "staging"
+
+
+def test_install_never_writes_the_capability_into_the_sandbox_environment(staging):
+    """An env var is visible to every process in the VM and to `sbx` inspection;
+    the token belongs in one 0600 file the shim opens."""
+    ops = FakeOps()
+    result = sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    # Guard on the install's own commands, not merely on `execs` being non-empty:
+    # the $HOME probe alone would satisfy that while the install did nothing.
+    assert ops.mode_set_for(result.config_path) == "600"
+    assert ops.mode_set_for(sb.SHIM_PATH) == "755"
+    for argv in ops.execs:
+        assert not any(arg.startswith("AMUX_CONTEXT_TOKEN") for arg in argv)
+        assert "export" not in " ".join(argv)
+
+
+# --- what the sandbox must NOT receive ---------------------------------------
+
+
+def test_nothing_the_bootstrap_copies_comes_from_the_host_state_directory(staging):
+    ops = FakeOps()
+    sb.install_client(ops, endpoint=ENDPOINT, token=TOKEN, staging_dir=staging)
+    assert ops.copies and ops.execs, "nothing was copied or run to inspect"
+    for source, _ in ops.copies:
+        text = str(source)
+        assert source.name in ("context.json", "sandbox_client.py")  # only these two
+        assert "context.db" not in text
+        assert not text.endswith(".db")
+    assert not any("context.db" in " ".join(a) for a in ops.execs)
+    assert not any("/tmp/tmux" in " ".join(a) for a in ops.execs)
