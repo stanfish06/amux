@@ -171,9 +171,10 @@ flowchart TB
 
 # runtimes
 
-Two execution backends.
+Three execution backends.
 - `host` is the default and is unchanged: the agent runs on your machine, in its own git worktree, on the `amux-root` tmux server.
 - `docker-sandbox`: each agent runs inside a Docker Sandboxes microVM 
+- `apple-container`: each agent runs inside an Apple `container` Linux VM (github.com/apple/container), with its normal host worktree bind-mounted 
 
 ## prerequisites
 
@@ -202,6 +203,35 @@ amux kg myproj task0               # stop the VMs, keep their state for reattach
 amux kg myproj task0 --clean       # remove them; refuses a dirty sandbox
 amux kg myproj task0 --clean --force   # ...and accept losing uncommitted work
 ```
+
+## apple-container
+
+Host worktrees, containerized execution. Each agent keeps the normal per-agent
+worktree and branch; only the agent process moves into a lightweight Linux VM,
+with the repo and the worktree bind-mounted at their host paths. Commits made
+inside land directly on the host branch, so `amux integrate`, `kg --clean` and
+the branch layout are exactly the host runtime's.
+
+```sh
+brew install container                        # Apple's container CLI (macOS 15+)
+container system start                       # once per boot; installs a kernel on first run
+amux doctor --runtime apple-container -p ~/Git/myproj
+amux spw myproj -p ~/Git/myproj --runtime apple-container -a claude:2
+amux kg myproj task0 --clean                 # delete the containers and worktrees
+```
+
+The default image is `docker.io/library/node:22`; the agent CLI arrives via
+`npx` at launch, so first start pulls the image and the package. Point
+`--image` at a prebaked image to skip that. Credentials reach the agent only
+through the pane's environment (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`,
+`OPENAI_API_KEY` are passed through when set); nothing is baked into the
+command line.
+
+Two honest limits, by design of the v1: the container has no amux client, so a
+containerized agent emits no state events (it reads `idle` while working, like
+a raw-command agent) and cannot run `amux ctx`/`note`/`send`; and isolation is
+the mount list, not a private clone — the agent can write to its worktree and
+to the repo checkout it was spawned from, and nothing else on the host.
 
 ## the skill amux installs into your agents
 

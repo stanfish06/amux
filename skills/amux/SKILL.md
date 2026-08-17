@@ -452,6 +452,38 @@ installs it, signs you in, or widens Docker policy for you. Resource caps defaul
 to 2 CPUs and 4 GiB per agent because `sbx`'s own defaults are not caps —
 `--cpus 0` means every host CPU.
 
+## Containerized agents (the `apple-container` runtime)
+
+A third backend, macOS-only: `--runtime apple-container` runs each agent inside
+an Apple `container` Linux VM (github.com/apple/container). The shape is *host
+worktrees, containerized execution* — the agent keeps its normal per-agent
+worktree and branch, bind-mounted into the VM at its host path, so commits made
+inside land directly on the host branch and `amux integrate`, `kg` and
+`kg --clean` behave exactly as they do for host agents. There is no private
+clone, no context service, and no preserve-tips pass: the container holds
+nothing that is not already on the host.
+
+You will only ever read this section as a host agent. The containerized agent
+has no amux client, no skill pointer and no tmux — so it emits **no state
+events** (it reads `idle` while working, exactly like a raw-command agent),
+`amux send` to its pane will report `undelivered` even when the text reached
+it, and it cannot write notes. Coordinate with it through git: its commits are
+on its branch the moment they happen.
+
+```sh
+amux doctor --runtime apple-container -p ~/Git/myproj   # read-only preflight
+amux spg myproj heavy -a claude:2 --runtime apple-container
+amux spg myproj heavy2 --runtime apple-container --image my/prebaked:latest
+```
+
+Supported agents are `claude` and `codex`; the default image is
+`docker.io/library/node:22` and the agent CLI arrives via `npx` at launch, so
+the first spawn pulls the image and package — a prebaked `--image` skips that.
+Credentials are inherited from the pane's environment when set
+(`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`), never
+embedded in the command. `--cpus` and `--memory` cap each VM as they do for
+`docker-sandbox`; `--share-skills` and `--context-port` do not apply.
+
 ## Context notes
 
 Share status without pinging a teammate. Notes live in a per-scope store and
