@@ -332,7 +332,7 @@ def _context_service():
     return context_service
 
 
-GONE_RUNTIME_STATUSES = frozenset({"removed", "failed"})
+GONE_RUNTIME_STATUSES = frozenset({"removed", "failed", "superseded"})
 
 
 def _live_rows(kind: str, workspace: str, task: str | None) -> list[dict]:
@@ -368,10 +368,27 @@ def _retire(worktree_id: int, status: str, *, current: str) -> None:
         store.set_worktree_status(worktree_id, "removed")
 
 
+def _existing_sandbox_names() -> set[str] | None:
+    # None means "could not read the list": with no evidence a sandbox is
+    # gone, the stops must still be attempted rather than skipped.
+    try:
+        return {str(entry.get("name") or "") for entry in sandbox.sandboxes()}
+    except sandbox.SandboxError:
+        return None
+
+
 def stop_task(workspace: str, task: str) -> list[str]:
     stopped: list[str] = []
-    for row in sandbox_rows(workspace, task):
+    docker_rows = sandbox_rows(workspace, task)
+    known = _existing_sandbox_names() if docker_rows else None
+    for row in docker_rows:
         name = row["sandbox_name"]
+        if known is not None and name not in known:
+            # Removed behind amux's back (`sbx rm -f`): reconcile once
+            # instead of erroring on every stop pass forever.
+            print(f"amux: {name} no longer exists; recording it as removed")
+            store.set_worktree_runtime(row["id"], runtime_status="removed")
+            continue
         try:
             sandbox.stop(name)
         except sandbox.SandboxError as exc:
@@ -786,6 +803,11 @@ class SandboxRuntime:
             if row["sandbox_name"] != sandbox_name:
                 continue
             store.revoke_context_tokens_for_worktree(row["id"])
+            # Retire the runtime axis too: the VM lives on under the new
+            # generation's row, and a prior row left "running"/"stopped"
+            # makes every later stop/clean pass handle the same sandbox
+            # once per generation.
+            store.set_worktree_runtime(row["id"], runtime_status="superseded")
             if row["status"] == "active":
                 store.set_worktree_status(row["id"], "removed")
 

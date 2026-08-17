@@ -22,6 +22,7 @@ from test_sandbox_runtime import (  # noqa: F401 - `minted` is a fixture
     minted,
     names_for,
     ready,
+    respond_ls,
     specs,
 )
 
@@ -117,6 +118,57 @@ def test_a_stubborn_sandbox_does_not_block_the_rest(git_repo, fake_sbx, capsys):
     # The one that refused is not misreported as stopped.
     assert rows()["alpha"]["runtime_status"] == "running"
     assert rows()["beta"]["runtime_status"] == "stopped"
+
+
+def _ghost_row(git_repo, *, runtime_status="stopped"):
+    name = names_for(git_repo, "alpha")[0]
+    store.register_worktree(
+        pane="%1",
+        workspace="ws",
+        task="t0",
+        agent="claude",
+        name="alpha",
+        path="",
+        branch="amux/ws/t0/alpha",
+        repo=str(git_repo),
+        runtime="docker-sandbox",
+        runtime_status=runtime_status,
+        sandbox_name=name,
+    )
+    return name
+
+
+def test_a_sandbox_removed_behind_amuxs_back_is_reconciled_not_retried(
+    git_repo, fake_sbx, capsys
+):
+    """Measured live on 2026-08-17: rows from an Aug 5 smoke test whose VMs
+    were later `sbx rm -f`ed errored on every `kw` of that workspace, twelve
+    days on. A stop pass must record what `sbx ls` says, once, instead of
+    retrying a ghost forever."""
+    _ghost_row(git_repo)
+    respond_ls(fake_sbx, [])
+
+    assert runtime.stop_task("ws", "t0") == []
+
+    out = capsys.readouterr().out
+    assert "no longer exists" in out
+    assert "could not stop" not in out
+    assert not fake_sbx.called_with("stop")
+    assert rows()["alpha"]["runtime_status"] == "removed"
+    # A second pass is silent: the ghost has left the lifecycle.
+    assert runtime.stop_task("ws", "t0") == []
+    assert "no longer exists" not in capsys.readouterr().out
+
+
+def test_an_unreadable_sandbox_list_falls_back_to_stopping_blind(git_repo, fake_sbx):
+    """If `sbx ls` cannot be read there is no evidence a sandbox is gone, so
+    the stop attempts must still happen rather than being skipped."""
+    name = _ghost_row(git_repo, runtime_status="running")
+    fake_sbx.respond("ls", stderr="ERROR: cannot reach docker\n", returncode=1)
+    fake_sbx.respond("stop")
+
+    assert runtime.stop_task("ws", "t0") == [name]
+    assert rows()["alpha"]["runtime_status"] == "stopped"
 
 
 def test_stop_task_ignores_host_agents(git_repo, fake_sbx):
@@ -259,6 +311,27 @@ def test_a_stopped_sandbox_name_is_offered_back_to_a_respawn(git_repo, fake_sbx)
         workspace="ws", task="t0", cwd=str(git_repo)
     )
     assert offered == {"claude": ["alpha"]}
+
+
+def test_a_superseded_generation_no_longer_answers_for_the_sandbox(
+    git_repo, fake_sbx
+):
+    """Reattaching registers a new row for the same sandbox name, but
+    `_supersede` used to retire only the work axis (`status`), leaving the old
+    generation's runtime axis live -- so every stop/clean pass afterwards
+    handled the same sandbox once per generation (measured live: each ghost
+    errored twice on one `kw`)."""
+    names = names_for(git_repo, "alpha")
+    ready(fake_sbx, names)
+    fake_sbx.respond("stop")
+    create_one(git_repo, fake_sbx)
+    runtime.stop_task("ws", "t0")
+    create_one(git_repo, fake_sbx)  # respawn reattaches to the same VM
+
+    assert [r["sandbox_name"] for r in runtime.sandbox_rows("ws", "t0")] == names
+
+    stopped = runtime.stop_task("ws", "t0")
+    assert stopped == names  # once, not once per generation
 
 
 def test_a_respawned_grid_lands_on_its_prior_names(git_repo, fake_sbx, tmux_calls):

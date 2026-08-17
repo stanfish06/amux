@@ -726,13 +726,19 @@ def test_a_reattached_sandbox_is_not_reported_as_both_removed_and_surviving(
 
 
 def test_every_row_of_a_removed_sandbox_is_retired(git_repo, fake_sbx, tmp_path):
-    """Including the dead pane's, whose capability would otherwise stay valid."""
+    """Including the dead pane's, whose capability would otherwise stay valid.
+
+    The prior generation retires as "superseded" at reattach time, the live
+    one as "removed" at cleanup; what matters is that no row still answers
+    for the sandbox and no capability survives.
+    """
     name = reattach(git_repo, fake_sbx, tmp_path)
 
     runtime.clean_task("ws", "t0")
 
+    assert runtime.sandbox_rows("ws", "t0") == []
     for row in store.worktrees_for("ws", "t0"):
-        assert row["runtime_status"] == "removed"
+        assert row["runtime_status"] in runtime.GONE_RUNTIME_STATUSES
         assert store.revoke_context_tokens_for_worktree(row["id"]) == 0
 
 
