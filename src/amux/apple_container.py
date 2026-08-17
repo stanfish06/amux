@@ -239,15 +239,33 @@ def launch_argv(
     return tuple(args)
 
 
-def launch_command(name: str, **kwargs: Any) -> str:
-    return render_command(CONTAINER, launch_argv(name, **kwargs))
+def launch_command(
+    name: str,
+    *,
+    image: str,
+    resources: Resources,
+    repo: str,
+    workdir: str,
+    request: AgentRequest,
+) -> str:
+    return render_command(
+        CONTAINER,
+        launch_argv(
+            name,
+            image=image,
+            resources=resources,
+            repo=repo,
+            workdir=workdir,
+            request=request,
+        ),
+    )
 
 
 def launch_script_path(name: str) -> str:
     return str(STATE_DIR / "launch" / f"{name}.sh")
 
 
-def write_launch_script(name: str, *, workspace: str, task: str, **kwargs: Any) -> str:
+def write_launch_script(name: str, *, workspace: str, task: str, command: str) -> str:
     """Persist the launch as a script and return its path.
 
     The composed `container run` line easily exceeds a kilobyte (two absolute
@@ -260,7 +278,7 @@ def write_launch_script(name: str, *, workspace: str, task: str, **kwargs: Any) 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         f"#!/bin/sh\n# amux {workspace}/{task}: agent container {name}\n"
-        f"exec {launch_command(name, **kwargs)}\n"
+        f"exec {command}\n"
     )
     path.chmod(0o700)
     return str(path)

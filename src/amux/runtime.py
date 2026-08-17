@@ -305,15 +305,16 @@ class AppleContainerRuntime:
                 sandbox_name=name,
             )
             path = paths[spec.pane]
-            script = apple_container.write_launch_script(
+            command = apple_container.launch_command(
                 name,
-                workspace=workspace,
-                task=task,
                 image=self.config.image,
                 resources=self.config.resources,
                 repo=repo,
                 workdir=path,
                 request=spec.request,
+            )
+            script = apple_container.write_launch_script(
+                name, workspace=workspace, task=task, command=command
             )
             launches.append(
                 Launch(
