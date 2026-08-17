@@ -1,14 +1,6 @@
-"""Adapter for Apple's `container` CLI (github.com/apple/container).
-
-The apple-container runtime is host worktrees plus containerized execution:
-agents keep the normal per-agent worktree and branch, and the agent process
-runs inside a lightweight Linux VM with that worktree bind-mounted at its
-host path. Work therefore lands on host branches through the mount, and
-integration and worktree cleanup stay on the host paths. Unlike the
-docker-sandbox runtime, amux never creates these containers itself -- the
-`container run` command is typed into the pane like any host launch -- so
-this adapter only composes commands and cleans up by name.
-"""
+"""Adapter for Apple's `container` CLI: composes launch commands and cleans
+up by name. amux never creates these containers itself -- the pane does, by
+running the composed command against its agent's bind-mounted host worktree."""
 
 from __future__ import annotations
 
@@ -44,19 +36,16 @@ AGENT_ARGV: dict[str, tuple[str, ...]] = {
     ),
 }
 
-# Bare `--env KEY` inherits the value from the pane shell when set and is
-# silently skipped when unset (measured on container 1.2.2), so listing a
-# credential here costs nothing on hosts that do not carry it. IS_SANDBOX=1
-# is claude's own escape hatch: the default image runs as root, and claude
-# refuses --dangerously-skip-permissions as root outside a sandbox -- which
-# this VM genuinely is.
+# A bare `--env KEY` inherits from the pane shell and is silently skipped
+# when unset, so unset credentials cost nothing. IS_SANDBOX=1 is required:
+# the image runs as root, and claude refuses its bypass flag as root.
 AGENT_ENV: dict[str, tuple[str, ...]] = {
     "claude": ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "IS_SANDBOX=1"),
     "codex": ("OPENAI_API_KEY",),
 }
 
-# The mounted repo is owned by the host user while the container runs as
-# root; without safe.directory git refuses to touch it at all.
+# The mount is host-owned while the container runs as root; without
+# safe.directory git refuses to touch it at all.
 _GIT_SAFE_ENV = (
     "GIT_CONFIG_COUNT=1",
     "GIT_CONFIG_KEY_0=safe.directory",
@@ -142,8 +131,7 @@ def stop(name: str) -> None:
 
 
 def remove(name: str) -> None:
-    # Always forced: the work lives in the mounted host worktree, so the
-    # container itself holds nothing worth refusing over.
+    # Always forced: the work lives in the host worktree, not the container.
     result = run("delete", "--force", name, check=False)
     if not result.ok and not _missing(result):
         raise ContainerError(f"container delete {name}: {result.message}")
@@ -232,14 +220,8 @@ def launch_script_path(name: str) -> str:
 
 
 def write_launch_script(name: str, *, workspace: str, task: str, command: str) -> str:
-    """Persist the launch as a script and return its path.
-
-    The composed `container run` line easily exceeds a kilobyte (two absolute
-    paths, each repeated as source and target), and typing that much into a
-    pane whose shell is still initializing gets chopped and reordered
-    (measured against zsh: a ~1.3k line sent right after pane creation never
-    executed). The pane types `sh <short path>` instead.
-    """
+    # The composed line exceeds a kilobyte, and a freshly created pane's shell
+    # chops and reorders input that long, so the pane types `sh <path>` instead.
     path = Path(launch_script_path(name))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(

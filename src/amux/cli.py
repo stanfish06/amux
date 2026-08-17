@@ -66,8 +66,8 @@ DOCKER_SANDBOX = runtime.DOCKER_SANDBOX
 APPLE_CONTAINER = runtime.APPLE_CONTAINER
 RUNTIMES = (HOST, DOCKER_SANDBOX, APPLE_CONTAINER)
 
-# Which non-host runtimes each backend flag applies to; anything else is an
-# error, so a flag never silently does nothing.
+# Which runtimes each backend flag applies to; elsewhere it is an error,
+# so a flag never silently does nothing.
 _RUNTIME_FLAGS = {
     "cpus": (DOCKER_SANDBOX, APPLE_CONTAINER),
     "memory": (DOCKER_SANDBOX, APPLE_CONTAINER),
