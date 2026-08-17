@@ -220,7 +220,7 @@ def test_the_cli_builds_the_apple_runtime_with_the_flags_as_given():
     assert chosen.config.resources.memory == "8g"
 
 
-def test_the_cli_defaults_the_image(capsys):
+def test_the_cli_defaults_the_image():
     chosen = cli._resolve_runtime(_args())
     assert chosen.config.image == apple_container.DEFAULT_IMAGE
 
@@ -238,6 +238,10 @@ def test_the_cli_defaults_the_image(capsys):
             "--context-port",
         ),
         (["spw", "ws", "--runtime", "docker-sandbox", "--image", "node:20"], "--image"),
+        # doctor defaults to docker-sandbox, so a stray --image must refuse
+        # rather than print a docker report that never looked at the image
+        (["doctor", "--image", "node:20"], "--image"),
+        (["doctor", "--runtime", "host", "--cpus", "4"], "--cpus"),
     ],
 )
 def test_a_flag_for_another_runtime_is_refused(capsys, argv, rejected):

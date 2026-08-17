@@ -423,6 +423,7 @@ def _cmd_ctx(server, args) -> int:
 
 
 def _cmd_doctor(server, args) -> int:
+    _reject_foreign_flags(args, args.runtime)
     if args.runtime == HOST:
         print(f"runtime {HOST}: no external prerequisites (tmux and git only)")
         return 0
