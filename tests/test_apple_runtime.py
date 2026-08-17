@@ -132,6 +132,9 @@ def test_stop_task_removes_the_container_and_records_it(fake_container, repo):
     # --rm containers vanish when stopped (measured on container 1.2.2), so
     # "removed" is the truthful record, not "stopped".
     assert row["runtime_status"] == "removed"
+    # A removed row is invisible to clean_task, so the launch script must go
+    # now or it leaks forever.
+    assert not Path(apple_container.launch_script_path(name)).exists()
 
 
 def test_stop_task_treats_a_missing_container_as_already_stopped(
@@ -159,7 +162,7 @@ def test_clean_task_deletes_containers_without_a_preservation_pass(
     assert row["runtime_status"] == "removed"
     assert not Path(apple_container.launch_script_path(name)).exists()
     # no git traffic, no sbx traffic: the work is already on the host
-    assert all(call[0] in {"delete"} for call in fake_container.calls)
+    assert all(call[0] == "delete" for call in fake_container.calls)
 
 
 def test_clean_task_reports_a_container_it_could_not_remove(fake_container, repo):

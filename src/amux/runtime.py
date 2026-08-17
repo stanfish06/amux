@@ -382,6 +382,8 @@ def stop_task(workspace: str, task: str) -> list[str]:
     # Apple containers run with --rm, so stopping one removes it (measured on
     # container 1.2.2); "removed" is the truthful record. The work is safe
     # either way: it lives in the mounted host worktree, not the container.
+    # The launch script goes too: a "removed" row is invisible to clean_task,
+    # so this is its last chance not to leak.
     for row in _apple_rows(workspace, task):
         name = row["sandbox_name"]
         try:
@@ -389,6 +391,7 @@ def stop_task(workspace: str, task: str) -> list[str]:
         except apple_container.ContainerError as exc:
             print(f"amux: could not stop container {name}: {exc}")
             continue
+        apple_container.remove_launch_script(name)
         store.set_worktree_runtime(row["id"], runtime_status="removed")
         stopped.append(name)
     return stopped
