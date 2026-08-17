@@ -16,10 +16,11 @@ import json
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from amux.sandbox import Check, Resources, SandboxError, sandbox_name
-from amux.shared import AgentRequest, render_command, render_tuning
+from amux.shared import STATE_DIR, AgentRequest, render_command, render_tuning
 
 CONTAINER = "container"
 
@@ -47,9 +48,12 @@ AGENT_ARGV: dict[str, tuple[str, ...]] = {
 
 # Bare `--env KEY` inherits the value from the pane shell when set and is
 # silently skipped when unset (measured on container 1.2.2), so listing a
-# credential here costs nothing on hosts that do not carry it.
+# credential here costs nothing on hosts that do not carry it. IS_SANDBOX=1
+# is claude's own escape hatch: the default image runs as root, and claude
+# refuses --dangerously-skip-permissions as root outside a sandbox -- which
+# this VM genuinely is.
 AGENT_ENV: dict[str, tuple[str, ...]] = {
-    "claude": ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"),
+    "claude": ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "IS_SANDBOX=1"),
     "codex": ("OPENAI_API_KEY",),
 }
 
@@ -123,7 +127,7 @@ def version() -> str:
 
 def system_running() -> tuple[bool, str]:
     result = run("system", "status", check=False)
-    return result.ok, result.message
+    return result.ok, "running" if result.ok else result.message
 
 
 container_name = sandbox_name
@@ -237,6 +241,33 @@ def launch_argv(
 
 def launch_command(name: str, **kwargs: Any) -> str:
     return render_command(CONTAINER, launch_argv(name, **kwargs))
+
+
+def launch_script_path(name: str) -> str:
+    return str(STATE_DIR / "launch" / f"{name}.sh")
+
+
+def write_launch_script(name: str, *, workspace: str, task: str, **kwargs: Any) -> str:
+    """Persist the launch as a script and return its path.
+
+    The composed `container run` line easily exceeds a kilobyte (two absolute
+    paths, each repeated as source and target), and typing that much into a
+    pane whose shell is still initializing gets chopped and reordered
+    (measured against zsh: a ~1.3k line sent right after pane creation never
+    executed). The pane types `sh <short path>` instead.
+    """
+    path = Path(launch_script_path(name))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"#!/bin/sh\n# amux {workspace}/{task}: agent container {name}\n"
+        f"exec {launch_command(name, **kwargs)}\n"
+    )
+    path.chmod(0o700)
+    return str(path)
+
+
+def remove_launch_script(name: str) -> None:
+    Path(launch_script_path(name)).unlink(missing_ok=True)
 
 
 def preflight(

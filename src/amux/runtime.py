@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -309,8 +310,10 @@ class AppleContainerRuntime:
                     sandbox_name=name,
                 )
             path = paths[spec.pane]
-            command = apple_container.launch_command(
+            script = apple_container.write_launch_script(
                 name,
+                workspace=workspace,
+                task=task,
                 image=self.config.image,
                 resources=self.config.resources,
                 repo=repo,
@@ -321,7 +324,7 @@ class AppleContainerRuntime:
                 Launch(
                     pane=spec.pane,
                     cwd=path,
-                    keys=(worktree.shell_cd(path), command),
+                    keys=(worktree.shell_cd(path), f"sh {shlex.quote(script)}"),
                 )
             )
         return launches
@@ -408,6 +411,7 @@ def clean_apple_task(workspace: str, task: str) -> list[str]:
         except apple_container.ContainerError as exc:
             problems.append(f"{name}: {exc}")
             continue
+        apple_container.remove_launch_script(name)
         store.set_worktree_runtime(row["id"], runtime_status="removed")
         removed.append(name)
     if problems:

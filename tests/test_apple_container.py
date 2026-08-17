@@ -93,6 +93,15 @@ def test_launch_argv_passes_agent_credentials_as_bare_keys():
     assert "ANTHROPIC_API_KEY" not in codex_envs
 
 
+def test_launch_argv_marks_the_vm_as_a_sandbox_for_claude():
+    """The default image runs as root, and claude refuses
+    --dangerously-skip-permissions as root unless IS_SANDBOX=1 (measured live:
+    the launch died with 'cannot be used with root/sudo privileges')."""
+    argv = _argv()
+    envs = [argv[i + 1] for i, a in enumerate(argv) if a == "--env"]
+    assert "IS_SANDBOX=1" in envs
+
+
 def test_launch_argv_appends_model_and_effort_tuning():
     argv = _argv(request=AgentRequest("claude", model="opus", effort="high"))
     assert argv[-4:] == ("--model", "opus", "--effort", "high")

@@ -41,10 +41,14 @@ def test_prepare_builds_host_worktrees_and_container_launches(repo):
     for launch, name in zip(launches, ("alpha", "beta"), strict=True):
         assert launch.cwd.endswith(f"/worktrees/ws/t0/{name}")
         assert Path(launch.cwd).is_dir()
-        cd, command = launch.keys
+        cd, run_script = launch.keys
         assert cd == f"cd {launch.cwd}"
-        argv = shlex.split(command)
-        assert argv[:2] == ["container", "run"]
+        # The composed command runs from a script: typed inline it exceeds a
+        # kilobyte, which a freshly created pane's shell chops and reorders.
+        script = shlex.split(run_script)
+        assert script[0] == "sh"
+        argv = shlex.split(Path(script[1]).read_text().splitlines()[-1])
+        assert argv[:3] == ["exec", "container", "run"]
         assert f"{repo}:{repo}" in argv
         assert f"{launch.cwd}:{launch.cwd}" in argv
         assert argv[argv.index("--workdir") + 1] == launch.cwd
@@ -68,7 +72,8 @@ def test_prepare_sends_no_bootstrap_into_the_container(repo):
     agent at amux vocabulary it cannot use would be worse than silence."""
     (launch,) = prepare(repo, ("%1", "claude", "alpha"))
     assert launch.bootstrap == ""
-    assert "--append-system-prompt" not in launch.keys[1]
+    script = Path(shlex.split(launch.keys[1])[1]).read_text()
+    assert "--append-system-prompt" not in script
 
 
 def test_prepare_requires_a_git_repository(tmp_path):
@@ -146,11 +151,13 @@ def test_clean_task_deletes_containers_without_a_preservation_pass(
 ):
     prepare(repo, ("%1", "claude", "alpha"))
     name = apple_container.container_name("ws", "t0", "alpha", str(repo))
+    assert Path(apple_container.launch_script_path(name)).exists()
     fake_container.respond("delete")
     assert runtime.clean_task("ws", "t0") == [name]
     assert fake_container.called_with("delete", "--force", name)
     (row,) = store.worktrees_for("ws", "t0")
     assert row["runtime_status"] == "removed"
+    assert not Path(apple_container.launch_script_path(name)).exists()
     # no git traffic, no sbx traffic: the work is already on the host
     assert all(call[0] in {"delete"} for call in fake_container.calls)
 
