@@ -291,19 +291,19 @@ class AppleContainerRuntime:
             task,
             [(spec.pane, spec.request, spec.name) for spec in panes],
         )
+        # setup_task registered a host row per pane; flip each onto this
+        # runtime so stop/clean know which container the pane owns.
         rows = store.worktrees_for_panes([spec.pane for spec in panes])
 
         launches = []
         for spec in panes:
             name = apple_container.container_name(workspace, task, spec.name, repo)
-            row = rows.get(spec.pane)
-            if row is not None:
-                store.set_worktree_runtime(
-                    row["id"],
-                    runtime=APPLE_CONTAINER,
-                    runtime_status="running",
-                    sandbox_name=name,
-                )
+            store.set_worktree_runtime(
+                rows[spec.pane]["id"],
+                runtime=APPLE_CONTAINER,
+                runtime_status="running",
+                sandbox_name=name,
+            )
             path = paths[spec.pane]
             script = apple_container.write_launch_script(
                 name,
@@ -334,7 +334,7 @@ def _context_service():
 GONE_RUNTIME_STATUSES = frozenset({"removed", "failed"})
 
 
-def _live_container_rows(kind: str, workspace: str, task: str | None) -> list[dict]:
+def _live_rows(kind: str, workspace: str, task: str | None) -> list[dict]:
     return [
         dict(row)
         for row in store.worktrees_for(workspace, task)
@@ -345,17 +345,17 @@ def _live_container_rows(kind: str, workspace: str, task: str | None) -> list[di
 
 
 def sandbox_rows(workspace: str, task: str) -> list[dict]:
-    return _live_container_rows(DOCKER_SANDBOX, workspace, task)
+    return _live_rows(DOCKER_SANDBOX, workspace, task)
 
 
-def apple_rows(workspace: str, task: str) -> list[dict]:
-    return _live_container_rows(APPLE_CONTAINER, workspace, task)
+def _apple_rows(workspace: str, task: str) -> list[dict]:
+    return _live_rows(APPLE_CONTAINER, workspace, task)
 
 
 def sandbox_tasks(workspace: str) -> list[str]:
     seen: list[str] = []
     for kind in (DOCKER_SANDBOX, APPLE_CONTAINER):
-        for row in _live_container_rows(kind, workspace, None):
+        for row in _live_rows(kind, workspace, None):
             if row["task"] not in seen:
                 seen.append(row["task"])
     return seen
@@ -381,7 +381,7 @@ def stop_task(workspace: str, task: str) -> list[str]:
     # Apple containers run with --rm, so stopping one removes it (measured on
     # container 1.2.2); "removed" is the truthful record. The work is safe
     # either way: it lives in the mounted host worktree, not the container.
-    for row in apple_rows(workspace, task):
+    for row in _apple_rows(workspace, task):
         name = row["sandbox_name"]
         try:
             apple_container.stop(name)
@@ -393,13 +393,13 @@ def stop_task(workspace: str, task: str) -> list[str]:
     return stopped
 
 
-def clean_apple_task(workspace: str, task: str) -> list[str]:
+def _clean_apple_task(workspace: str, task: str) -> list[str]:
     # No preservation pass and no --force distinction: the container mounts
     # the agent's host worktree, so committed and uncommitted work alike
     # already live on the host and worktree removal owns their fate.
     removed: list[str] = []
     problems: list[str] = []
-    for row in apple_rows(workspace, task):
+    for row in _apple_rows(workspace, task):
         name = row["sandbox_name"]
         try:
             apple_container.remove(name)
@@ -418,7 +418,7 @@ def clean_apple_task(workspace: str, task: str) -> list[str]:
 
 
 def clean_task(workspace: str, task: str, *, force: bool = False) -> list[str]:
-    removed_apple = clean_apple_task(workspace, task)
+    removed_apple = _clean_apple_task(workspace, task)
     by_sandbox: dict[str, list[dict]] = {}
     for row in sandbox_rows(workspace, task):
         by_sandbox.setdefault(row["sandbox_name"], []).append(row)
