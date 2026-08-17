@@ -228,16 +228,9 @@ class AppleContainerConfig:
 
 
 class AppleContainerRuntime:
-    """Host worktrees, containerized execution.
-
-    Each agent keeps the normal per-agent worktree and branch; only the agent
-    process is moved into an Apple `container` VM, with the repo and the
-    worktree bind-mounted at their host paths. Nothing is acquired at prepare
-    time -- the pane's shell creates the container by running the composed
-    command -- so rollback has nothing to release, and integration and
-    cleanup follow the host paths. The container has no amux client, so like
-    a raw-command agent it emits no state events.
-    """
+    """Host worktrees, containerized execution: the pane's shell creates the
+    container, so prepare acquires nothing and rollback has nothing to
+    release; work lands on host branches through the bind mount."""
 
     kind = APPLE_CONTAINER
 
@@ -384,8 +377,7 @@ def stop_task(workspace: str, task: str) -> list[str]:
     for row in docker_rows:
         name = row["sandbox_name"]
         if known is not None and name not in known:
-            # Removed behind amux's back (`sbx rm -f`): reconcile once
-            # instead of erroring on every stop pass forever.
+            # Removed behind amux's back: reconcile once, not error forever.
             print(f"amux: {name} no longer exists; recording it as removed")
             store.set_worktree_runtime(row["id"], runtime_status="removed")
             continue
@@ -396,11 +388,9 @@ def stop_task(workspace: str, task: str) -> list[str]:
             continue
         store.set_worktree_runtime(row["id"], runtime_status="stopped")
         stopped.append(name)
-    # Apple containers run with --rm, so stopping one removes it (measured on
-    # container 1.2.2); "removed" is the truthful record. The work is safe
-    # either way: it lives in the mounted host worktree, not the container.
-    # The launch script goes too: a "removed" row is invisible to clean_task,
-    # so this is its last chance not to leak.
+    # Stopping an --rm container removes it, so "removed" is the truthful
+    # record -- and the launch script must go now, because a removed row is
+    # invisible to clean_task.
     for row in _apple_rows(workspace, task):
         name = row["sandbox_name"]
         try:
@@ -415,9 +405,8 @@ def stop_task(workspace: str, task: str) -> list[str]:
 
 
 def _clean_apple_task(workspace: str, task: str) -> list[str]:
-    # No preservation pass and no --force distinction: the container mounts
-    # the agent's host worktree, so committed and uncommitted work alike
-    # already live on the host and worktree removal owns their fate.
+    # No preservation pass and no --force distinction: committed and
+    # uncommitted work alike already live in the host worktree.
     removed: list[str] = []
     problems: list[str] = []
     for row in _apple_rows(workspace, task):
@@ -803,10 +792,8 @@ class SandboxRuntime:
             if row["sandbox_name"] != sandbox_name:
                 continue
             store.revoke_context_tokens_for_worktree(row["id"])
-            # Retire the runtime axis too: the VM lives on under the new
-            # generation's row, and a prior row left "running"/"stopped"
-            # makes every later stop/clean pass handle the same sandbox
-            # once per generation.
+            # Retire the runtime axis too, or every later stop/clean pass
+            # handles the same sandbox once per generation.
             store.set_worktree_runtime(row["id"], runtime_status="superseded")
             if row["status"] == "active":
                 store.set_worktree_status(row["id"], "removed")
