@@ -242,19 +242,29 @@ class AgentGrid:
     def _print_identity(self):
         print(f"{ALIAS['window']} {self.task_name} ({self.window.id}) @ {self.cwd}")
 
+@dataclass
+class AgentRole:
+    name: str
+    persona: str
+    tasks: list[str]
+
+    def assemble_system_prompt(self):
+        pass
+
 
 @dataclass
 class AgentPane:
     pane: Pane
     cwd: str
-    agent_name: str
+    harness_name: str
     label: str
     name: str = ""
+    role: AgentRole | None = None
     state: str = "starting"
 
     @property
     def is_agent(self) -> bool:
-        return self.agent_name in AGENT_COMMANDS
+        return self.harness_name in AGENT_COMMANDS
 
     @property
     def target_pane(self) -> str:
@@ -266,7 +276,7 @@ class AgentPane:
 
     def _print_identity(self):
         print(
-            f"{ALIAS['pane']} {self.name} ({self.agent_name} {self.label}) "
+            f"{ALIAS['pane']} {self.name} ({self.harness_name} {self.label}) "
             f"{self.pane.id} @ {self.cwd}"
         )
 
@@ -515,7 +525,7 @@ def _build_grid(
             AgentPane(
                 pane=pane,
                 cwd=pane_cwd,
-                agent_name=request.agent,
+                harness_name=request.agent,
                 label=label_for(pane),
                 name=name,
             )
@@ -650,7 +660,7 @@ def load_agent_pane(pane: Pane, facts: events.PaneFacts | None = None) -> AgentP
     return AgentPane(
         pane=pane,
         cwd=facts.cwd,
-        agent_name=facts.agent or facts.command,
+        harness_name=facts.agent or facts.command,
         label=facts.label or pane.id or "",
         name=facts.name,
         state=(state or "idle") if facts.kind == "amux" else "-",
@@ -688,7 +698,7 @@ def _roster_entry(pane: Pane) -> dict:
     wt = store.worktree_for_pane(pane.id or "", since=facts.boundary)
     entry = {
         "name": ap.name,
-        "agent": ap.agent_name,
+        "agent": ap.harness_name,
         "label": ap.label,
         "pane": pane.id or "",
         "state": ap.state,

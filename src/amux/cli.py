@@ -66,8 +66,6 @@ DOCKER_SANDBOX = runtime.DOCKER_SANDBOX
 APPLE_CONTAINER = runtime.APPLE_CONTAINER
 RUNTIMES = (HOST, DOCKER_SANDBOX, APPLE_CONTAINER)
 
-# Which runtimes each backend flag applies to; elsewhere it is an error,
-# so a flag never silently does nothing.
 _RUNTIME_FLAGS = {
     "cpus": (DOCKER_SANDBOX, APPLE_CONTAINER),
     "memory": (DOCKER_SANDBOX, APPLE_CONTAINER),
@@ -310,7 +308,7 @@ def _cmd_note(server, args) -> int:
             for w in s.windows:
                 for p in w.panes:
                     if p.id == pane:
-                        agent = core.load_agent_pane(p).agent_name
+                        agent = core.load_agent_pane(p).harness_name
     note_id = store.add_note(
         workspace=ctx.workspace,
         task=ctx.task,
@@ -632,9 +630,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_kg.set_defaults(func=_cmd_kg)
 
-    p_send = sub.add_parser(
-        "send", help="send a message and confirm target processing"
-    )
+    p_send = sub.add_parser("send", help="send a message and confirm target processing")
     p_send.add_argument("target", help="target pane id, e.g. %%42")
     p_send.add_argument("text", nargs="+", help="message body")
     p_send.add_argument(
@@ -645,13 +641,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_send.set_defaults(func=_cmd_send)
 
-    p_messages = sub.add_parser(
-        "messages", help="list sent and received messages"
-    )
+    p_messages = sub.add_parser("messages", help="list sent and received messages")
     p_messages.add_argument("-n", type=int, default=20, help="max messages")
-    p_messages.add_argument(
-        "--status", choices=store.MESSAGE_STATUSES, default=None
-    )
+    p_messages.add_argument("--status", choices=store.MESSAGE_STATUSES, default=None)
     p_messages.add_argument("--json", action="store_true", help="JSONL output")
     p_messages.add_argument("--pane", default=None, help=argparse.SUPPRESS)
     p_messages.set_defaults(func=_cmd_messages)

@@ -1,7 +1,3 @@
-"""Adapter for Apple's `container` CLI: composes launch commands and cleans
-up by name. amux never creates these containers itself -- the pane does, by
-running the composed command against its agent's bind-mounted host worktree."""
-
 from __future__ import annotations
 
 import subprocess
@@ -20,7 +16,6 @@ DEFAULT_TIMEOUT_S = 120.0
 
 SUPPORTED_AGENTS = ("claude", "codex")
 
-# Images are generic Linux with node; the agent CLIs arrive via npx at launch.
 AGENT_ARGV: dict[str, tuple[str, ...]] = {
     "claude": (
         "npx",
@@ -36,16 +31,11 @@ AGENT_ARGV: dict[str, tuple[str, ...]] = {
     ),
 }
 
-# A bare `--env KEY` inherits from the pane shell and is silently skipped
-# when unset, so unset credentials cost nothing. IS_SANDBOX=1 is required:
-# the image runs as root, and claude refuses its bypass flag as root.
 AGENT_ENV: dict[str, tuple[str, ...]] = {
     "claude": ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "IS_SANDBOX=1"),
     "codex": ("OPENAI_API_KEY",),
 }
 
-# The mount is host-owned while the container runs as root; without
-# safe.directory git refuses to touch it at all.
 _GIT_SAFE_ENV = (
     "GIT_CONFIG_COUNT=1",
     "GIT_CONFIG_KEY_0=safe.directory",
@@ -220,8 +210,6 @@ def launch_script_path(name: str) -> str:
 
 
 def write_launch_script(name: str, *, workspace: str, task: str, command: str) -> str:
-    # The composed line exceeds a kilobyte, and a freshly created pane's shell
-    # chops and reorders input that long, so the pane types `sh <path>` instead.
     path = Path(launch_script_path(name))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(

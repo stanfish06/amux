@@ -144,7 +144,7 @@ def snapshot(
                     {
                         "pane": p.pane.id,
                         "cwd": p.cwd,
-                        "agent_name": p.agent_name,
+                        "harness_name": p.harness_name,
                         "label": p.label,
                         "name": p.name,
                         "state": p.state,

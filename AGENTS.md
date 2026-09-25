@@ -1,6 +1,6 @@
 - Agents are not allowed to add comments or docstrings
 - Agents are not allowed to change configuration files without permission
-- Agents are not allowed to commit themselves
+- Agents are not allowed to commit themselves if not working in worktrees
 - Agents are not allowed to edit this file
 - Agents must use repo toolchains:
     - `nix` for all dev env setup

@@ -25,10 +25,6 @@ STATE_BY_KIND: dict[EventKind, AgentState] = {
     "exit": "dead",
 }
 
-# Claude Code's Notification hook fires both for prompts that need a human
-# (permissions, trust dialogs) and for its ~60s idle reminder. The reminder
-# means the composer is empty and the agent is idle -- calling it needs-input
-# would strand every parked agent out of reach of `amux send`.
 IDLE_REMINDER_MARKER = "waiting for your input"
 
 
@@ -213,8 +209,6 @@ def resolve_state(
     if alive is False:
         return "dead"
     state = cast("AgentState | None", option or (latest.state if latest else None))
-    # A needs-input option published before idle-reminder classification can
-    # outlive its own event's meaning; the event is the source of truth.
     if state == "needs-input" and latest and latest.state == "idle":
         state = "idle"
     if state is None:
