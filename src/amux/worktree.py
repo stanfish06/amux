@@ -87,19 +87,48 @@ class TaskIntegration:
     path: str
 
 
-def registered_worktrees(repo: str) -> set[str]:
+def _worktree_entries(repo: str) -> list[tuple[str, str]]:
     out = _git(repo, "worktree", "list", "--porcelain", check=False).stdout
-    return {
-        os.path.realpath(line.split(" ", 1)[1])
-        for line in out.splitlines()
-        if line.startswith("worktree ")
-    }
+    entries: list[tuple[str, str]] = []
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            entries.append((line.split(" ", 1)[1], ""))
+        elif line.startswith("branch refs/heads/") and entries:
+            entries[-1] = (entries[-1][0], line.removeprefix("branch refs/heads/"))
+    return entries
 
 
-def setup_task_integration(repo: str, workspace: str, task: str) -> TaskIntegration:
+def registered_worktrees(repo: str) -> set[str]:
+    return {os.path.realpath(path) for path, _ in _worktree_entries(repo)}
+
+
+def checked_out_branches(repo: str) -> dict[str, str]:
+    return {branch: path for path, branch in _worktree_entries(repo) if branch}
+
+
+def resolve_commit(repo: str, ref: str) -> str:
+    proc = _git(repo, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}", check=False)
+    if proc.returncode != 0:
+        raise WorktreeError(f"--base '{ref}' is not a commit in {repo}")
+    return proc.stdout.strip()
+
+
+def check_base(repo: str, workspace: str, task: str, base: str) -> str:
+    commit = resolve_commit(repo, base)
+    branch = integration_branch(workspace, task)
+    if _branch_exists(repo, branch):
+        raise WorktreeError(
+            f"--base only applies to a new task; {branch} already exists"
+        )
+    return commit
+
+
+def setup_task_integration(
+    repo: str, workspace: str, task: str, base: str = ""
+) -> TaskIntegration:
     if not has_commits(repo):
         raise WorktreeError("repo has no commits yet")
-    base = head_ref(repo)
+    base = base or head_ref(repo)
     branch = integration_branch(workspace, task)
     path = f"{task_worktree_root(workspace, task)}/{INTEGRATION_DIR}"
 
@@ -174,8 +203,9 @@ def setup_task(
     workspace: str,
     task: str,
     panes: list[tuple[str, AgentRequest, str]],
+    base: str = "",
 ) -> dict[str, str]:
-    integration = setup_task_integration(repo, workspace, task)
+    integration = setup_task_integration(repo, workspace, task, base)
     try:
         return setup_host_agents(integration, panes)
     except Exception:
@@ -292,6 +322,85 @@ def integrate(
             )
         )
     return results
+
+
+def protected_branches(repo: str) -> set[str]:
+    names = {"main", "master"}
+    origin = _git(
+        repo, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD", check=False
+    ).stdout.strip()
+    if origin:
+        names.add(origin.split("/", 1)[-1])
+    return names
+
+
+def integrate_into(
+    workspace: str, task: str, target: str, pane: str = ""
+) -> MergeResult:
+    rows = store.worktrees_for(workspace, task)
+    repo = next((r["repo"] for r in rows if r["repo"]), "")
+    if not repo:
+        raise WorktreeError(f"no repo recorded for task '{task}' in '{workspace}'")
+    source = integration_branch(workspace, task)
+    if _git(repo, "check-ref-format", "--branch", target, check=False).returncode:
+        raise WorktreeError(f"--into '{target}' is not a valid branch name")
+    holder = checked_out_branches(repo).get(target)
+    if holder:
+        raise WorktreeError(
+            f"--into {target} is checked out at {holder}; merge {source} there"
+        )
+    if target in protected_branches(repo):
+        raise WorktreeError(
+            f"--into {target}: merging into the repo's main line is left to a human"
+        )
+    ref = f"refs/heads/{target}"
+    if not _branch_exists(repo, target):
+        start = next((r["base_ref"] for r in rows if r["base_ref"]), "") or source
+        _git(repo, "update-ref", ref, start, "", check=False)
+    old = _git(repo, "rev-parse", ref).stdout.strip()
+    tip = _git(repo, "rev-parse", f"refs/heads/{source}").stdout.strip()
+    result = MergeResult(pane="", name=task, branch=target, ok=True)
+    if _git(repo, "merge-base", "--is-ancestor", tip, old, check=False).returncode == 0:
+        return result
+    merged = _git(repo, "merge-tree", "--write-tree", old, tip, check=False)
+    if merged.returncode != 0:
+        result.ok = False
+        result.error = merged.stdout.strip() or merged.stderr.strip()
+        return result
+    tree = merged.stdout.splitlines()[0]
+    commit = _git(
+        repo,
+        "commit-tree",
+        tree,
+        "-p",
+        old,
+        "-p",
+        tip,
+        "-m",
+        f"Merge branch '{source}' into {target}",
+    ).stdout.strip()
+    swap = _git(repo, "update-ref", ref, commit, old, check=False)
+    if swap.returncode != 0:
+        result.ok = False
+        result.error = f"{target} moved during the merge; rerun integrate --into"
+        return result
+    result.commits = int(
+        _git(repo, "rev-list", "--count", f"{old}..{tip}").stdout.strip() or "0"
+    )
+    result.shortstat = _git(repo, "diff", "--shortstat", old, commit).stdout.strip()
+    store.add_note(
+        workspace=workspace,
+        task=task,
+        pane=pane,
+        repo=repo,
+        scope="task",
+        kind="note",
+        text=(
+            f"integrate: merged {source} into {target} — "
+            f"{result.commits} commit(s), {result.shortstat or 'no changes'}"
+        ),
+    )
+    return result
 
 
 def remove_task(workspace: str, task: str) -> list[str]:

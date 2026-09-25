@@ -242,9 +242,10 @@ _PANE_FIELDS = (
     "#{window_name}",
     "#{@amux_model}",
     "#{@amux_effort}",
+    "#{@amux_role}",
     _SENTINEL,
 )
-_FREE_TEXT = slice(7, 13)
+_FREE_TEXT = slice(7, 14)
 _DELIM = "\x1f"
 _PANE_FORMAT = _DELIM.join(_PANE_FIELDS)
 
@@ -264,6 +265,7 @@ class PaneFacts:
     task: str = ""
     model: str = ""
     effort: str = ""
+    role: str = ""
 
     def __post_init__(self) -> None:
         if self.alive and self.created is None:
@@ -301,6 +303,7 @@ def _parse_pane(line: str) -> PaneFacts:
             facts.task,
             facts.model,
             facts.effort,
+            facts.role,
         ) = fields[_FREE_TEXT]
     return facts
 
@@ -368,17 +371,22 @@ def pane_context(pane: str, socket: str | None = None) -> PaneContext:
     )
 
 
-def pane_states(socket: str | None = None) -> list[dict]:
+def pane_facts_by_id(socket: str | None = None) -> dict[str, PaneFacts]:
     socket = socket or _amux_socket() or DEFAULT_SOCKET
     listing = _tmux_out(socket, "list-panes", "-a", "-F", _PANE_FORMAT)
-    if not listing:
-        return []
-
     facts_by_pane: dict[str, PaneFacts] = {}
-    for line in listing.splitlines():
+    for line in (listing or "").splitlines():
         facts = _parse_pane(line)
         if facts.alive:
             facts_by_pane[line.split(_DELIM)[0]] = facts
+    return facts_by_pane
+
+
+def pane_states(socket: str | None = None) -> list[dict]:
+    socket = socket or _amux_socket() or DEFAULT_SOCKET
+    facts_by_pane = pane_facts_by_id(socket)
+    if not facts_by_pane:
+        return []
 
     floor = min(
         (f.boundary for f in facts_by_pane.values() if f.boundary is not None),

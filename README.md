@@ -16,6 +16,21 @@ amux monitor -W 160 -T 60                                                       
 ```
 - runs on a dedicated tmux server (socket `amux-root`); attach: `tmux -L amux-root attach -t myproj`
 
+## Roles
+```sh
+cp -r templates/research-campaign/.amux ~/Git/myproj/                                # worker/supervisor/curator/editor/scout
+amux spg myproj t01 -a worker=claude -a supervisor=codex                               # ROLE= loads .amux/roles/ROLE.md as the system prompt
+amux send --role supervisor "plan ready at 3f2a1c9"                                    # address the one agent with that role in your task
+amux integrate myproj t01 --into amux/myproj/record                                    # merge the task into a campaign record branch
+amux spg myproj t02 -a worker=claude -a supervisor=claude --base amux/myproj/record    # start a follow-up from the record
+amux spg myproj t03 -a worker=claude -a supervisor=claude --brief brief.md             # both agents start on brief.md as their first prompt
+amux note --scope workspace --kind knowledge "..."                                     # knowledge-base entry
+```
+- role file: `<repo>/.amux/roles/<role>.md`, else `$XDG_CONFIG_HOME/amux/roles/<role>.md`; TOML frontmatter between `+++` lines (`description`, `model`, `effort`, `subagents`), body is the prompt
+- `subagents` run inside the agent with a fresh context: claude `--agents`, codex `agents.<role>.config_file`
+- host runtime only
+- the role set follows the worker / supervisor / curator / editor harness in P. H. Yoon, J. S. Athukoralage, E. Ameisen, E. Kauderer-Abrams, N. T. Perry, M. G. Durrant, *Autonomous AI agents discover reverse transcriptases with tandem repeat arrays*, Anthropic (2026): one worker/supervisor pair per task, supervisors open follow-up tasks, a curator keeps a shared knowledge base, an editor reviews reports
+
 ## Docker-sandbox
 Prerequisites — Docker's `sbx` CLI:
 ```sh

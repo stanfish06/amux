@@ -17,13 +17,13 @@ DB_PATH = STATE_DIR / "context.db"
 SCHEMA_VERSION = 5
 
 NoteScope = Literal["agent", "task", "workspace"]
-NoteKind = Literal["note", "decision", "finding", "blocker"]
+NoteKind = Literal["note", "decision", "finding", "blocker", "knowledge"]
 WorktreeStatus = Literal["active", "merged", "removed"]
 Runtime = Literal["host", "docker-sandbox", "apple-container"]
 MessageStatus = Literal["pending", "delivered", "undelivered"]
 
 NOTE_SCOPES = ("agent", "task", "workspace")
-NOTE_KINDS = ("note", "decision", "finding", "blocker")
+NOTE_KINDS = ("note", "decision", "finding", "blocker", "knowledge")
 RUNTIMES = ("host", "docker-sandbox", "apple-container")
 MESSAGE_STATUSES = ("pending", "delivered", "undelivered")
 

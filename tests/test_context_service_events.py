@@ -364,6 +364,7 @@ def _pane_line(
             task,
             model,
             effort,
+            "",
             "amux",
         ]
     )

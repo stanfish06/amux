@@ -16,6 +16,7 @@ class AgentRequest:
     agent: str
     model: str = ""
     effort: str = ""
+    role: str = ""
 
 
 AGENT_TUNING: dict[str, dict[str, tuple[str, str]]] = {

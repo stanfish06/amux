@@ -122,8 +122,9 @@ def test_git_identity_env_reads_the_repo_config(git_repo, git_run):
     assert "GIT_COMMITTER_EMAIL=owner@example.test" in env
 
 
-def test_git_identity_env_is_empty_when_unconfigured(git_repo):
-    assert apple_container.git_identity_env(str(git_repo)) == ()
+def test_git_identity_env_is_empty_when_unconfigured(git_factory):
+    repo = git_factory(identity=False)
+    assert apple_container.git_identity_env(str(repo)) == ()
 
 
 def test_launch_command_is_shell_safe(git_repo, git_run):

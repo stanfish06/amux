@@ -31,18 +31,19 @@ commands use the left.
 | Command | Does |
 |---|---|
 | `amux spw <ws> [-p DIR] [-t TASK] [-a SPEC] [-r N] [-c N]` | spawn workspace + its first task grid |
-| `amux spg <ws> <task> [-p DIR] [-a SPEC] [-r N] [-c N]` | add a task grid to an existing workspace |
+| `amux spg <ws> <task> [-p DIR] [-a SPEC] [-r N] [-c N] [--base REF] [--brief FILE]` | add a task grid to an existing workspace |
 | `amux lsw` | list all workspaces, tasks, panes |
 | `amux lsg <ws>` | list task grids in one workspace |
 | `amux monitor [-W COLS] [-T COLS] [-i MS]` | live read-only dashboard of every workspace and agent |
 | `amux kg <ws> <task> [--clean]` | kill one task (--clean also removes its worktrees) |
 | `amux kw <ws> [--clean]` | kill a whole workspace |
 | `amux ctx [--json] [--pane ID]` | this agent's identity + workspace team roster + visible notes |
-| `amux send <pane> <text...> [--timeout S]` | wait for idle, send an attributed message, and confirm a fresh busy event |
+| `amux send <pane> <text...> [--timeout S]` | send an attributed message to an idle or busy agent and confirm it was taken |
+| `amux send --role ROLE [--task T] <text...>` | same, addressed to the one agent with that role in your task (or task T) |
 | `amux messages [-n N] [--status STATUS] [--json]` | list durable messages sent or received by this agent |
-| `amux note <text> [--scope agent\|task\|workspace] [--kind note\|decision\|finding\|blocker]` | publish a scoped context note |
+| `amux note <text> [--scope agent\|task\|workspace] [--kind note\|decision\|finding\|blocker\|knowledge]` | publish a scoped context note |
 | `amux notes [--workspace WS] [--task T] [--scope S] [--kind K] [-n N] [--json]` | list scoped notes |
-| `amux integrate <ws> <task> [--agent NAME...] [--all]` | merge agent worktree branches into the task integration branch |
+| `amux integrate <ws> <task> [--agent NAME...] [--all] [--into BRANCH]` | merge agent worktree branches into the task integration branch, then optionally into BRANCH |
 | `amux event state [--json]` | resolved state of every agent on the server |
 | `amux event tail [-n N] [--pane ID] [--workspace WS] [--task T]` | recent state events as JSONL |
 | `amux event wait <pane> [--timeout S]` | block until a pane goes idle / needs-input / dead |
@@ -146,6 +147,89 @@ Counts and shape interact: **when both `-r` and `-c` are given, exactly one spec
 may omit its count** and it absorbs the remaining panes (`-r 2 -c 2 -a claude:3
 -a codex` → the lone `codex` fills 1). With unknown or partial shape, a missing
 count means 1.
+
+## Roles
+
+A spec may start with `ROLE=`: `-a worker=claude -a supervisor=codex/xhigh`.
+The role is a markdown file whose body becomes that agent's system prompt, so
+two panes running the same CLI can be told to do different jobs.
+
+```sh
+amux spg rt t0062 -a worker=claude -a supervisor=claude --base amux/rt/record
+amux ctx          # you: brave-hawk  worker=claude @r0c0 %7 ...
+amux send --role supervisor "plan ready at 3f2a1c9"
+```
+
+**Where roles come from.** `<repo>/.amux/roles/<role>.md` in the workspace
+repo, then `$XDG_CONFIG_HOME/amux/roles/<role>.md`. The repo copy wins. amux
+ships no built-in roles; `templates/research-campaign/.amux/roles/` has a
+worker / supervisor / curator / editor / scout set to copy.
+
+```
++++
+description = "reviews the paired worker's plan and results"
+model = "opus"
+effort = "xhigh"
+subagents = ["curator"]
++++
+You are the supervisor of one amux task. ...
+```
+
+A role listed under `subagents` is not a pane. It runs inside your session
+with a fresh context each time you call it, and its answer comes back to you.
+Use one for work that should not share your context, such as curating
+results or running a web search. Under codex, spawn it with `spawn_agent`,
+using that `agent_type` and `fork_turns="none"`. A subagent runs in your
+pane, so its `amux note` calls are attributed to you.
+
+A pane spawned with a role or a `--brief` runs unattended, so nobody is there
+to answer a prompt meant for a human. amux therefore launches it with its
+skill pointer in the system prompt instead of a typed bootstrap message.
+
+**claude** gets `--disallowedTools SendFeedback,AskUserQuestion`. Both tools
+open a prompt that waits for a human and swallows any message typed while it
+is up. Ask a teammate with `amux send` instead.
+
+**codex** gets the equivalents, checked live on codex 0.156.1:
+
+- `-c tools.experimental_request_user_input.enabled=false` removes the
+  question selector.
+- `-c check_for_update_on_startup=false` stops the update menu.
+- `--dangerously-bypass-hook-trust` skips the hook review prompt.
+- `-c 'projects={"<worktree>"={trust_level="trusted"}}'` skips the folder-trust
+  prompt.
+
+No setting stops codex's plan-mode "Implement this plan?" prompt, so
+unattended panes stay in the default mode.
+
+A subagent cannot start subagents of its own. A role used as a subagent must
+therefore have no `subagents` key, or the spawn fails before anything starts.
+
+**Refusals, all before anything is spawned.**
+- An unknown role is an error: `no role 'wroker': looked for wroker.md in ...`.
+- A role on a raw command (`worker=bash`) is an error.
+- A lowercase environment assignment such as `x=1 claude` reads as a role, so
+  write `env x=1 claude` for that.
+- Roles run on the host runtime only.
+
+**Record branch.** `integrate --into BRANCH` merges the task integration branch
+into BRANCH. It creates BRANCH at the task's base if missing and never checks
+it out, so BRANCH must not be checked out anywhere. `spg --base BRANCH` starts
+a new task from it. Together they give a campaign one branch that every later
+task can read, which is why follow-up tasks should be spawned with `--base`.
+Merging to the repo's main line is still a human act, so `--into` refuses
+`main`, `master` and `origin`'s default branch.
+
+**Brief.** `spw`/`spg --brief FILE` hands every claude or codex agent in the
+new grid FILE as its first prompt, so the pair starts working without anyone
+messaging it. That matters because `amux send` never crosses workspaces, so a
+brief is the only way to start a grid you spawned in another workspace. amux
+copies the file into the prompts directory at spawn, and later edits to FILE
+do not reach the agents.
+
+**Knowledge.** `amux note --scope workspace --kind knowledge "..."` records a
+reusable fact for later tasks, and `amux notes --kind knowledge` reads the
+knowledge base.
 
 ## Spawning work yourself
 
@@ -506,8 +590,8 @@ Scopes, least-to-most visible: `agent` (only you) → `task` (your task window)
 
 Both reach your teammates, but they cost the receiver very differently. A note
 is *pull*: it lands in the store and a teammate reads it when they next run
-`amux ctx`. `amux send` is *push*: it waits for an idle receiver, types into its
-prompt, and wakes it immediately.
+`amux ctx`. `amux send` is *push*: it types into the receiver's prompt, and the
+receiver acts on it right away, or at its next turn boundary if it is busy.
 
 **Prefer `amux note`** — the default — when you are recording rather than
 asking:
@@ -546,10 +630,23 @@ Do not build an envelope yourself. Amux resolves your live identity and types:
 [amux brave-hawk @r0c1 %7 message #42] auth tests pass; please review src/auth and reply to %7
 ```
 
-The command waits behind any other sender, waits until the target is exactly
-`idle`, revalidates the pane, and submits once. It reports `delivered` only when
-that same pane emits a fresh `busy` event after submission. The default 300
-second timeout covers the whole transaction; use `--timeout S` to change it.
+The command waits behind any other sender, waits while the target is starting
+or waiting on input (`needs-input`), revalidates the pane, and submits once.
+It does not wait for a busy target to finish: claude and codex both take a
+message typed during a turn and act on it at the next turn boundary.
+
+- **Idle target.** `delivered` means that pane emitted a fresh `busy` event
+  after submission, so it started working on the message.
+- **Busy target.** `delivered` with reason `queued` means the target's
+  interface took the text off its input line. Its own busy events cannot
+  prove more, because it was already working.
+- **A prompt meant for a human on screen,** such as a numbered chooser or
+  Claude Code's `1 to review · 2 to send · 0 to dismiss`, means nothing is
+  typed. The send fails as undelivered and says so, because keys typed into
+  such a prompt would answer it.
+
+The default 300 second timeout covers the whole transaction; use
+`--timeout S` to change it.
 
 Failures print `undelivered` to stderr, exit nonzero, and remain queryable:
 
@@ -558,7 +655,7 @@ amux messages --status undelivered
 amux messages --json -n 20
 ```
 
-This evidence is intentionally conservative. If the receiver processed the
+This evidence is intentionally conservative. If an idle receiver processed the
 prompt but its hooks emitted no `busy` event, amux still records `undelivered`.
 Do not bypass that result with raw `tmux send-keys`; report it and inspect
 `amux messages` so the sender remains aware that processing was not confirmed.

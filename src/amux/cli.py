@@ -72,6 +72,8 @@ _RUNTIME_FLAGS = {
     "share_skills": (DOCKER_SANDBOX,),
     "context_port": (DOCKER_SANDBOX,),
     "image": (APPLE_CONTAINER,),
+    "base": (HOST,),
+    "brief": (HOST,),
 }
 
 
@@ -114,7 +116,13 @@ def _resolve_runtime(args) -> runtime.Runtime | None:
     chosen = getattr(args, "runtime", HOST)
     _reject_foreign_flags(args, chosen)
     if chosen == HOST:
-        return None
+        base = getattr(args, "base", None) or ""
+        brief = getattr(args, "brief", None) or ""
+        if not (base or brief):
+            return None
+        return runtime.HostRuntime(
+            base=base, brief=str(Path(brief).resolve()) if brief else ""
+        )
     resources = _resolve_resources(args)
     resources.validate()
     if chosen == APPLE_CONTAINER:
@@ -137,9 +145,10 @@ def _resolve_grid(args) -> tuple[int, int, list[AgentRequest]]:
 
 
 def _spec_text(request: AgentRequest) -> str:
+    role = f"{request.role}=" if request.role else ""
     model = f"@{request.model}" if request.model else ""
     effort = f"/{request.effort}" if request.effort else ""
-    return f"{request.agent}{model}{effort}"
+    return f"{role}{request.agent}{model}{effort}"
 
 
 def _composition(agents: list[AgentRequest]) -> str:
@@ -257,8 +266,17 @@ def _cmd_send(server, args) -> int:
     sender = events.self_pane_id()
     if sender is None:
         raise ValueError("not inside an amux agent pane")
+    if args.role:
+        target = core.pane_for_role(server, sender, args.role, task=args.task)
+        words = args.words
+    else:
+        if args.task:
+            raise ValueError("--task only applies together with --role")
+        target, *words = args.words
+        if not words:
+            raise ValueError("message body is missing: amux send <pane> <text...>")
     result = messages.send(
-        server, sender, args.target, " ".join(args.text), timeout=args.timeout
+        server, sender, target, " ".join(words), timeout=args.timeout
     )
     print(
         messages.result_line(result),
@@ -403,7 +421,25 @@ def _cmd_integrate(server, args) -> int:
         else:
             print(f"CONFLICT {r.name} ({r.branch}): {r.error}", file=sys.stderr)
             rc = 1
-    return rc
+    if not args.into:
+        return rc
+    source = worktree.integration_branch(args.workspace, args.task)
+    if rc:
+        print(
+            f"skipped --into {args.into}: resolve the conflicts first", file=sys.stderr
+        )
+        return rc
+    r = worktree.integrate_into(
+        args.workspace, args.task, args.into, pane=events.self_pane_id() or ""
+    )
+    if not r.ok:
+        print(f"CONFLICT {source} -> {args.into}: {r.error}", file=sys.stderr)
+        return 1
+    print(
+        f"merged {source} into {args.into} — {r.commits} commit(s), "
+        f"{r.shortstat or 'no changes'}"
+    )
+    return 0
 
 
 def _cmd_ctx(server, args) -> int:
@@ -538,13 +574,30 @@ def _add_grid_args(parser: argparse.ArgumentParser):
         "--agent",
         action="append",
         default=None,
-        metavar="AGENT[@MODEL][/EFFORT][:COUNT]",
+        metavar="[ROLE=]AGENT[@MODEL][/EFFORT][:COUNT]",
         help=f"agent spec, repeatable: {'/'.join(core.AGENT_COMMANDS)} or a raw "
         "command, each with an optional model, reasoning effort and pane count "
         "(e.g. -a claude@opus/high:2 -a codex@gpt-5.6-sol/xhigh). Model and "
         "effort are passed to the agent's own CLI unchecked; a model id "
         "containing '/' or ending in ':<digits>' must be launched as a raw "
-        "command instead (-a 'claude --model openai/gpt-5')",
+        "command instead (-a 'claude --model openai/gpt-5'). A ROLE= prefix "
+        "loads .amux/roles/ROLE.md from the workspace repo (or "
+        "$XDG_CONFIG_HOME/amux/roles/ROLE.md) as the agent's system prompt "
+        "(e.g. -a worker=claude -a supervisor=codex)",
+    )
+    parser.add_argument(
+        "--base",
+        default=None,
+        metavar="REF",
+        help="start a new task's integration branch at REF instead of the repo "
+        "HEAD, e.g. a campaign record branch (host runtime only)",
+    )
+    parser.add_argument(
+        "--brief",
+        default=None,
+        metavar="FILE",
+        help="give every agent in the grid FILE as its first prompt, so it starts "
+        "working without a message (host runtime, claude/codex only)",
     )
 
 
@@ -631,8 +684,22 @@ def main(argv: list[str] | None = None) -> int:
     p_kg.set_defaults(func=_cmd_kg)
 
     p_send = sub.add_parser("send", help="send a message and confirm target processing")
-    p_send.add_argument("target", help="target pane id, e.g. %%42")
-    p_send.add_argument("text", nargs="+", help="message body")
+    p_send.add_argument(
+        "words",
+        nargs="+",
+        metavar="[TARGET] TEXT",
+        help="target pane id (e.g. %%42, omitted with --role) and message body",
+    )
+    p_send.add_argument(
+        "--role",
+        default=None,
+        help="send to the one agent with this role in your task instead of a pane id",
+    )
+    p_send.add_argument(
+        "--task",
+        default=None,
+        help="with --role: look in this task of your workspace instead of your own",
+    )
     p_send.add_argument(
         "--timeout",
         type=_message_timeout,
@@ -649,7 +716,7 @@ def main(argv: list[str] | None = None) -> int:
     p_messages.set_defaults(func=_cmd_messages)
 
     p_note = sub.add_parser(
-        "note", help="publish a scoped note (decision/finding/blocker/note)"
+        "note", help="publish a scoped note (decision/finding/blocker/knowledge/note)"
     )
     p_note.add_argument("text", nargs="+", help="note text")
     p_note.add_argument(
@@ -694,6 +761,13 @@ def main(argv: list[str] | None = None) -> int:
         "--all",
         action="store_true",
         help="merge every active worktree of the task (default)",
+    )
+    p_integrate.add_argument(
+        "--into",
+        default=None,
+        metavar="BRANCH",
+        help="then merge the task integration branch into BRANCH (created if "
+        "missing; must not be checked out), e.g. a campaign record branch",
     )
     p_integrate.set_defaults(func=_cmd_integrate)
 
@@ -811,7 +885,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_svc.set_defaults(func=_cmd_context_service)
 
-    args = parser.parse_args(argv)
+    args, extra = parser.parse_known_args(argv)
+    if extra and args.command == "send" and not any(e.startswith("-") for e in extra):
+        args.words += extra
+    elif extra:
+        parser.error(f"unrecognized arguments: {' '.join(extra)}")
     server = core.get_server(args.socket_name)
     try:
         return args.func(server, args)

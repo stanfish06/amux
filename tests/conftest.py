@@ -163,11 +163,16 @@ def git_factory(tmp_path: Path):
     """
     counter = {"n": 0}
 
-    def make(name: str | None = None, *, empty: bool = False) -> Path:
+    def make(
+        name: str | None = None, *, empty: bool = False, identity: bool = True
+    ) -> Path:
         counter["n"] += 1
         repo = tmp_path / "repos" / (name or f"repo{counter['n']}")
         repo.mkdir(parents=True)
         _git(repo, "init", "-q", "-b", "main")
+        if identity:
+            _git(repo, "config", "user.email", "tests@amux.invalid")
+            _git(repo, "config", "user.name", "amux tests")
         if not empty:
             (repo / "README.md").write_text(f"# {repo.name}\n")
             _git(repo, "add", "README.md")

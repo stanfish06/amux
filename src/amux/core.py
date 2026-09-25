@@ -3,12 +3,12 @@ from __future__ import annotations
 import random
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from libtmux import Pane, Server, Session, Window
 from libtmux.constants import PaneDirection
 
-from amux import events, sandbox_hooks, store, worktree
+from amux import events, roles, sandbox_hooks, store, worktree
 from amux.runtime import (
     AGENT_COMMANDS,
     HOST,
@@ -25,6 +25,7 @@ NAME_OPTION = "@amux_name"
 MARK_OPTION = "@amux_pane"
 MODEL_OPTION = "@amux_model"
 EFFORT_OPTION = "@amux_effort"
+ROLE_OPTION = "@amux_role"
 
 ADJECTIVES = [
     "amber",
@@ -154,6 +155,22 @@ def _tune(agent: str, head: str, spec: str) -> AgentRequest:
 
 
 def _parse_agent_spec(spec: str) -> tuple[AgentRequest, int | None]:
+    role, eq, rest = spec.partition("=")
+    if not (eq and roles.ROLE_NAME.fullmatch(role)):
+        return _parse_plain_spec(spec)
+    if not rest:
+        raise ValueError(f"role '{role}' needs an agent, e.g. -a {role}=claude")
+    request, count = _parse_plain_spec(rest)
+    if request.agent not in roles.ROLE_AGENTS:
+        raise ValueError(
+            f"role '{role}' runs on {'/'.join(roles.ROLE_AGENTS)}, not the raw "
+            f"command '{rest}'; if '{role}=' is an environment assignment, "
+            f"write -a 'env {spec}'"
+        )
+    return replace(request, role=role), count
+
+
+def _parse_plain_spec(spec: str) -> tuple[AgentRequest, int | None]:
     head, sep, suffix = spec.rpartition(":")
     count = None
     if not sep or not suffix.isdigit():
@@ -326,6 +343,8 @@ def _discard(what: str, teardown) -> str | None:
 _CARET = re.compile(r"^\s*[>›❯]\s*(?:\S.*)?$")
 
 _CHOOSER = re.compile(r"^\W*[1-9]\.\s+\S", re.MULTILINE)
+_FORM = re.compile(r"\b\d to \w+\s*·\s*\d to \w+")
+_FORM_LINES = 30
 
 BOOTSTRAP_READY_TIMEOUT_S = 45.0
 BOOTSTRAP_POLL_S = 0.5
@@ -339,7 +358,15 @@ def interface_ready(capture: str) -> bool:
     carets = [i for i, line in enumerate(lines) if _CARET.match(line)]
     if not any(i < last for i in carets):
         return False
-    return not chooser_in_view(capture)
+    return not (chooser_in_view(capture) or form_in_view(capture))
+
+
+def form_in_view(capture: str) -> str:
+    for line in capture.splitlines()[-_FORM_LINES:]:
+        match = _FORM.search(line)
+        if match:
+            return match.group(0)
+    return ""
 
 
 def chooser_in_view(capture: str) -> bool:
@@ -351,6 +378,12 @@ def chooser_in_view(capture: str) -> bool:
 
 
 def _not_ready_reason(capture: str, timeout: float) -> str:
+    form = form_in_view(capture)
+    if form:
+        return (
+            f"after {timeout:g}s a prompt meant for a human was still on its "
+            f"screen ('{form}'); nothing was typed, so answer it and resend"
+        )
     if chooser_in_view(capture):
         return (
             f"after {timeout:g}s it was still waiting on a prompt of its own, "
@@ -483,7 +516,7 @@ def _build_grid(
             name = _next_name(agent, resumable, taken)
             taken.add(name)
             pane.cmd("set-option", "-p", "allow-set-title", "off")
-            pane.cmd("select-pane", "-T", f"{name}[{agent}]")
+            pane.cmd("select-pane", "-T", f"{name}[{request.role or agent}]")
             pane.cmd("set-option", "-p", AGENT_OPTION, agent)
             pane.cmd("set-option", "-p", LABEL_OPTION, label)
             pane.cmd("set-option", "-p", NAME_OPTION, name)
@@ -492,6 +525,8 @@ def _build_grid(
                 pane.cmd("set-option", "-p", MODEL_OPTION, request.model)
             if request.effort:
                 pane.cmd("set-option", "-p", EFFORT_OPTION, request.effort)
+            if request.role:
+                pane.cmd("set-option", "-p", ROLE_OPTION, request.role)
             pane.set_hook(
                 "pane-exited", "run-shell 'amux event emit exit --pane #{hook_pane}'"
             )
@@ -503,7 +538,7 @@ def _build_grid(
             launch.pane: launch
             for launch in runtime.prepare(
                 [
-                    PaneSpec(p.id or "", r.agent, name, r.model, r.effort)
+                    PaneSpec(p.id or "", r.agent, name, r.model, r.effort, r.role)
                     for p, r, name in panes_info
                 ],
                 workspace=workspace,
@@ -570,6 +605,7 @@ def spawn_agent_space(
         init_grid_nrows * init_grid_ncols
     )
     runtime = runtime or HostRuntime()
+    agents = roles.resolve(agents, session_path, runtime.kind)
     runtime.preflight(
         agents, workspace=session_name, task=init_task_name, cwd=session_path
     )
@@ -629,6 +665,7 @@ def spawn_agent_grid(
 ) -> AgentGrid:
     agents = agents or [AgentRequest("claude")] * (nrows * ncols)
     runtime = runtime or HostRuntime()
+    agents = roles.resolve(agents, cwd, runtime.kind)
     runtime.preflight(agents, workspace=session.name or "", task=window_name, cwd=cwd)
     window = session.new_window(
         window_name=window_name, start_directory=cwd, attach=False
@@ -711,6 +748,8 @@ def _roster_entry(pane: Pane) -> dict:
         entry["model"] = facts.model
     if facts.effort:
         entry["effort"] = facts.effort
+    if facts.role:
+        entry["role"] = facts.role
     if wt:
         entry["branch"] = wt["branch"]
         entry["worktree"] = wt["path"]
@@ -743,6 +782,31 @@ def missing_state_kinds(row) -> tuple[str, ...]:
     return sandbox_hooks.missing_kinds(
         row["agent"], hooks_supported=mechanism == "hooks"
     )
+
+
+def pane_for_role(
+    server: Server, sender_pane: str, role: str, task: str | None = None
+) -> str:
+    facts = events.pane_facts_by_id(getattr(server, "socket_name", None))
+    sender = facts.get(sender_pane)
+    if sender is None or not sender.workspace:
+        raise ValueError(f"cannot resolve the {ALIAS['session']} of {sender_pane}")
+    task = task or sender.task
+    matches = [
+        pane
+        for pane, f in facts.items()
+        if pane != sender_pane
+        and (f.workspace, f.task, f.role) == (sender.workspace, task, role)
+    ]
+    where = f"{sender.workspace}/{task}"
+    if not matches:
+        raise ValueError(f"no '{role}' {ALIAS['pane']} in {where}")
+    if len(matches) > 1:
+        raise ValueError(
+            f"{len(matches)} '{role}' {ALIAS['pane']}s in {where} "
+            f"({', '.join(matches)}); send to one by pane id"
+        )
+    return matches[0]
 
 
 def build_context(server: Server, pane_id: str) -> dict:

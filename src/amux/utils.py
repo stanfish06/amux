@@ -26,6 +26,10 @@ def _addr(agent: dict) -> str:
     return f"@{agent['label']} {agent['pane']}" if agent["name"] else agent["pane"]
 
 
+def _agent_text(agent: dict) -> str:
+    return f"{agent['role']}={agent['agent']}" if agent.get("role") else agent["agent"]
+
+
 DEGRADED_MARK = "*"
 
 
@@ -38,7 +42,7 @@ def context_to_string(ctx: dict) -> list[str]:
     me = ctx["self"]
     branch = f"  branch:{me.get('branch')}" if me.get("branch") else ""
     lines = [
-        f"you: {me['name']}  {me['agent']} @{me['label']} {me['pane']}  "
+        f"you: {me['name']}  {_agent_text(me)} @{me['label']} {me['pane']}  "
         f"{ALIAS['window']}:{me['task']}  {ALIAS['session']}:{me['workspace']}  "
         f"{state_to_string(me)}{branch}  {me['cwd']}",
     ]
@@ -56,7 +60,7 @@ def context_to_string(ctx: dict) -> list[str]:
     lines.append(f"team @ {me['workspace']}")
     rows = [a for group in ctx["team"] for a in group["agents"]]
     wn = max(len(a["name"] or "-") for a in rows)
-    wa = max(len(a["agent"]) for a in rows)
+    wa = max(len(_agent_text(a)) for a in rows)
     wd = max(len(_addr(a)) for a in rows)
     ws = max(len(state_to_string(a)) for a in rows)
     for i, group in enumerate(ctx["team"]):
@@ -64,7 +68,7 @@ def context_to_string(ctx: dict) -> list[str]:
         lines.append(f"  {group['task']}{own}")
         for a in group["agents"]:
             row = (
-                f"    {(a['name'] or '-'):<{wn}}  {a['agent']:<{wa}}  "
+                f"    {(a['name'] or '-'):<{wn}}  {_agent_text(a):<{wa}}  "
                 f"{_addr(a):<{wd}}  {state_to_string(a):<{ws}}"
             )
             if a["pane"] == me["pane"]:

@@ -123,6 +123,7 @@ def _pane_line(**over) -> str:
         "window_name": "t0",
         "model": "",
         "effort": "",
+        "role": "",
     }
     values.update(over)
     return events._DELIM.join([*values.values(), events._SENTINEL])  # noqa: SLF001
@@ -138,6 +139,10 @@ def test_a_pane_row_parses_its_tuning():
         "ws",
         "t0",
     )
+
+
+def test_a_pane_row_parses_its_role():
+    assert events._parse_pane(_pane_line(role="worker")).role == "worker"  # noqa: SLF001
 
 
 def test_an_untuned_pane_row_parses_to_empty_strings():

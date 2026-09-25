@@ -3,9 +3,10 @@ from __future__ import annotations
 import shlex
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Protocol
 
-from amux import apple_container, sandbox, sandbox_bootstrap, store, worktree
+from amux import apple_container, roles, sandbox, sandbox_bootstrap, store, worktree
 from amux.shared import (
     DEFAULT_SOCKET,
     AgentRequest,
@@ -50,10 +51,13 @@ class PaneSpec:
     name: str
     model: str = ""
     effort: str = ""
+    role: str = ""
 
     @property
     def request(self) -> AgentRequest:
-        return AgentRequest(agent=self.agent, model=self.model, effort=self.effort)
+        return AgentRequest(
+            agent=self.agent, model=self.model, effort=self.effort, role=self.role
+        )
 
 
 def install_host_skills(
@@ -137,6 +141,11 @@ class Runtime(Protocol):
 class HostRuntime:
     kind = HOST
 
+    def __init__(self, base: str = "", brief: str = ""):
+        self.base = base
+        self.brief = brief
+        self.base_commit = ""
+
     def preflight(
         self,
         agents: list[AgentRequest],
@@ -144,7 +153,22 @@ class HostRuntime:
         workspace: str | None,
         task: str | None,
         cwd: str | None,
-    ) -> None: ...
+    ) -> None:
+        if self.brief:
+            if not Path(self.brief).is_file():
+                raise ValueError(f"--brief {self.brief} is not a file")
+            raw = sorted({a.agent for a in agents if a.agent not in AGENT_COMMANDS})
+            if raw:
+                raise ValueError(
+                    f"--brief needs {'/'.join(AGENT_COMMANDS)} agents; "
+                    f"a raw command takes no initial prompt: {', '.join(raw)}"
+                )
+        if not self.base:
+            return
+        repo = worktree.repo_root(cwd) if cwd else None
+        if not (repo and workspace and task):
+            raise ValueError("--base needs a git repo workspace directory")
+        self.base_commit = worktree.check_base(repo, workspace, task, self.base)
 
     def resumable_names(
         self, *, workspace: str | None, task: str | None, cwd: str | None
@@ -165,12 +189,39 @@ class HostRuntime:
     ) -> list[Launch]:
         paths = self._worktrees(panes, workspace=workspace, task=task, cwd=cwd)
         installed = install_host_skills(panes)
+        loaded = roles.load_roles(
+            {spec.role for spec in panes if spec.role}, roles.project_root(cwd)
+        )
+        brief = ""
+        if self.brief:
+            copy = roles.prompt_dir(workspace, task) / "brief.md"
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            copy.write_text(Path(self.brief).read_text())
+            brief = f" -- {roles.cat_arg('', copy)}"
         launches = []
         for spec in panes:
-            command = render_command(
-                AGENT_COMMANDS.get(spec.agent, spec.agent),
-                (*render_tuning(spec.request), *skill_pointer_args(spec.agent)),
-            )
+            base = AGENT_COMMANDS.get(spec.agent, spec.agent)
+            tuning = render_tuning(spec.request)
+            unattended = bool(spec.role or brief) and spec.agent in AGENT_COMMANDS
+            if unattended:
+                role = loaded.get(spec.role)
+                launch = roles.render_launch(
+                    spec.agent,
+                    role,
+                    [loaded[s] for s in role.subagents] if role else [],
+                    spec.name,
+                    workspace=workspace,
+                    task=task,
+                    trusted_dir=paths.get(spec.pane) or cwd,
+                )
+                command = render_command(base, (*tuning, *launch.args))
+                if launch.shell:
+                    command += f" {launch.shell}"
+                command += brief
+            else:
+                command = render_command(
+                    base, (*tuning, *skill_pointer_args(spec.agent))
+                )
             path = paths.get(spec.pane)
             keys = []
             if path:
@@ -182,15 +233,17 @@ class HostRuntime:
                     pane=spec.pane,
                     cwd=path or cwd or "",
                     keys=tuple(keys),
-                    bootstrap=skill_bootstrap_message(
+                    bootstrap=""
+                    if unattended
+                    else skill_bootstrap_message(
                         spec.agent, host_skill_path(installed, spec.agent)
                     ),
                 )
             )
         return launches
 
-    @staticmethod
     def _worktrees(
+        self,
         panes: list[PaneSpec],
         *,
         workspace: str | None,
@@ -215,6 +268,7 @@ class HostRuntime:
                 workspace,
                 task,
                 [(spec.pane, spec.request, spec.name) for spec in panes],
+                base=self.base_commit,
             )
         except worktree.WorktreeError as exc:
             print(f"amux: worktree isolation unavailable: {exc}")

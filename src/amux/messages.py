@@ -150,7 +150,13 @@ def _assert_same_target(server, target: Actor, db_path: Path | None) -> None:
         )
 
 
-def _wait_until_idle(
+SENDABLE_STATES = ("idle", "busy")
+QUEUED_REASON = (
+    "accepted while the target was busy; it reads the message at its next turn boundary"
+)
+
+
+def _wait_until_sendable(
     target: Actor,
     socket: str,
     deadline: float,
@@ -158,7 +164,7 @@ def _wait_until_idle(
 ) -> None:
     while True:
         state = events.current_state(target.pane, socket)
-        if state == "idle":
+        if state in SENDABLE_STATES:
             return
         if state in ("dead", "stopped") or state is None:
             raise DeliveryFailure(
@@ -167,21 +173,21 @@ def _wait_until_idle(
         remaining = _remaining(
             deadline,
             clock,
-            "idle_timeout",
-            "target did not become idle before the delivery deadline",
+            "not_ready_timeout",
+            "target was still starting or waiting on input at the delivery deadline",
         )
         state = events.wait(
             target.pane,
-            for_states=("idle", "stopped", "dead"),
+            for_states=(*SENDABLE_STATES, "stopped", "dead"),
             timeout=remaining,
             socket=socket,
         )
         if state is None:
             raise DeliveryFailure(
-                "idle_timeout",
-                "target did not become idle before the delivery deadline",
+                "not_ready_timeout",
+                "target was still starting or waiting on input at the delivery deadline",
             )
-        if state == "idle":
+        if state in SENDABLE_STATES:
             return
         raise DeliveryFailure(
             "target_dead", "target stopped or disappeared before submission"
@@ -295,21 +301,24 @@ def send(
             clock=clock,
             sleep=sleep,
         ):
-            _wait_until_idle(target, socket, deadline, clock)
+            _wait_until_sendable(target, socket, deadline, clock)
             _assert_same_target(server, target, db_path)
-            _wait_until_idle(target, socket, deadline, clock)
+            _wait_until_sendable(target, socket, deadline, clock)
             cursor = events.event_cursor(target.pane, target.created, db_path)
             pane = _pane_by_id(server, target.pane)
             submitted_ts: float | None = None
+            busy_at_submit = False
 
             def mark_submitted() -> None:
-                nonlocal submitted_ts
+                nonlocal submitted_ts, busy_at_submit
                 _assert_same_target(server, target, db_path)
-                if events.current_state(target.pane, socket) != "idle":
+                state = events.current_state(target.pane, socket)
+                if state not in SENDABLE_STATES:
                     raise DeliveryFailure(
-                        "target_not_idle",
-                        "target was no longer idle immediately before submission",
+                        "target_not_ready",
+                        f"target was {state or 'gone'} immediately before submission",
                     )
+                busy_at_submit = state == "busy"
                 submitted_ts = wall()
 
             try:
@@ -340,8 +349,11 @@ def send(
                 raise DeliveryFailure("submission_failed", problem)
             if submitted_ts is None:
                 raise DeliveryFailure(
-                    "submission_failed", "interface submission boundary was not recorded"
+                    "submission_failed",
+                    "interface submission boundary was not recorded",
                 )
+            if busy_at_submit:
+                return finish("delivered", "queued", QUEUED_REASON, exit_code=0)
             state = events.wait_for_fresh_state(
                 target.pane,
                 cursor,

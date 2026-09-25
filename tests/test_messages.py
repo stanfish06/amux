@@ -61,10 +61,10 @@ def send(delivery, text: str = "review") -> messages.DeliveryResult:
     )
 
 
-def test_busy_target_is_waited_for_before_any_text_is_sent(
+def test_a_target_waiting_on_input_is_waited_for_before_any_text_is_sent(
     delivery, monkeypatch
 ) -> None:
-    states = iter(["busy", "idle", "idle"])
+    states = iter(["needs-input", "idle", "idle"])
     monkeypatch.setattr(
         events, "current_state", lambda *args, **kwargs: next(states)
     )
@@ -78,6 +78,25 @@ def test_busy_target_is_waited_for_before_any_text_is_sent(
 
     assert result.status == "delivered"
     assert delivery.timeline == ["idle", "submit"]
+
+
+def test_a_busy_target_gets_the_text_and_it_is_recorded_as_queued(
+    delivery, monkeypatch
+) -> None:
+    monkeypatch.setattr(events, "current_state", lambda *args, **kwargs: "busy")
+
+    def no_fresh_wait(*args, **kwargs):
+        raise AssertionError("a busy target's events cannot confirm this message")
+
+    monkeypatch.setattr(events, "wait_for_fresh_state", no_fresh_wait)
+
+    result = send(delivery)
+
+    row = store.message_by_id(result.message_id)
+    assert (result.status, result.reason_code) == ("delivered", "queued")
+    assert result.exit_code == 0
+    assert row["status"] == "delivered" and row["submitted_ts"] is not None
+    assert delivery.timeline == ["submit"]
 
 
 def test_fresh_busy_event_marks_the_message_delivered(delivery) -> None:
@@ -105,10 +124,10 @@ def test_submission_boundary_is_passed_to_fresh_event_wait(
     assert seen == [row["submitted_ts"]]
 
 
-def test_target_becoming_busy_at_submission_boundary_is_not_typed(
+def test_target_waiting_on_input_at_submission_boundary_is_not_typed(
     delivery, monkeypatch
 ) -> None:
-    states = iter(["idle", "idle", "busy"])
+    states = iter(["idle", "idle", "needs-input"])
     monkeypatch.setattr(
         events, "current_state", lambda *args, **kwargs: next(states)
     )
@@ -118,7 +137,7 @@ def test_target_becoming_busy_at_submission_boundary_is_not_typed(
     row = store.message_by_id(result.message_id)
     assert (result.status, result.reason_code) == (
         "undelivered",
-        "target_not_idle",
+        "target_not_ready",
     )
     assert row["submitted_ts"] is None
     assert "submit" not in delivery.timeline
@@ -393,3 +412,28 @@ def test_result_line_tells_the_sender_delivery_status() -> None:
     assert messages.result_line(failed) == (
         "message #43 undelivered to blue-owl (%2): no fresh busy event"
     )
+
+
+FEEDBACK_FORM_SCREEN = """\
+╭──────────────────────────────────────────────╮
+│ - What happened: message #16 undelivered      │
+│ 1 to review · 2 to send · 0 to dismiss        │
+╰──────────────────────────────────────────────╯
+────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+"""
+
+
+def test_a_form_waiting_for_a_human_keeps_the_interface_not_ready() -> None:
+    assert not core.interface_ready(FEEDBACK_FORM_SCREEN)
+    reason = core._not_ready_reason(FEEDBACK_FORM_SCREEN, 5)  # noqa: SLF001
+    assert "'1 to review · 2 to send'" in reason and "nothing was typed" in reason
+
+
+def test_the_same_screen_without_the_form_is_ready() -> None:
+    plain = FEEDBACK_FORM_SCREEN.replace(
+        "│ 1 to review · 2 to send · 0 to dismiss        │\n", ""
+    )
+    assert core.interface_ready(plain)

@@ -166,3 +166,56 @@ def test_messages_human_output_names_direction_and_peer(
     assert lines[1] == (
         " 43  undelivered  from  gold-moth    please check (target died)"
     )
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["send", "%2", "--timeout", "120", "review", "this"],
+        ["send", "--timeout", "120", "%2", "review", "this"],
+        ["send", "%2", "review", "--timeout", "120", "this"],
+    ],
+)
+def test_send_accepts_options_anywhere(host, monkeypatch, argv) -> None:
+    calls = []
+    monkeypatch.setattr(
+        messages,
+        "send",
+        lambda *args, **kwargs: (
+            calls.append((args, kwargs))
+            or messages.DeliveryResult(42, "delivered", "%2", "blue-owl")
+        ),
+    )
+    assert cli.main(argv) == 0
+    assert calls[0][0] == (host, "%1", "%2", "review this")
+    assert calls[0][1]["timeout"] == 120
+
+
+def test_send_by_role_resolves_the_target(host, monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        core, "pane_for_role", lambda server, sender, role, task=None: f"{role}:{task}"
+    )
+    monkeypatch.setattr(
+        messages,
+        "send",
+        lambda *args, **kwargs: (
+            calls.append(args)
+            or messages.DeliveryResult(42, "delivered", "%2", "blue-owl")
+        ),
+    )
+    assert (
+        cli.main(["send", "--role", "supervisor", "--timeout", "60", "plan", "ready"])
+        == 0
+    )
+    assert calls[0] == (host, "%1", "supervisor:None", "plan ready")
+
+
+def test_send_task_without_role_is_an_error(host, capsys) -> None:
+    assert cli.main(["send", "--task", "t1", "%2", "hi"]) == 1
+    assert "--task only applies together with --role" in capsys.readouterr().err
+
+
+def test_other_commands_still_reject_unknown_words(host) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["lsw", "stray"])

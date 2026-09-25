@@ -45,7 +45,7 @@
       "-p",
       "-t",
       "%1",
-      "#{pane_id}\u001f#{@amux_pane}\u001f#{session_created}\u001f#{@amux_state}\u001f#{@amux_name}\u001f#{@amux_label}\u001f#{pane_current_command}\u001f#{@amux_agent}\u001f#{pane_current_path}\u001f#{session_name}\u001f#{window_name}\u001f#{@amux_model}\u001f#{@amux_effort}\u001famux"
+      "#{pane_id}\u001f#{@amux_pane}\u001f#{session_created}\u001f#{@amux_state}\u001f#{@amux_name}\u001f#{@amux_label}\u001f#{pane_current_command}\u001f#{@amux_agent}\u001f#{pane_current_path}\u001f#{session_name}\u001f#{window_name}\u001f#{@amux_model}\u001f#{@amux_effort}\u001f#{@amux_role}\u001famux"
     ],
     [
       "tmux",
@@ -71,7 +71,7 @@
       "-p",
       "-t",
       "%3",
-      "#{pane_id}\u001f#{@amux_pane}\u001f#{session_created}\u001f#{@amux_state}\u001f#{@amux_name}\u001f#{@amux_label}\u001f#{pane_current_command}\u001f#{@amux_agent}\u001f#{pane_current_path}\u001f#{session_name}\u001f#{window_name}\u001f#{@amux_model}\u001f#{@amux_effort}\u001famux"
+      "#{pane_id}\u001f#{@amux_pane}\u001f#{session_created}\u001f#{@amux_state}\u001f#{@amux_name}\u001f#{@amux_label}\u001f#{pane_current_command}\u001f#{@amux_agent}\u001f#{pane_current_path}\u001f#{session_name}\u001f#{window_name}\u001f#{@amux_model}\u001f#{@amux_effort}\u001f#{@amux_role}\u001famux"
     ],
     [
       "tmux",
@@ -97,7 +97,7 @@
       "-p",
       "-t",
       "%2",
-      "#{pane_id}\u001f#{@amux_pane}\u001f#{session_created}\u001f#{@amux_state}\u001f#{@amux_name}\u001f#{@amux_label}\u001f#{pane_current_command}\u001f#{@amux_agent}\u001f#{pane_current_path}\u001f#{session_name}\u001f#{window_name}\u001f#{@amux_model}\u001f#{@amux_effort}\u001famux"
+      "#{pane_id}\u001f#{@amux_pane}\u001f#{session_created}\u001f#{@amux_state}\u001f#{@amux_name}\u001f#{@amux_label}\u001f#{pane_current_command}\u001f#{@amux_agent}\u001f#{pane_current_path}\u001f#{session_name}\u001f#{window_name}\u001f#{@amux_model}\u001f#{@amux_effort}\u001f#{@amux_role}\u001famux"
     ],
     [
       "tmux",
@@ -123,7 +123,7 @@
       "-p",
       "-t",
       "%4",
-      "#{pane_id}\u001f#{@amux_pane}\u001f#{session_created}\u001f#{@amux_state}\u001f#{@amux_name}\u001f#{@amux_label}\u001f#{pane_current_command}\u001f#{@amux_agent}\u001f#{pane_current_path}\u001f#{session_name}\u001f#{window_name}\u001f#{@amux_model}\u001f#{@amux_effort}\u001famux"
+      "#{pane_id}\u001f#{@amux_pane}\u001f#{session_created}\u001f#{@amux_state}\u001f#{@amux_name}\u001f#{@amux_label}\u001f#{pane_current_command}\u001f#{@amux_agent}\u001f#{pane_current_path}\u001f#{session_name}\u001f#{window_name}\u001f#{@amux_model}\u001f#{@amux_effort}\u001f#{@amux_role}\u001famux"
     ],
     [
       "tmux",
@@ -147,8 +147,8 @@
     "cwd": "<REPO>",
     "panes": [
       {
-        "agent_name": "claude",
         "cwd": "<STATE>/worktrees/ws/t0/zesty-tiger",
+        "harness_name": "claude",
         "is_agent": true,
         "label": "r0c0",
         "name": "zesty-tiger",
@@ -156,8 +156,8 @@
         "state": "starting"
       },
       {
-        "agent_name": "codex",
         "cwd": "<STATE>/worktrees/ws/t0/proud-owl",
+        "harness_name": "codex",
         "is_agent": true,
         "label": "r0c1",
         "name": "proud-owl",
@@ -165,8 +165,8 @@
         "state": "starting"
       },
       {
-        "agent_name": "echo hello",
         "cwd": "<STATE>/worktrees/ws/t0/clever-zebra",
+        "harness_name": "echo hello",
         "is_agent": false,
         "label": "r1c0",
         "name": "clever-zebra",
@@ -174,8 +174,8 @@
         "state": "starting"
       },
       {
-        "agent_name": "claude",
         "cwd": "<STATE>/worktrees/ws/t0/amber-lynx",
+        "harness_name": "claude",
         "is_agent": true,
         "label": "r1c1",
         "name": "amber-lynx",

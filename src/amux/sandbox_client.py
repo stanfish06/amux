@@ -18,7 +18,7 @@ CONFIG_ENV = "AMUX_CONTEXT_CONFIG"
 
 ALIAS = {"session": "workspace", "window": "task", "pane": "agent"}
 NOTE_SCOPES = ("agent", "task", "workspace")
-NOTE_KINDS = ("note", "decision", "finding", "blocker")
+NOTE_KINDS = ("note", "decision", "finding", "blocker", "knowledge")
 EVENT_KINDS = ("busy", "exit", "notify", "spawn", "stop")
 WAIT_STATES = ("idle", "needs-input", "dead")
 MESSAGE_STATUSES = ("pending", "delivered", "undelivered")
