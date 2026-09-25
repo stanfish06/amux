@@ -1,5 +1,5 @@
 {
-  description = "Agent orchestration on top of tmux: discovery, messaging, grids";
+  description = "Dev shell";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
@@ -33,12 +33,9 @@
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
           packages = with pkgs; [
-            python312
-            pipenv
+            python313
             tmux
           ];
-          PIPENV_PYTHON = "${pkgs.python312}/bin/python3.12";
-          PIPENV_VENV_IN_PROJECT = "1";
         };
       });
     };

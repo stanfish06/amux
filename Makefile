@@ -17,25 +17,6 @@ VENV := $(CURDIR)/.venv
 dev:
 	uv sync --extra dev
 
-# The sandbox shim must ship as DATA, not just as a compiled module. PyInstaller
-# puts amux's modules in the archive inside the executable and no .py on disk, but
-# `docker-sandbox` spawning copies sandbox_client.py into the microVM as a file --
-# so without this a packaged amux dies at shim installation on every sandbox spawn.
-# Affects --onefile and --onedir alike, so both get it from PYINSTALLER_MODE.
-#
-# Two things this line cannot get wrong quietly:
-#   $(CURDIR) is required. --add-data resolves a relative source against
-#   --specpath, which is `build` below, so the relative form fails the build with
-#   "Unable to find build/src/amux/sandbox_client.py".
-#   The `:amux` destination must stay. It is what makes the unpacked file land
-#   exactly where sandbox_client.__file__ points; changing it re-breaks shim
-#   installation with no build error at all.
-#
-# skills/amux/SKILL.md ships for the same reason and with the same two hazards:
-# bootstrap copies it into every sandbox as a file, and a packaged amux has no
-# repository root to find it in. It must land beside the package as
-# skills/amux/SKILL.md, which is the first place `sandbox_bootstrap.skill_source`
-# looks; the second is the repo root, which only exists in a checkout.
 build: dev
 	env -u PYTHONPATH $(VENV)/bin/pyinstaller $(PYINSTALLER_MODE) --name amux \
 		--paths src \
@@ -49,17 +30,6 @@ install: build install_skills
 	ln -sfn $(AMUX_BIN) $(BIN_DIR)/amux
 	@echo "linked $(BIN_DIR)/amux -> $(AMUX_BIN)"
 
-# This link is TRANSIENT. Spawning any grid installs amux's own skill as a real
-# file at the same path, so the next `amux spw` or `amux spg` replaces the link
-# with a frozen copy and edits to this checkout stop reaching newly spawned
-# agents. Re-run this target to restore the live link; that is the whole
-# recovery, and it is only true because of the `rm -rf` below.
-#
-# The rm is load-bearing, not tidiness. `ln -sfn` replaces a symlink to a
-# directory, but it does NOTHING when the destination IS a real directory -- and
-# after the first spawn, that is what the destination always is. It would link
-# into it instead, creating a nested `$$dir/$$skill/$$skill`, exit 0, and report
-# success while every agent kept reading the frozen copy.
 install_skills:
 	@for dir in $(SKILL_DIRS); do \
 		mkdir -p $$dir; \
@@ -70,8 +40,6 @@ install_skills:
 		done; \
 	done
 
-# -r for the same reason: after a spawn the destination is a real directory, and
-# `rm -f` on a directory removes nothing while the loop still says "removed".
 uninstall:
 	rm -f $(BIN_DIR)/amux
 	@for dir in $(SKILL_DIRS); do \
@@ -80,27 +48,3 @@ uninstall:
 			echo "removed $$dir/$$skill"; \
 		done; \
 	done
-
-shell: sync_pylock
-	pipenv shell
-
-start_fresh: clean_full
-	pipenv pylock --from-pyproject
-
-clean_full: archive
-	rm -f \
-		Pipfile \
-		Pipfile.lock \
-		pylock.toml
-	pipenv uninstall --all
-
-archive:
-	[ -f "pylock.toml" ] && cp -f pylock.toml pylock.toml.old || true
-	[ -f "Pipfile" ] && cp -f Pipfile Pipfile.old || true
-	[ -f "Pipfile.lock" ] && cp -f Pipfile.lock Pipfile.lock.old || true
-
-sync_pylock:
-	rm -f Pipfile.lock
-	pipenv uninstall --all
-	pipenv sync
-	pipenv run pip install -e ".[dev]"
